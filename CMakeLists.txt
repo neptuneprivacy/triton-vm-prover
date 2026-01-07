@@ -582,7 +582,8 @@ if(ENABLE_CUDA)
     )
 
     # Debug tool: compare decoded proof streams (Rust vs GPU)
-    add_executable(compare_proof_streams tools/compare_proof_streams.cpp)
+    # Commented out: source file does not exist
+    # add_executable(compare_proof_streams tools/compare_proof_streams.cpp)
     
     # Trace dump tool: dump AET and domain data for comparison with Rust
     add_executable(dump_trace src/tools/dump_trace.cpp)
@@ -590,16 +591,18 @@ if(ENABLE_CUDA)
     target_include_directories(dump_trace PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    target_link_libraries(compare_proof_streams triton_vm CUDA::cudart_static)
-    target_include_directories(compare_proof_streams PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
+    # target_link_libraries(compare_proof_streams triton_vm CUDA::cudart_static)
+    # target_include_directories(compare_proof_streams PRIVATE
+    #     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # )
 
-    add_executable(print_proof_item_encoding_sizes tools/print_proof_item_encoding_sizes.cpp)
-    target_link_libraries(print_proof_item_encoding_sizes triton_vm CUDA::cudart_static)
-    target_include_directories(print_proof_item_encoding_sizes PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
+    # Debug tool: print proof item encoding sizes
+    # Commented out: source file does not exist
+    # add_executable(print_proof_item_encoding_sizes tools/print_proof_item_encoding_sizes.cpp)
+    # target_link_libraries(print_proof_item_encoding_sizes triton_vm CUDA::cudart_static)
+    # target_include_directories(print_proof_item_encoding_sizes PRIVATE
+    #     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # )
     
     # ============================================================================
     # GPU Prover Server (Neptune integration)
