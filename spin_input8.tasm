@@ -1,0 +1,34 @@
+read_io 1
+  hint log2_padded_height: u32 = stack[0]
+
+// only log₂(padded heights) in range 8..32 are supported
+dup 0 push 8 swap 1 lt push 0 eq assert error_id 0  // assert (input < 8) == 0, i.e., input >= 8
+dup 0 push 32 lt push 0 eq assert error_id 1      // assert (32 < input) == 0, i.e., input <= 32
+
+// compute number of spin-loop iterations to get to requested
+// padded height
+// Scale exponentially: input 8 -> 0 iterations, input 16 -> many iterations
+// For testing with input 8: generate enough iterations to test Hash table growth
+addi -8
+push 2 pow
+addi -1
+push 100 mul
+push 50 add  // Add 50 to ensure enough iterations for testing (input 8 -> 50 iterations)
+  hint num_iterations = stack[0]
+
+// do the spin 🌀
+sponge_init
+call spin
+halt
+
+// BEFORE: _ num_iterations
+// AFTER:  _ 0
+spin:
+  sponge_squeeze                // _ n [_; 10]
+  write_mem 5 write_mem 4       // _ n [_; 1]
+  
+  split
+  pop 2                         // _ n
+  
+  dup 0 push 0 eq skiz return
+  addi -1 recurse

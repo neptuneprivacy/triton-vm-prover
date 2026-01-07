@@ -1,0 +1,76 @@
+# Build directories
+build/
+cmake-build-*/
+_build/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Compiled binaries and libraries
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.bin
+
+# Test executables
+triton_vm_tests
+*_tests
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Object files
+*.o
+*.obj
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Generated files
+*.gcda
+*.gcno
+*.gcov
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Rust (keep FFI target directories, but ignore incremental builds)
+rust/*/target/**/incremental/
+rust/*/target/**/*.d
+rust/*/target/**/*.rmeta
+rust/*/target/**/*.rlib
+
+# OS files
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Backup files
+*.bak
+*.backup
+*~

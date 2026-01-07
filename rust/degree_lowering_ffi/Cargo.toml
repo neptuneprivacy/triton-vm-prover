@@ -1,0 +1,14 @@
+[package]
+name = "degree_lowering_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+triton-vm = { path = "../../../triton-vm-1.0.0/triton-vm" }
+ndarray = { version = "0.16.1", features = ["rayon", "serde"] }
+strum = { version = "0.26", features = ["derive"] }
+triton-air = { path = "../../../triton-vm-1.0.0/triton-air" }
+twenty-first = "1.0.0"
