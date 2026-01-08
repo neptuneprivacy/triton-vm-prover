@@ -117,6 +117,34 @@ export TRITON_VM_PROVER_SOCKET=127.0.0.1:5555
 
 This tells the external tool to connect to the GPU prover server running on the specified address instead of using CPU-based proof generation. The socket address must match the `--tcp` argument used when starting the prover server.
 
+## Performance Optimization
+
+To optimize performance, you can set the following environment variables:
+
+```bash
+export TRITON_OMP_UPLOAD=1
+export TRITON_OMP_INIT=0
+export TRITON_OMP_QUOTIENT=1
+export TRITON_OMP_PROCESSOR=1
+export OMP_NUM_THREADS=96
+export TRITON_AUX_CPU=1
+export TVM_USE_TASKFLOW=1
+export TVM_USE_TBB=1
+export TRITON_GPU_DEGREE_LOWERING=1
+export TRITON_GPU_U32=1
+export TVM_USE_RUST_TRACE=1
+export TRITON_MULTI_GPU=0
+```
+
+These variables control:
+- OpenMP parallelization settings (`TRITON_OMP_*`, `OMP_NUM_THREADS`)
+- CPU/GPU execution modes (`TRITON_AUX_CPU`, `TRITON_GPU_*`)
+- Task scheduling libraries (`TVM_USE_TASKFLOW`, `TVM_USE_TBB`)
+- Multi-GPU support (`TRITON_MULTI_GPU`)
+- Rust trace integration (`TVM_USE_RUST_TRACE`)
+
+Adjust `OMP_NUM_THREADS` based on your CPU core count for optimal performance.
+
 ## License
 
 Apache 2.0 (matching Triton VM)
