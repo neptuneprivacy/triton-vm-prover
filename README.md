@@ -107,6 +107,16 @@ Server options:
 - `--unix <PATH>` - Use Unix socket instead of TCP
 - `--max-jobs <N>` - Maximum concurrent jobs (default: matches num-gpus)
 
+### Forwarding Proof Generation to GPU Prover
+
+To forward proof generation requests from external tools (such as xnt-core) to the GPU prover server, set the `TRITON_VM_PROVER_SOCKET` environment variable to match the server's socket address:
+
+```bash
+export TRITON_VM_PROVER_SOCKET=127.0.0.1:5555
+```
+
+This tells the external tool to connect to the GPU prover server running on the specified address instead of using CPU-based proof generation. The socket address must match the `--tcp` argument used when starting the prover server.
+
 ## License
 
 Apache 2.0 (matching Triton VM)
