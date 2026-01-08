@@ -58,11 +58,8 @@ venv/
 ENV/
 .venv
 
-# Rust (keep FFI target directories, but ignore incremental builds)
-rust/*/target/**/incremental/
-rust/*/target/**/*.d
-rust/*/target/**/*.rmeta
-rust/*/target/**/*.rlib
+# Rust target directories
+rust/*/target/
 
 # OS files
 Thumbs.db
