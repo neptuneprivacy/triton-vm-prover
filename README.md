@@ -87,6 +87,26 @@ The script will automatically:
 - Run the prover with the specified program and input
 - Verify the proof against the Rust reference implementation
 
+## Running the Prover Server
+
+To run the Triton VM prover server with GPU support:
+
+```bash
+./run_rust_prover_server_gpu.sh \
+    --tcp 127.0.0.1:5555 \
+    --num-gpus 2 \
+    --omp-threads 60 \
+    --omp-init 0
+```
+
+Server options:
+- `--tcp <ADDR>` - TCP address to listen on (default: 127.0.0.1:5555)
+- `--num-gpus <N>` - Number of GPU devices to use
+- `--omp-threads <N>` - OpenMP thread count
+- `--omp-init <0|1>` - Enable/disable OpenMP init parallelization (0 = disabled, 1 = enabled)
+- `--unix <PATH>` - Use Unix socket instead of TCP
+- `--max-jobs <N>` - Maximum concurrent jobs (default: matches num-gpus)
+
 ## License
 
 Apache 2.0 (matching Triton VM)
