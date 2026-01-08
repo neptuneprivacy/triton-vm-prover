@@ -67,6 +67,26 @@ triton-vm-prover/
 - Hybrid CPU/GPU and full GPU execution modes
 - Multi-GPU support for large proofs
 
+## Building and Usage
+
+The project includes a build script that automatically configures and builds the prover. To build and run:
+
+```bash
+./run_gpu_prover.sh spin_input21.tasm 19 --multi-gpu --cpu-aux --gpu-count=2
+```
+
+To clean and rebuild from scratch:
+
+```bash
+./run_gpu_prover.sh spin_input21.tasm 19 --multi-gpu --cpu-aux --gpu-count=2 --clean
+```
+
+The script will automatically:
+- Configure CMake with CUDA support
+- Build all necessary components (C++ library, Rust FFI libraries, GPU prover)
+- Run the prover with the specified program and input
+- Verify the proof against the Rust reference implementation
+
 ## License
 
 Apache 2.0 (matching Triton VM)
