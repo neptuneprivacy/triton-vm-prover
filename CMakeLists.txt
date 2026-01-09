@@ -328,26 +328,14 @@ if(ENABLE_CUDA AND TRITON_VM_GPU_SOURCES_EXISTING)
     target_sources(triton_vm PRIVATE ${TRITON_VM_GPU_SOURCES_EXISTING})
 endif()
 
-# Enable SIMD optimizations for x86_64 (AVX512 first, fallback to AVX2)
+# Enable SIMD optimizations for x86_64 (AVX2)
 # Only apply to C++ files, not CUDA files
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
-    # Check if compiler supports AVX512
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx512f -mavx512dq" COMPILER_SUPPORTS_AVX512)
-    
-    if(COMPILER_SUPPORTS_AVX512)
-        target_compile_options(triton_vm PRIVATE 
-            $<$<COMPILE_LANGUAGE:CXX>:-mavx512f -mavx512dq -mavx2 -mfma>
-        )
-        add_compile_definitions(XFE_SIMD_AVX512_ENABLED=1)
-        message(STATUS "AVX512, AVX2, and FMA SIMD optimizations enabled for C++ code")
-    else()
-        target_compile_options(triton_vm PRIVATE 
-            $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>
-        )
-        add_compile_definitions(XFE_SIMD_AVX2_ENABLED=1)
-        message(STATUS "AVX2 and FMA SIMD optimizations enabled for C++ code (AVX512 not available)")
-    endif()
+    target_compile_options(triton_vm PRIVATE 
+        $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>
+    )
+    add_compile_definitions(XFE_SIMD_AVX2_ENABLED=1)
+    message(STATUS "AVX2 and FMA SIMD optimizations enabled for C++ code")
 endif()
 
 target_include_directories(triton_vm PUBLIC 

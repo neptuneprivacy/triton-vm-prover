@@ -22,17 +22,8 @@
 #include <tbb/enumerable_thread_specific.h>
 #endif
 
-// SIMD support: AVX512/AVX2 enabled via CMake compile flags
-// The compiler will auto-vectorize unrolled loops when AVX512/AVX2 is available
-// Explicit AVX512 intrinsics used for compress() function for maximum performance
-
-// Check for AVX512 support
-#if defined(__AVX512F__)
-#include <immintrin.h>
-#define TVM_AVX512_ENABLED 1
-#else
-#define TVM_AVX512_ENABLED 0
-#endif
+// SIMD support: AVX2 enabled via CMake compile flags
+// The compiler will auto-vectorize unrolled loops when AVX2 is available
 
 namespace triton_vm {
 
@@ -878,7 +869,7 @@ void extend_hash_table(
         };
         
         // OPTIMIZED: compress with unrolled scalar version
-        // NOTE: AVX512 disabled for correctness - BFieldElement multiplication requires
+        // Uses scalar operations for correctness - BFieldElement multiplication requires
         // proper modular reduction which is complex to implement correctly in SIMD
         auto compress_optimized = [&](const std::array<BFieldElement, 10>& regs) -> XFieldElement {
             // Unrolled scalar version with proper BFieldElement modular arithmetic
@@ -1241,7 +1232,7 @@ void extend_hash_table(
         };
 
         // OPTIMIZED: compress function using unrolled scalar version
-        // NOTE: AVX512 disabled for correctness - BFieldElement multiplication requires
+        // Uses scalar operations for correctness - BFieldElement multiplication requires
         // proper modular reduction which is complex to implement correctly in SIMD
         auto compress_optimized = [&](const std::array<BFieldElement, 10>& regs) -> XFieldElement {
             // Unrolled scalar version with proper BFieldElement modular arithmetic
