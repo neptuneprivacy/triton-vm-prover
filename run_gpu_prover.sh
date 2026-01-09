@@ -94,7 +94,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 PROVER="$BUILD_DIR/triton_vm_prove_gpu_full"
-VERIFIER_DIR="$SCRIPT_DIR/../triton-cli-1.0.0"
+VERIFIER_DIR="$SCRIPT_DIR/triton-cli-1.0.0"
 VERIFIER="$VERIFIER_DIR/target/release/triton-cli"
 
 # Output files

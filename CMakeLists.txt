@@ -369,7 +369,7 @@ if(UNIX)
 endif()
 
 # Test data path
-set(TEST_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../triton-cli-1.0.0/test_data")
+set(TEST_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/triton-cli-1.0.0/test_data")
 target_compile_definitions(triton_vm PUBLIC 
     TEST_DATA_DIR="${TEST_DATA_DIR}"
 )
