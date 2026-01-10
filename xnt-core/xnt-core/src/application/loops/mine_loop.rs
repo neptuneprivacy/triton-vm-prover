@@ -462,6 +462,162 @@ pub(crate) enum TxMergeOrigin {
     ExplicitList(Vec<Transaction>),
 }
 
+/// Merge transactions using binary tree approach for better parallelism.
+/// 
+/// Strategy for 3+ transactions:
+/// - Level 1 (parallel): Split transactions into pairs and merge in parallel
+/// - Level 2+: Recursively merge results until final result
+async fn binary_tree_merge(
+    coinbase: BlockOrRegularTransaction,
+    mut transactions: Vec<Transaction>,
+    mut rng: StdRng,
+    vm_job_queue: Arc<TritonVmJobQueue>,
+    job_options: TritonVmProofJobOptions,
+    consensus_rule_set: ConsensusRuleSet,
+) -> Result<BlockOrRegularTransaction> {
+    if transactions.is_empty() {
+        return Ok(coinbase);
+    }
+    
+    let num_txs = transactions.len();
+    
+    if num_txs < 3 {
+        let mut current = coinbase;
+        for tx in transactions {
+            current = BlockTransaction::merge(
+                current,
+                tx,
+                rng.random(),
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            )
+            .await?
+            .into();
+        }
+        return Ok(current);
+    }
+    
+    if num_txs == 3 {
+        let tx1 = transactions.remove(0);
+        let tx2 = transactions.remove(0);
+        let tx3 = transactions.remove(0);
+        
+        info!("Binary tree merge: Level 1 - parallel merges (coinbase+tx1) and (tx2+tx3)");
+        
+        let seed1: [u8; 32] = rng.random();
+        let seed2: [u8; 32] = rng.random();
+        let final_seed: [u8; 32] = rng.random();
+        
+        let (coinbase_result, regular_result) = tokio::join!(
+            BlockTransaction::merge(
+                coinbase,
+                tx1,
+                seed1,
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            ),
+            BlockTransaction::merge(
+                tx2.into(),
+                tx3,
+                seed2,
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            ),
+        );
+        
+        let coinbase_result = coinbase_result?;
+        let regular_result = regular_result?;
+        
+        info!("Binary tree merge: Level 2 - merging intermediate results");
+        
+        let final_result = BlockTransaction::merge(
+            coinbase_result.into(),
+            regular_result.into(),
+            final_seed,
+            vm_job_queue,
+            job_options,
+            consensus_rule_set,
+        ).await?;
+        
+        Ok(final_result.into())
+    } else {
+        let mid = num_txs / 2;
+        let left_txs: Vec<Transaction> = transactions.drain(..mid).collect();
+        let right_txs = transactions;
+        
+        info!("Binary tree merge: Splitting {} transactions (left: {}, right: {})", num_txs, mid, num_txs - mid);
+        
+        let right_first = right_txs[0].clone();
+        let right_rest: Vec<Transaction> = right_txs.into_iter().skip(1).collect();
+        
+        let left_seed: [u8; 32] = rng.random();
+        let right_seed: [u8; 32] = rng.random();
+        let final_seed: [u8; 32] = rng.random();
+        
+        let left_future = {
+            let coinbase = coinbase.clone();
+            let left_txs = left_txs;
+            let vm_job_queue = vm_job_queue.clone();
+            let job_options = job_options.clone();
+            let consensus_rule_set = consensus_rule_set.clone();
+            async move {
+                let left_rng = StdRng::from_seed(left_seed);
+                binary_tree_merge(
+                    coinbase,
+                    left_txs,
+                    left_rng,
+                    vm_job_queue,
+                    job_options,
+                    consensus_rule_set,
+                ).await
+            }
+        };
+        
+        let right_future = {
+            let right_first = right_first.into();
+            let right_rest = right_rest;
+            let vm_job_queue = vm_job_queue.clone();
+            let job_options = job_options.clone();
+            let consensus_rule_set = consensus_rule_set.clone();
+            async move {
+                let right_rng = StdRng::from_seed(right_seed);
+                binary_tree_merge(
+                    right_first,
+                    right_rest,
+                    right_rng,
+                    vm_job_queue,
+                    job_options,
+                    consensus_rule_set,
+                ).await
+            }
+        };
+        
+        let (left_result, right_result) = tokio::join!(
+            Box::pin(left_future),
+            Box::pin(right_future),
+        );
+        
+        let left_result = left_result?;
+        let right_result = right_result?;
+        
+        info!("Binary tree merge: Merging final results");
+        
+        let final_result = BlockTransaction::merge(
+            left_result.into(),
+            right_result.into(),
+            final_seed,
+            vm_job_queue,
+            job_options,
+            consensus_rule_set,
+        ).await?;
+        
+        Ok(final_result.into())
+    }
+}
+
 /// Create the transaction that goes into the block template. The transaction is
 /// built from the mempool and from the coinbase transaction. Also returns the
 /// "sender randomness" used in the coinbase transaction.
@@ -628,26 +784,131 @@ pub(crate) async fn create_block_transaction_from(
         transactions_to_merge = vec![nop_transaction];
     }
 
-    let num_merges = transactions_to_merge.len();
+    const LARGE_TX_INPUT_THRESHOLD: usize = 35;
+    let small_transactions: Vec<Transaction> = transactions_to_merge
+        .iter()
+        .filter(|tx| tx.kernel.inputs.len() <= LARGE_TX_INPUT_THRESHOLD)
+        .cloned()
+        .collect();
+    let large_transactions: Vec<Transaction> = transactions_to_merge
+        .iter()
+        .filter(|tx| tx.kernel.inputs.len() > LARGE_TX_INPUT_THRESHOLD)
+        .cloned()
+        .collect();
+
     let mut block_transaction = BlockOrRegularTransaction::from(coinbase_transaction);
-    for (i, tx_to_include) in transactions_to_merge.into_iter().enumerate() {
-        info!("Merging transaction {} / {}", i + 1, num_merges);
+
+    if large_transactions.len() == 1 && small_transactions.is_empty() {
+        let large_tx = large_transactions.into_iter().next().unwrap();
         info!(
-            "Merging tx with {} inputs, {} outputs. With fee {}.",
-            tx_to_include.kernel.inputs.len(),
-            tx_to_include.kernel.outputs.len(),
-            tx_to_include.kernel.fee
+            "Found exactly 1 large transaction with {} inputs (threshold: {}). Using only this transaction",
+            large_tx.kernel.inputs.len(),
+            LARGE_TX_INPUT_THRESHOLD
+        );
+        info!(
+            "Large transaction details: {} inputs, {} outputs, fee {}",
+            large_tx.kernel.inputs.len(),
+            large_tx.kernel.outputs.len(),
+            large_tx.kernel.fee
         );
         block_transaction = BlockTransaction::merge(
             block_transaction,
-            tx_to_include,
+            large_tx,
             rng.random(),
             vm_job_queue.clone(),
             job_options.clone(),
             consensus_rule_set,
         )
         .await?
-        .into(); // fix #579.  propagate error up.
+        .into();
+    } else {
+        if !small_transactions.is_empty() {
+            let num_small = small_transactions.len();
+            info!(
+                "Processing {} small transaction(s) first (to increase TPS)",
+                num_small
+            );
+            
+            if num_small >= 3 {
+                info!("Using binary tree merge for {} small transactions", num_small);
+                block_transaction = binary_tree_merge(
+                    block_transaction,
+                    small_transactions,
+                    &mut rng,
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                ).await?;
+            } else if num_small == 2 {
+                info!("Using sequential merge for 2 small transactions");
+                for (i, tx) in small_transactions.into_iter().enumerate() {
+                    info!("Merging small transaction {} / {}", i + 1, 2);
+                    info!(
+                        "Merging tx with {} inputs, {} outputs, fee {}",
+                        tx.kernel.inputs.len(),
+                        tx.kernel.outputs.len(),
+                        tx.kernel.fee
+                    );
+                    block_transaction = BlockTransaction::merge(
+                        block_transaction,
+                        tx,
+                        rng.random(),
+                        vm_job_queue.clone(),
+                        job_options.clone(),
+                        consensus_rule_set.clone(),
+                    )
+                    .await?
+                    .into();
+                }
+            } else {
+                let tx = small_transactions.into_iter().next().unwrap();
+                info!("Merging 1 small transaction");
+                info!(
+                    "Merging tx with {} inputs, {} outputs, fee {}",
+                    tx.kernel.inputs.len(),
+                    tx.kernel.outputs.len(),
+                    tx.kernel.fee
+                );
+                block_transaction = BlockTransaction::merge(
+                    block_transaction,
+                    tx,
+                    rng.random(),
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                )
+                .await?
+                .into();
+            }
+        }
+        
+        if !large_transactions.is_empty() {
+            let num_large = large_transactions.len();
+            info!(
+                "Processing {} large transaction(s) one by one sequentially",
+                num_large
+            );
+            for (i, large_tx) in large_transactions.into_iter().enumerate() {
+                info!(
+                    "Merging large transaction {} / {}: {} inputs, {} outputs, fee {}",
+                    i + 1,
+                    num_large,
+                    large_tx.kernel.inputs.len(),
+                    large_tx.kernel.outputs.len(),
+                    large_tx.kernel.fee
+                );
+                block_transaction = BlockTransaction::merge(
+                    block_transaction,
+                    large_tx,
+                    rng.random(),
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                )
+                .await?
+                .into();
+            }
+        }
     }
 
     let own_expected_utxos = composer_parameters.extract_expected_utxos(composer_txos);
