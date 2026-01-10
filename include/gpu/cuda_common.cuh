@@ -265,21 +265,21 @@ inline size_t get_total_gpu_memory() {
 }
 
 /**
- * Allocate memory - uses unified memory (cudaMallocManaged) when multi-GPU is enabled
- * to allow memory access across multiple GPUs, otherwise uses regular device memory
+ * Allocate memory - uses unified memory (cudaMallocManaged) when enabled,
+ * otherwise uses regular device memory (cudaMalloc)
  */
 #define CUDA_ALLOC(ptr, size)                                                  \
     do {                                                                       \
         if (use_unified_memory()) {                                            \
-            CUDA_CHECK(cudaMallocManaged(ptr, size));                           \
-        } else {                                                                \
-            CUDA_CHECK(cudaMalloc(ptr, size));                                  \
+            CUDA_CHECK(cudaMallocManaged(ptr, size));                          \
+        } else {                                                               \
+            CUDA_CHECK(cudaMalloc(ptr, size));                                 \
         }                                                                      \
     } while (0)
 
 /**
- * Set memory advice for unified memory to optimize access patterns
- * Call this after allocating unified memory to hint which GPU should access it
+ * Advise unified memory for optimal performance across GPUs
+ * Uses cudaMemLocation structure for device-specific memory management
  */
 inline void advise_unified_memory(void* ptr, size_t size, int device_id = -1) {
     if (!use_unified_memory()) {
@@ -290,12 +290,18 @@ inline void advise_unified_memory(void* ptr, size_t size, int device_id = -1) {
     if (device_id < 0) {
         // Set read/write access for all GPUs
         for (int i = 0; i < device_count; i++) {
-            CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetReadMostly, i));
-            CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetPreferredLocation, i));
+            cudaMemLocation location;
+            location.type = cudaMemLocationTypeDevice;
+            location.id = i;
+            CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetReadMostly, location));
+            CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetPreferredLocation, location));
         }
     } else {
         // Set preferred location for specific GPU
-        CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetPreferredLocation, device_id));
+        cudaMemLocation location;
+        location.type = cudaMemLocationTypeDevice;
+        location.id = device_id;
+        CUDA_CHECK(cudaMemAdvise(ptr, size, cudaMemAdviseSetPreferredLocation, location));
     }
 }
 

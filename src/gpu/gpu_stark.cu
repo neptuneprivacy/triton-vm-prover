@@ -56,6 +56,7 @@
 #include <atomic>
 #include <cstring>
 #include <nlohmann/json.hpp>
+#include <sys/sysinfo.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -1367,6 +1368,17 @@ size_t GpuStark::estimate_gpu_memory(size_t padded_height) {
     return estimate;
 }
 
+/**
+ * Get available system RAM (for unified memory overflow)
+ */
+static size_t get_system_ram_available() {
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) {
+        return static_cast<size_t>(info.freeram) * info.mem_unit;
+    }
+    return 0;
+}
+
 bool GpuStark::check_gpu_memory(size_t padded_height) {
     size_t required = estimate_gpu_memory(padded_height);
     
@@ -1374,13 +1386,17 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     cudaMemGetInfo(&free_mem, &total_mem);
     
     // In unified memory mode, we can use memory across GPUs (respects TRITON_GPU_COUNT)
-    size_t available = free_mem;
+    size_t available_gpu = free_mem;
     size_t total = total_mem;
+    size_t system_ram_available = 0;
+    bool using_ram_overflow = false;
+    bool was_unified_memory_enabled = use_unified_memory();
+    int device_count = 1;
     
     if (use_unified_memory()) {
-        int device_count = get_effective_gpu_count();
+        device_count = get_effective_gpu_count();
 
-        available = 0;
+        available_gpu = 0;
         total = 0;
         for (int i = 0; i < device_count; i++) {
             cudaError_t err = cudaSetDevice(i);
@@ -1390,26 +1406,75 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
             }
             size_t f, t;
             cudaMemGetInfo(&f, &t);
-            available += f;
+            available_gpu += f;
             total += t;
         }
         cudaSetDevice(0);  // Return to primary GPU
 
         // Fallback: if unified memory calculation failed, use primary GPU memory
-        if (available == 0) {
+        if (available_gpu == 0) {
             std::cout << "[GPU] Warning: Unified memory calculation failed, using primary GPU memory" << std::endl;
-            available = free_mem;
+            available_gpu = free_mem;
             total = total_mem;
         }
     }
     
+    // Check if we should use system RAM as overflow buffer
+    // This works for both single-GPU and multi-GPU modes
+    // CUDA unified memory (cudaMallocManaged) can use system RAM as backing store when GPU memory is insufficient
+    const char* use_ram_env = std::getenv("TRITON_GPU_USE_RAM_OVERFLOW");
+    bool use_ram_overflow = (use_ram_env && (strcmp(use_ram_env, "1") == 0 || strcmp(use_ram_env, "true") == 0));
+    
+    // If GPU memory is insufficient, automatically enable RAM overflow
+    if (!use_ram_overflow && available_gpu < required) {
+        // Could auto-enable here if desired, but for now we require explicit opt-in
+    }
+    
+    if (use_ram_overflow) {
+        system_ram_available = get_system_ram_available();
+        // Reserve 4GB for system usage
+        size_t reserved_for_system = 4ULL * 1024 * 1024 * 1024; // 4GB
+        if (system_ram_available > reserved_for_system) {
+            using_ram_overflow = true;
+            // Enable unified memory mode if not already enabled (needed for cudaMallocManaged to work with RAM overflow)
+            if (!use_unified_memory()) {
+                use_unified_memory() = true;
+                std::cout << "[GPU] Enabling unified memory mode for single-GPU RAM overflow" << std::endl;
+            }
+        } else {
+            system_ram_available = 0; // Not enough system RAM
+            using_ram_overflow = false;
+        }
+    }
+    
+    // Calculate total available memory (GPU + system RAM if using overflow)
+    size_t usable_ram = 0;
+    if (using_ram_overflow && system_ram_available > 4ULL * 1024 * 1024 * 1024) {
+        usable_ram = system_ram_available - (4ULL * 1024 * 1024 * 1024); // Reserve 4GB
+    }
+    size_t available = available_gpu + usable_ram;
+    
     std::cout << "[GPU] Memory check:" << std::endl;
     std::cout << "  Required: " << (required / (1024 * 1024)) << " MB" << std::endl;
     std::cout << "  Available: " << (available / (1024 * 1024)) << " MB" << std::endl;
+    if (using_ram_overflow) {
+        std::cout << "    (GPU: " << (available_gpu / (1024 * 1024)) << " MB + System RAM: " 
+                  << ((available - available_gpu) / (1024 * 1024)) << " MB)" << std::endl;
+    }
     std::cout << "  Total: " << (total / (1024 * 1024)) << " MB" << std::endl;
     if (use_unified_memory()) {
-        int gpu_count = get_effective_gpu_count();
-        std::cout << "  Mode: Multi-GPU Unified Memory (" << gpu_count << " GPUs)" << std::endl;
+        device_count = get_effective_gpu_count();
+        if (device_count > 1) {
+            std::cout << "  Mode: Multi-GPU Unified Memory (" << device_count << " GPUs)";
+        } else {
+            std::cout << "  Mode: Single-GPU Unified Memory";
+        }
+        if (using_ram_overflow) {
+            std::cout << " + System RAM overflow";
+        }
+        std::cout << std::endl;
+    } else {
+        std::cout << "  Mode: Single-GPU (device memory only)" << std::endl;
     }
     
     // Optional escape hatch for very large instances (e.g., big padded heights) on machines
@@ -2117,7 +2182,7 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
         aux_profile_mode = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
     }
     
-    // Check for CPU aux computation mode (GPU is now the default)
+    // Check for CPU aux computation mode
     static int use_cpu_aux = -1;
     if (use_cpu_aux == -1) {
         const char* env = std::getenv("TRITON_AUX_CPU");
@@ -2125,9 +2190,6 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
         if (use_cpu_aux) {
             std::cout << "[AUX] Using CPU computation mode (TRITON_AUX_CPU=1)" << std::endl;
             std::cout << "🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl;
-        } else {
-            std::cout << "[AUX] Using GPU computation mode (default)" << std::endl;
-            std::cout << "🚀 [GPU-AUX] Full GPU auxiliary table computation active" << std::endl;
         }
     }
     
@@ -2299,7 +2361,6 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
 
     if (use_cpu_aux && h_main_table_data_ != nullptr) {
         // Hybrid CPU/GPU mode: Use CPU for parallel table extension, GPU for DegreeLowering
-        // (Only used if TRITON_AUX_CPU=1 is explicitly set)
         std::cout << "🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl;
         std::cout << "[CPU-AUX TAG] Using CPU parallel extension + GPU DegreeLowering" << std::endl;
 
@@ -2335,8 +2396,7 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
 
         std::cout << "✅ [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation completed" << std::endl;
     } else {
-        // GPU mode (default): Use GPU kernel for aux table extension
-        // All aux table computation runs on GPU for maximum performance
+        // GPU mode: Use GPU kernel for aux table extension
         kernels::extend_aux_table_full_gpu(
             ctx_->d_main_trace(),      // row-major
             dims_.main_width,
@@ -4433,9 +4493,12 @@ void GpuStark::step_fri_protocol() {
     if (triton_vm::gpu::use_unified_memory() && std::getenv("TRITON_PREFETCH_FRI")) {
         int dev = 0;
         CUDA_CHECK(cudaGetDevice(&dev));
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_main_lde(), n * main_width * sizeof(uint64_t), dev, ctx_->stream()));
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_aux_lde(), n * aux_width * 3 * sizeof(uint64_t), dev, ctx_->stream()));
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_quotient_segments(), n * num_segments * 3 * sizeof(uint64_t), dev, ctx_->stream()));
+        cudaMemLocation location;
+        location.type = cudaMemLocationTypeDevice;
+        location.id = dev;
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_main_lde(), n * main_width * sizeof(uint64_t), location, 0, ctx_->stream()));
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_aux_lde(), n * aux_width * 3 * sizeof(uint64_t), location, 0, ctx_->stream()));
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_quotient_segments(), n * num_segments * 3 * sizeof(uint64_t), location, 0, ctx_->stream()));
     }
 
     // Use scratch for weights and intermediates
@@ -5249,13 +5312,13 @@ Proof GpuStark::prove_with_gpu_phase1(
     dims_.aux_width = 88;
 
     // Optional: allow hybrid CPU aux by creating a host copy of the GPU-built main table.
-    // (GPU aux is the default; CPU aux requires TRITON_AUX_CPU=1 and creates a host copy)
+    // (Hybrid CPU aux requires a host pointer; without this, we will use GPU aux.)
     static int want_cpu_aux = -1;
     if (want_cpu_aux == -1) {
         const char* env = std::getenv("TRITON_AUX_CPU");
         want_cpu_aux = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
     }
-    h_main_table_data_ = nullptr;  // GPU mode: no host copy needed
+    h_main_table_data_ = nullptr;
     std::cout << "[GPU Phase1] NOTE: skipping H2D upload of full main table (will build into ctx_->d_main_trace())" << std::endl;
 
     // Trace randomizer count
@@ -5380,9 +5443,8 @@ Proof GpuStark::prove_with_gpu_phase1(
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     std::cout << "[GPU Phase1] Complete: " << elapsed_ms(t_p1) << " ms" << std::endl;
 
-    // If hybrid CPU aux is requested (TRITON_AUX_CPU=1), create a host copy of the main table now.
+    // If hybrid CPU aux is requested, create a host copy of the main table now.
     // This is intentionally AFTER GPU Phase1 completes to avoid unified-memory thrash.
-    // GPU mode (default): skip this copy to save memory and time.
     uint64_t* h_main_copy = nullptr;
     bool h_main_copy_pinned = false;
     if (want_cpu_aux) {

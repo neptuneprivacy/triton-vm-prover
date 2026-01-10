@@ -125,29 +125,12 @@ void compute_degree_lowering_main_columns(std::vector<std::vector<BFieldElement>
     size_t num_rows = data.size();
     size_t num_cols = data[0].size();
 
-    // OPTIMIZED: Flatten data to u64 array for FFI - parallel with better cache locality
-    // Use row-major order for better cache performance
+    // Flatten data to u64 array for FFI - parallel
     std::vector<uint64_t> flat_data(num_rows * num_cols);
-    
-    // Parallelize by rows - use adaptive chunk size based on thread count
-    // For static scheduling, let OpenMP divide work evenly (optimal for load balancing)
-    // This adapts automatically to any thread count (96, 170, etc.)
     #pragma omp parallel for schedule(static)
     for (size_t r = 0; r < num_rows; ++r) {
-        const size_t row_offset = r * num_cols;
-        const auto& row = data[r];
-        // Unroll inner loop for better performance (compiler hint)
-        size_t c = 0;
-        // Process in chunks of 4 for potential vectorization
-        for (; c + 4 <= num_cols; c += 4) {
-            flat_data[row_offset + c] = row[c].value();
-            flat_data[row_offset + c + 1] = row[c + 1].value();
-            flat_data[row_offset + c + 2] = row[c + 2].value();
-            flat_data[row_offset + c + 3] = row[c + 3].value();
-        }
-        // Handle remaining columns
-        for (; c < num_cols; ++c) {
-            flat_data[row_offset + c] = row[c].value();
+        for (size_t c = 0; c < num_cols; ++c) {
+            flat_data[r * num_cols + c] = data[r][c].value();
         }
     }
 
@@ -160,24 +143,11 @@ void compute_degree_lowering_main_columns(std::vector<std::vector<BFieldElement>
     auto t2 = std::chrono::high_resolution_clock::now();
     if (profile) std::cout << "      rust_ffi: " << std::chrono::duration<double, std::milli>(t2 - t1).count() << " ms" << std::endl;
 
-    // OPTIMIZED: Write back to data - parallel with better cache locality
-    // Use adaptive static scheduling (automatically divides work evenly among threads)
+    // Write back to data - parallel
     #pragma omp parallel for schedule(static)
     for (size_t r = 0; r < num_rows; ++r) {
-        const size_t row_offset = r * num_cols;
-        auto& row = data[r];
-        // Unroll inner loop for better performance (compiler hint)
-        size_t c = 0;
-        // Process in chunks of 4 for potential vectorization
-        for (; c + 4 <= num_cols; c += 4) {
-            row[c] = BFieldElement(flat_data[row_offset + c]);
-            row[c + 1] = BFieldElement(flat_data[row_offset + c + 1]);
-            row[c + 2] = BFieldElement(flat_data[row_offset + c + 2]);
-            row[c + 3] = BFieldElement(flat_data[row_offset + c + 3]);
-        }
-        // Handle remaining columns
-        for (; c < num_cols; ++c) {
-            row[c] = BFieldElement(flat_data[row_offset + c]);
+        for (size_t c = 0; c < num_cols; ++c) {
+            data[r][c] = BFieldElement(flat_data[r * num_cols + c]);
         }
     }
 
@@ -1233,35 +1203,19 @@ MasterMainTable MasterMainTable::from_aet(
         }
         
         // Build higher levels
-        // OPTIMIZED: Use static scheduling for large workloads, dynamic for small ones
         for (size_t d = 1; d < num_levels; ++d) {
             size_t prev_sz = tree[d-1].size();
             size_t new_sz = (prev_sz + 1) / 2;
             tree[d].resize(new_sz);
             
-            // Use static scheduling for larger workloads (better cache locality)
-            // Dynamic scheduling for smaller workloads (better load balancing)
-            if (new_sz > 64) {
-                #pragma omp parallel for schedule(static)
-                for (size_t i = 0; i < new_sz; ++i) {
-                    size_t left = 2 * i;
-                    size_t right = 2 * i + 1;
-                    if (right < prev_sz) {
-                        tree[d][i] = poly_mul(tree[d-1][left], tree[d-1][right]);
-                    } else {
-                        tree[d][i] = tree[d-1][left];
-                    }
-                }
-            } else {
-                #pragma omp parallel for schedule(dynamic)
-                for (size_t i = 0; i < new_sz; ++i) {
-                    size_t left = 2 * i;
-                    size_t right = 2 * i + 1;
-                    if (right < prev_sz) {
-                        tree[d][i] = poly_mul(tree[d-1][left], tree[d-1][right]);
-                    } else {
-                        tree[d][i] = tree[d-1][left];
-                    }
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t i = 0; i < new_sz; ++i) {
+                size_t left = 2 * i;
+                size_t right = 2 * i + 1;
+                if (right < prev_sz) {
+                    tree[d][i] = poly_mul(tree[d-1][left], tree[d-1][right]);
+                } else {
+                    tree[d][i] = tree[d-1][left];
                 }
             }
         }
@@ -1283,75 +1237,36 @@ MasterMainTable MasterMainTable::from_aet(
         
 #ifdef TRITON_CUDA_ENABLED
         // GPU-accelerated polynomial evaluation
-        // OPTIMIZED: Use pinned memory for faster transfers, parallel conversion
         {
             // Allocate GPU memory
             uint64_t *d_coeffs = nullptr, *d_points = nullptr, *d_results = nullptr;
-            uint64_t *h_coeffs_pinned = nullptr, *h_points_pinned = nullptr, *h_results_pinned = nullptr;
             cudaError_t err;
             
-            // Try to use pinned memory for host buffers (faster transfers)
-            bool use_pinned = (n > 1024);  // Use pinned memory for larger workloads
-            if (use_pinned) {
-                err = cudaMallocHost(&h_coeffs_pinned, fd.size() * sizeof(uint64_t));
-                if (err == cudaSuccess) err = cudaMallocHost(&h_points_pinned, n * sizeof(uint64_t));
-                if (err == cudaSuccess) err = cudaMallocHost(&h_results_pinned, n * sizeof(uint64_t));
-            }
+            err = cudaMalloc(&d_coeffs, fd.size() * sizeof(uint64_t));
+            if (err == cudaSuccess) err = cudaMalloc(&d_points, n * sizeof(uint64_t));
+            if (err == cudaSuccess) err = cudaMalloc(&d_results, n * sizeof(uint64_t));
             
             if (err == cudaSuccess) {
-                err = cudaMalloc(&d_coeffs, fd.size() * sizeof(uint64_t));
-                if (err == cudaSuccess) err = cudaMalloc(&d_points, n * sizeof(uint64_t));
-                if (err == cudaSuccess) err = cudaMalloc(&d_results, n * sizeof(uint64_t));
-            }
-            
-            if (err == cudaSuccess) {
-                // Convert coefficients in parallel
-                if (use_pinned && h_coeffs_pinned) {
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < fd.size(); ++i) {
-                        h_coeffs_pinned[i] = fd[i].value();
-                    }
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < n; ++i) {
-                        h_points_pinned[i] = roots[i].value();
-                    }
-                    
-                    // Async memory transfers (faster with pinned memory)
-                    cudaMemcpyAsync(d_coeffs, h_coeffs_pinned, fd.size() * sizeof(uint64_t), cudaMemcpyHostToDevice);
-                    cudaMemcpyAsync(d_points, h_points_pinned, n * sizeof(uint64_t), cudaMemcpyHostToDevice);
-                } else {
-                    // Fallback to regular memory
-                    std::vector<uint64_t> fd_raw(fd.size());
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < fd.size(); ++i) fd_raw[i] = fd[i].value();
-                    
-                    std::vector<uint64_t> roots_raw(n);
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < n; ++i) roots_raw[i] = roots[i].value();
-                    
-                    cudaMemcpy(d_coeffs, fd_raw.data(), fd.size() * sizeof(uint64_t), cudaMemcpyHostToDevice);
-                    cudaMemcpy(d_points, roots_raw.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice);
-                }
+                // Convert and upload coefficients
+                std::vector<uint64_t> fd_raw(fd.size());
+                for (size_t i = 0; i < fd.size(); ++i) fd_raw[i] = fd[i].value();
+                
+                std::vector<uint64_t> roots_raw(n);
+                for (size_t i = 0; i < n; ++i) roots_raw[i] = roots[i].value();
+                
+                cudaMemcpy(d_coeffs, fd_raw.data(), fd.size() * sizeof(uint64_t), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_points, roots_raw.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice);
                 
                 // Call GPU kernel
                 gpu::kernels::gpu_poly_eval_batch(d_coeffs, fd.size() - 1, d_points, n, d_results, nullptr);
                 cudaDeviceSynchronize();
                 
                 // Download results
-                if (use_pinned && h_results_pinned) {
-                    cudaMemcpyAsync(h_results_pinned, d_results, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-                    cudaDeviceSynchronize();
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < n; ++i) {
-                        fd_in_roots[i] = BFieldElement(h_results_pinned[i]);
-                    }
-                } else {
-                    std::vector<uint64_t> results_raw(n);
-                    cudaMemcpy(results_raw.data(), d_results, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-                    #pragma omp parallel for schedule(static)
-                    for (size_t i = 0; i < n; ++i) {
-                        fd_in_roots[i] = BFieldElement(results_raw[i]);
-                    }
+                std::vector<uint64_t> results_raw(n);
+                cudaMemcpy(results_raw.data(), d_results, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+                
+                for (size_t i = 0; i < n; ++i) {
+                    fd_in_roots[i] = BFieldElement(results_raw[i]);
                 }
             } else {
                 // Fallback to CPU
@@ -1368,9 +1283,6 @@ MasterMainTable MasterMainTable::from_aet(
             if (d_coeffs) cudaFree(d_coeffs);
             if (d_points) cudaFree(d_points);
             if (d_results) cudaFree(d_results);
-            if (h_coeffs_pinned) cudaFreeHost(h_coeffs_pinned);
-            if (h_points_pinned) cudaFreeHost(h_points_pinned);
-            if (h_results_pinned) cudaFreeHost(h_results_pinned);
         }
 #else
         // CPU parallel Horner
@@ -1415,40 +1327,22 @@ MasterMainTable MasterMainTable::from_aet(
         }
         
         // Combine upwards
-        // OPTIMIZED: Use static scheduling for large workloads
         for (size_t d = 1; d < num_levels; ++d) {
             size_t this_sz = tree[d].size();
             weights[d].resize(this_sz);
             
             size_t prev_sz = tree[d-1].size();
-            // Use static scheduling for larger workloads (better cache locality)
-            if (this_sz > 64) {
-                #pragma omp parallel for schedule(static)
-                for (size_t i = 0; i < this_sz; ++i) {
-                    size_t left = 2 * i;
-                    size_t right = 2 * i + 1;
-                    
-                    if (right < prev_sz) {
-                        auto left_contrib = poly_mul(weights[d-1][left], tree[d-1][right]);
-                        auto right_contrib = poly_mul(weights[d-1][right], tree[d-1][left]);
-                        weights[d][i] = poly_add(left_contrib, right_contrib);
-                    } else {
-                        weights[d][i] = weights[d-1][left];
-                    }
-                }
-            } else {
-                #pragma omp parallel for schedule(dynamic)
-                for (size_t i = 0; i < this_sz; ++i) {
-                    size_t left = 2 * i;
-                    size_t right = 2 * i + 1;
-                    
-                    if (right < prev_sz) {
-                        auto left_contrib = poly_mul(weights[d-1][left], tree[d-1][right]);
-                        auto right_contrib = poly_mul(weights[d-1][right], tree[d-1][left]);
-                        weights[d][i] = poly_add(left_contrib, right_contrib);
-                    } else {
-                        weights[d][i] = weights[d-1][left];
-                    }
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t i = 0; i < this_sz; ++i) {
+                size_t left = 2 * i;
+                size_t right = 2 * i + 1;
+                
+                if (right < prev_sz) {
+                    auto left_contrib = poly_mul(weights[d-1][left], tree[d-1][right]);
+                    auto right_contrib = poly_mul(weights[d-1][right], tree[d-1][left]);
+                    weights[d][i] = poly_add(left_contrib, right_contrib);
+                } else {
+                    weights[d][i] = weights[d-1][left];
                 }
             }
         }
@@ -1690,10 +1584,8 @@ MasterMainTable MasterMainTable::from_aet(
     }
 
     // Fill RAM region rows 0..ram_len
-    // OPTIMIZED: Parallelize inverse computations and table writes
     if (!ram_rows.empty()) {
-        const size_t ram_len = std::min(ram_rows.size(), table.num_rows());
-        clk_jump_diffs_ram.reserve(ram_len);
+        clk_jump_diffs_ram.reserve(ram_rows.size());
 
         // Rust: pop from end, assign first row
         BFieldElement current_bcpc0 = bez0.empty() ? BFieldElement::zero() : bez0.back();
@@ -1701,24 +1593,7 @@ MasterMainTable MasterMainTable::from_aet(
         if (!bez0.empty()) bez0.pop_back();
         if (!bez1.empty()) bez1.pop_back();
 
-        // Precompute all ramp differences and inverses in parallel
-        size_t diff_count = ram_len > 1 ? ram_len - 1 : 0;
-        std::vector<BFieldElement> ramp_diffs(diff_count);
-        std::vector<BFieldElement> ramp_inverses(diff_count);
-        std::vector<bool> is_zero_diff(diff_count);
-        
-        if (diff_count > 0) {
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < diff_count; ++i) {
-                const auto& curr = ram_rows[i];
-                const auto& next = ram_rows[i + 1];
-                ramp_diffs[i] = next.ramp - curr.ramp;
-                is_zero_diff[i] = ramp_diffs[i].is_zero();
-                ramp_inverses[i] = is_zero_diff[i] ? BFieldElement::zero() : ramp_diffs[i].inverse();
-            }
-        }
-
-        // Row 0 (sequential - needed for Bézout coefficient tracking)
+        // Row 0
         table.set(0, RAM_TABLE_START + RamMainColumn::CLK, ram_rows[0].clk);
         table.set(0, RAM_TABLE_START + RamMainColumn::InstructionType, ram_rows[0].inst_type);
         table.set(0, RAM_TABLE_START + RamMainColumn::RamPointer, ram_rows[0].ramp);
@@ -1727,21 +1602,18 @@ MasterMainTable MasterMainTable::from_aet(
         table.set(0, RAM_TABLE_START + RamMainColumn::BezoutCoefficientPolynomialCoefficient0, current_bcpc0);
         table.set(0, RAM_TABLE_START + RamMainColumn::BezoutCoefficientPolynomialCoefficient1, current_bcpc1);
 
-        // Process remaining rows: track Bézout coefficients sequentially, but parallelize table writes
-        for (size_t i = 0; i < diff_count; ++i) {
+        for (size_t i = 0; i + 1 < ram_rows.size() && (i + 1) < table.num_rows(); ++i) {
             const auto& curr = ram_rows[i];
             const auto& next = ram_rows[i + 1];
+            BFieldElement ramp_diff = next.ramp - curr.ramp;
             BFieldElement clk_diff = next.clk - curr.clk;
-            
-            if (is_zero_diff[i]) {
+            if (ramp_diff.is_zero()) {
                 clk_jump_diffs_ram.push_back(clk_diff);
             } else {
                 if (!bez0.empty()) { current_bcpc0 = bez0.back(); bez0.pop_back(); }
                 if (!bez1.empty()) { current_bcpc1 = bez1.back(); bez1.pop_back(); }
             }
-            
-            // Set inverse (precomputed)
-            table.set(i, RAM_TABLE_START + RamMainColumn::InverseOfRampDifference, ramp_inverses[i]);
+            table.set(i, RAM_TABLE_START + RamMainColumn::InverseOfRampDifference, ramp_diff.is_zero() ? BFieldElement::zero() : ramp_diff.inverse());
 
             // Next row basic fields
             table.set(i + 1, RAM_TABLE_START + RamMainColumn::CLK, next.clk);
@@ -1755,7 +1627,6 @@ MasterMainTable MasterMainTable::from_aet(
     log_section("RAM table fill");
 
     // Fill JumpStack table (columns 57-61) from the processor trace (matches Rust: JumpStack table is derived per-cycle).
-    // OPTIMIZED: Parallelize bucket processing and table writes
     {
         using namespace JumpStackMainColumn;
         // OPTIMIZED: Use flat buffer directly instead of processor_trace()
@@ -1764,48 +1635,8 @@ MasterMainTable MasterMainTable::from_aet(
         const size_t proc_cols = aet.processor_trace_width();
 
         // Preprocess by JSP value, preserving processor CLK order.
-        // Use thread-safe bucket collection
         std::vector<std::vector<std::tuple<BFieldElement, BFieldElement, BFieldElement, BFieldElement>>> buckets;
         buckets.reserve(64);
-        
-        // First pass: collect all entries into a flat array with JSP values
-        struct JSEntry {
-            size_t jsp_val;
-            BFieldElement clk;
-            BFieldElement ci;
-            BFieldElement jso;
-            BFieldElement jsd;
-        };
-        std::vector<JSEntry> entries;
-        entries.reserve(proc_rows);
-        
-#ifdef _OPENMP
-        #pragma omp parallel
-        {
-            std::vector<JSEntry> local_entries;
-            int num_threads = omp_get_num_threads();
-            local_entries.reserve(proc_rows / static_cast<size_t>(num_threads) + 1);
-            
-            #pragma omp for nowait
-            for (size_t row = 0; row < proc_rows; ++row) {
-                const BFieldElement* pr = proc_data + row * proc_cols;
-                BFieldElement clk = pr[processor_column_index(ProcessorMainColumn::CLK)];
-                BFieldElement ci = pr[processor_column_index(ProcessorMainColumn::CI)];
-                BFieldElement jsp = pr[processor_column_index(ProcessorMainColumn::JSP)];
-                BFieldElement jso = pr[processor_column_index(ProcessorMainColumn::JSO)];
-                BFieldElement jsd = pr[processor_column_index(ProcessorMainColumn::JSD)];
-                
-                size_t jsp_val = static_cast<size_t>(jsp.value());
-                local_entries.push_back({jsp_val, clk, ci, jso, jsd});
-            }
-            
-            #pragma omp critical
-            {
-                entries.insert(entries.end(), local_entries.begin(), local_entries.end());
-            }
-        }
-#else
-        // Sequential fallback
         for (size_t row = 0; row < proc_rows; ++row) {
             const BFieldElement* pr = proc_data + row * proc_cols;
             BFieldElement clk = pr[processor_column_index(ProcessorMainColumn::CLK)];
@@ -1813,73 +1644,43 @@ MasterMainTable MasterMainTable::from_aet(
             BFieldElement jsp = pr[processor_column_index(ProcessorMainColumn::JSP)];
             BFieldElement jso = pr[processor_column_index(ProcessorMainColumn::JSO)];
             BFieldElement jsd = pr[processor_column_index(ProcessorMainColumn::JSD)];
-            
+
             size_t jsp_val = static_cast<size_t>(jsp.value());
-            entries.push_back({jsp_val, clk, ci, jso, jsd});
-        }
-#endif
-        
-        // Sort by JSP, then CLK (stable sort preserves CLK order within JSP)
-        std::stable_sort(entries.begin(), entries.end(), [](const JSEntry& a, const JSEntry& b) {
-            if (a.jsp_val != b.jsp_val) return a.jsp_val < b.jsp_val;
-            return a.clk.value() < b.clk.value();
-        });
-
-        // Fill table in parallel (entries are already sorted)
-        const size_t fill_rows = std::min(entries.size(), table.num_rows());
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < fill_rows; ++i) {
-            const auto& e = entries[i];
-            BFieldElement jsp_bfe(static_cast<uint64_t>(e.jsp_val));
-            table.set(i, JUMP_STACK_TABLE_START + CLK, e.clk);
-            table.set(i, JUMP_STACK_TABLE_START + CI, e.ci);
-            table.set(i, JUMP_STACK_TABLE_START + JSP, jsp_bfe);
-            table.set(i, JUMP_STACK_TABLE_START + JSO, e.jso);
-            table.set(i, JUMP_STACK_TABLE_START + JSD, e.jsd);
+            if (jsp_val < buckets.size()) {
+                buckets[jsp_val].push_back({clk, ci, jso, jsd});
+            } else if (jsp_val == buckets.size()) {
+                buckets.push_back({{clk, ci, jso, jsd}});
+            } else {
+                throw std::runtime_error("JSP must increase by at most 1 per execution step.");
+            }
         }
 
-        // Collect clock jump differences (only when JSP stays constant) - parallelizable
-        if (fill_rows > 1) {
-            std::vector<std::pair<size_t, BFieldElement>> local_diffs;
-            size_t diff_limit = fill_rows - 1;
-#ifdef _OPENMP
-            #pragma omp parallel
-            {
-                std::vector<std::pair<size_t, BFieldElement>> thread_diffs;
-                int num_threads = omp_get_num_threads();
-                thread_diffs.reserve(diff_limit / static_cast<size_t>(num_threads) + 1);
-                
-                #pragma omp for nowait
-                for (size_t i = 0; i < diff_limit; ++i) {
-                    size_t curr_jsp_val = entries[i].jsp_val;
-                    size_t next_jsp_val = entries[i + 1].jsp_val;
-                    if (curr_jsp_val == next_jsp_val) {
-                        BFieldElement clk_diff = entries[i + 1].clk - entries[i].clk;
-                        thread_diffs.push_back({i, clk_diff});
-                    }
-                }
-                
-                #pragma omp critical
-                {
-                    local_diffs.insert(local_diffs.end(), thread_diffs.begin(), thread_diffs.end());
-                }
+        // Move rows into jump stack table, sorted by JSP first, CLK second
+        size_t row_idx = 0;
+        for (size_t jsp_val = 0; jsp_val < buckets.size(); ++jsp_val) {
+            BFieldElement jsp_bfe(static_cast<uint64_t>(jsp_val));
+            for (const auto& [clk, ci, jso, jsd] : buckets[jsp_val]) {
+                if (row_idx >= table.num_rows()) break;
+                table.set(row_idx, JUMP_STACK_TABLE_START + CLK, clk);
+                table.set(row_idx, JUMP_STACK_TABLE_START + CI, ci);
+                table.set(row_idx, JUMP_STACK_TABLE_START + JSP, jsp_bfe);
+                table.set(row_idx, JUMP_STACK_TABLE_START + JSO, jso);
+                table.set(row_idx, JUMP_STACK_TABLE_START + JSD, jsd);
+                row_idx++;
             }
-#else
-            // Sequential fallback
-            for (size_t i = 0; i < diff_limit; ++i) {
-                size_t curr_jsp_val = entries[i].jsp_val;
-                size_t next_jsp_val = entries[i + 1].jsp_val;
-                if (curr_jsp_val == next_jsp_val) {
-                    BFieldElement clk_diff = entries[i + 1].clk - entries[i].clk;
-                    local_diffs.push_back({i, clk_diff});
+        }
+
+        // Collect clock jump differences (only when JSP stays constant)
+        if (row_idx > 1) {
+            clk_jump_diffs_jump_stack.reserve(row_idx);
+            for (size_t i = 0; i + 1 < row_idx; ++i) {
+                BFieldElement curr_clk = table.get(i, JUMP_STACK_TABLE_START + CLK);
+                BFieldElement next_clk = table.get(i + 1, JUMP_STACK_TABLE_START + CLK);
+                BFieldElement curr_jsp = table.get(i, JUMP_STACK_TABLE_START + JSP);
+                BFieldElement next_jsp = table.get(i + 1, JUMP_STACK_TABLE_START + JSP);
+                if (curr_jsp == next_jsp) {
+                    clk_jump_diffs_jump_stack.push_back(next_clk - curr_clk);
                 }
-            }
-#endif
-            // Sort by index and extract values
-            std::sort(local_diffs.begin(), local_diffs.end());
-            clk_jump_diffs_jump_stack.reserve(local_diffs.size());
-            for (const auto& [idx, diff] : local_diffs) {
-                clk_jump_diffs_jump_stack.push_back(diff);
             }
         }
     }
@@ -2253,8 +2054,8 @@ void MasterMainTable::pad(size_t padded_height, const std::array<size_t, 9>& tab
     // ---------------------------------------------------------------------
     // Optimize resize: reserve capacity first, then resize to avoid multiple reallocations
     if (data_.size() < padded_height) {
-        const size_t old_size = data_.size();
         data_.reserve(padded_height);
+        const size_t old_size = data_.size();
         data_.resize(padded_height);
         // Initialize new rows in parallel
         #pragma omp parallel for schedule(static)

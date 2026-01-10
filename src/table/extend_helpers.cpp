@@ -24,6 +24,7 @@
 
 // SIMD support: AVX2 enabled via CMake compile flags
 // The compiler will auto-vectorize unrolled loops when AVX2 is available
+// No need for explicit intrinsics - rely on compiler optimization
 
 namespace triton_vm {
 
@@ -734,9 +735,8 @@ void extend_hash_table(
     // OPTIMIZATION: Process all contributing rows for each cascade, then batch invert all at once
     // This reduces inversions from R (number of contributing rows) to 16 (number of cascades)
     threads.emplace_back([&]() {
-        // OPTIMIZED: Pre-compute which rows contribute (parallelized for large tables)
+        // Pre-compute which rows contribute (to avoid repeated checks)
         std::vector<bool> row_contributes(num_rows, false);
-        #pragma omp parallel for schedule(static)
         for (size_t idx = 0; idx < num_rows; idx++) {
             const auto& row = main_table[idx];
             BFieldElement mode = row[main_start + Mode];
@@ -750,7 +750,7 @@ void extend_hash_table(
             row_contributes[idx] = (!in_pad_mode && !in_last_round && !is_sponge_init);
         }
 
-        // OPTIMIZED: Collect contributing row indices in parallel (better for large tables)
+        // Collect contributing row indices (for efficient iteration)
         std::vector<size_t> contributing_rows;
         contributing_rows.reserve(num_rows);
         for (size_t idx = 0; idx < num_rows; idx++) {
@@ -837,156 +837,46 @@ void extend_hash_table(
         XFieldElement hash_digest = EvalArg::default_initial();
         XFieldElement sponge = EvalArg::default_initial();
         
-        // OPTIMIZED: Pre-extract state_weights coefficients to avoid repeated XFieldElement operations
-        alignas(64) BFieldElement weights_c0[10], weights_c1[10], weights_c2[10];
-        for (size_t i = 0; i < 10; ++i) {
-            weights_c0[i] = state_weights[i].coeff(0);
-            weights_c1[i] = state_weights[i].coeff(1);
-            weights_c2[i] = state_weights[i].coeff(2);
-        }
+        auto re_compose = [&](const std::vector<BFieldElement>& row, size_t h, size_t mh, size_t ml, size_t l) {
+            return (row[main_start + h] * two_pow_48 + row[main_start + mh] * two_pow_32 +
+                    row[main_start + ml] * two_pow_16 + row[main_start + l]) * montgomery_modulus_inverse;
+        };
         
-        // OPTIMIZED: Inline get_regs with re_compose inlined to eliminate lambda overhead
-        auto get_regs_optimized = [&](const std::vector<BFieldElement>& row) -> std::array<BFieldElement, 10> {
-            // Inline re_compose for each state (eliminates lambda call overhead)
-            const auto& r = row;
-            const size_t ms = main_start;
+        auto get_regs = [&](const std::vector<BFieldElement>& row) -> std::array<BFieldElement, 10> {
             return {
-                // State 0: inlined re_compose
-                (r[ms + State0HighestLkIn] * two_pow_48 + r[ms + State0MidHighLkIn] * two_pow_32 +
-                 r[ms + State0MidLowLkIn] * two_pow_16 + r[ms + State0LowestLkIn]) * montgomery_modulus_inverse,
-                // State 1: inlined re_compose
-                (r[ms + State1HighestLkIn] * two_pow_48 + r[ms + State1MidHighLkIn] * two_pow_32 +
-                 r[ms + State1MidLowLkIn] * two_pow_16 + r[ms + State1LowestLkIn]) * montgomery_modulus_inverse,
-                // State 2: inlined re_compose
-                (r[ms + State2HighestLkIn] * two_pow_48 + r[ms + State2MidHighLkIn] * two_pow_32 +
-                 r[ms + State2MidLowLkIn] * two_pow_16 + r[ms + State2LowestLkIn]) * montgomery_modulus_inverse,
-                // State 3: inlined re_compose
-                (r[ms + State3HighestLkIn] * two_pow_48 + r[ms + State3MidHighLkIn] * two_pow_32 +
-                 r[ms + State3MidLowLkIn] * two_pow_16 + r[ms + State3LowestLkIn]) * montgomery_modulus_inverse,
-                r[ms + State4], r[ms + State5], r[ms + State6],
-                r[ms + State7], r[ms + State8], r[ms + State9]
+                re_compose(row, State0HighestLkIn, State0MidHighLkIn, State0MidLowLkIn, State0LowestLkIn),
+                re_compose(row, State1HighestLkIn, State1MidHighLkIn, State1MidLowLkIn, State1LowestLkIn),
+                re_compose(row, State2HighestLkIn, State2MidHighLkIn, State2MidLowLkIn, State2LowestLkIn),
+                re_compose(row, State3HighestLkIn, State3MidHighLkIn, State3MidLowLkIn, State3LowestLkIn),
+                row[main_start + State4], row[main_start + State5], row[main_start + State6],
+                row[main_start + State7], row[main_start + State8], row[main_start + State9]
             };
         };
         
-        // OPTIMIZED: compress with unrolled scalar version
-        // Uses scalar operations for correctness - BFieldElement multiplication requires
-        // proper modular reduction which is complex to implement correctly in SIMD
-        auto compress_optimized = [&](const std::array<BFieldElement, 10>& regs) -> XFieldElement {
-            // Unrolled scalar version with proper BFieldElement modular arithmetic
-            // Compiler may auto-vectorize this unrolled loop
-            BFieldElement acc_c0 = BFieldElement::zero();
-            BFieldElement acc_c1 = BFieldElement::zero();
-            BFieldElement acc_c2 = BFieldElement::zero();
-            
-            // Unroll loop for better compiler optimization (10 iterations)
-            // Each multiplication does proper Goldilocks field reduction
-            acc_c0 = acc_c0 + weights_c0[0] * regs[0] + weights_c0[1] * regs[1] +
-                     weights_c0[2] * regs[2] + weights_c0[3] * regs[3] +
-                     weights_c0[4] * regs[4] + weights_c0[5] * regs[5] +
-                     weights_c0[6] * regs[6] + weights_c0[7] * regs[7] +
-                     weights_c0[8] * regs[8] + weights_c0[9] * regs[9];
-            
-            acc_c1 = acc_c1 + weights_c1[0] * regs[0] + weights_c1[1] * regs[1] +
-                     weights_c1[2] * regs[2] + weights_c1[3] * regs[3] +
-                     weights_c1[4] * regs[4] + weights_c1[5] * regs[5] +
-                     weights_c1[6] * regs[6] + weights_c1[7] * regs[7] +
-                     weights_c1[8] * regs[8] + weights_c1[9] * regs[9];
-            
-            acc_c2 = acc_c2 + weights_c2[0] * regs[0] + weights_c2[1] * regs[1] +
-                     weights_c2[2] * regs[2] + weights_c2[3] * regs[3] +
-                     weights_c2[4] * regs[4] + weights_c2[5] * regs[5] +
-                     weights_c2[6] * regs[6] + weights_c2[7] * regs[7] +
-                     weights_c2[8] * regs[8] + weights_c2[9] * regs[9];
-            
-            return XFieldElement(acc_c0, acc_c1, acc_c2);
-        };
-        
-        // OPTIMIZED: Inline EvalArg::compute_terminal to avoid vector allocation
-        auto compute_terminal_inline = [&](const std::array<BFieldElement, 10>& symbols, 
-                                           const XFieldElement& initial, 
-                                           const XFieldElement& challenge) -> XFieldElement {
-            XFieldElement result = initial;
-            // Unroll loop for better performance (10 iterations)
-            result = challenge * result + XFieldElement(symbols[0]);
-            result = challenge * result + XFieldElement(symbols[1]);
-            result = challenge * result + XFieldElement(symbols[2]);
-            result = challenge * result + XFieldElement(symbols[3]);
-            result = challenge * result + XFieldElement(symbols[4]);
-            result = challenge * result + XFieldElement(symbols[5]);
-            result = challenge * result + XFieldElement(symbols[6]);
-            result = challenge * result + XFieldElement(symbols[7]);
-            result = challenge * result + XFieldElement(symbols[8]);
-            result = challenge * result + XFieldElement(symbols[9]);
-            return result;
+        auto compress = [&](const std::array<BFieldElement, 10>& regs) -> XFieldElement {
+            XFieldElement acc = XFieldElement::zero();
+            for (size_t i = 0; i < 10; ++i) acc += state_weights[i] * XFieldElement(regs[i]);
+            return acc;
         };
     
-    // OPTIMIZED: Pre-compute row metadata to avoid repeated lookups
-    // Use TBB for better work stealing on irregular workloads
-    std::vector<uint8_t> row_modes(num_rows);
-    std::vector<bool> is_round_0(num_rows);
-    std::vector<bool> is_last_round(num_rows);
-    std::vector<bool> is_sponge_init_vec(num_rows);
-    std::vector<BFieldElement> current_instructions(num_rows);
-    
-#ifdef TVM_USE_TBB
-    // Use TBB parallel_for for better work stealing
-    tbb::parallel_for(size_t(0), num_rows, [&](size_t idx) {
-        const auto& row = main_table[idx];
-        BFieldElement mode = row[main_start + Mode];
-        BFieldElement round_number = row[main_start + RoundNumber];
-        BFieldElement current_instruction = row[main_start + CI];
-        
-        row_modes[idx] = static_cast<uint8_t>(mode.value());
-        is_round_0[idx] = round_number.is_zero();
-        is_last_round[idx] = (round_number == last_round_value);
-        is_sponge_init_vec[idx] = (current_instruction == sponge_init_opcode);
-        current_instructions[idx] = current_instruction;
-    });
-#else
-    #pragma omp parallel for schedule(static)
-    for (size_t idx = 0; idx < num_rows; idx++) {
-        const auto& row = main_table[idx];
-        BFieldElement mode = row[main_start + Mode];
-        BFieldElement round_number = row[main_start + RoundNumber];
-        BFieldElement current_instruction = row[main_start + CI];
-        
-        row_modes[idx] = static_cast<uint8_t>(mode.value());
-        is_round_0[idx] = round_number.is_zero();
-        is_last_round[idx] = (round_number == last_round_value);
-        is_sponge_init_vec[idx] = (current_instruction == sponge_init_opcode);
-        current_instructions[idx] = current_instruction;
-    }
-#endif
-    
-    // OPTIMIZED: Sequential loop with pre-computed metadata and optimized operations
     for (size_t idx = 0; idx < num_rows; idx++) {
             const auto& row = main_table[idx];
-            uint8_t mode_val = row_modes[idx];
-            bool in_round_0 = is_round_0[idx];
-            bool in_last_round = is_last_round[idx];
-            bool is_sponge_init = is_sponge_init_vec[idx];
-            BFieldElement current_instruction = current_instructions[idx];
+            BFieldElement mode = row[main_start + Mode];
+            BFieldElement round_number = row[main_start + RoundNumber];
+            BFieldElement current_instruction = row[main_start + CI];
             
-            bool in_program_hashing = (mode_val == HashTableMode::ProgramHashing);
-            bool in_sponge = (mode_val == HashTableMode::Sponge);
-            bool in_hash = (mode_val == HashTableMode::Hash);
-            
-            // OPTIMIZED: Determine if we need regs computation early to avoid optional overhead
-            const bool needs_regs = (in_program_hashing && in_round_0) || 
-                                   (in_sponge && in_round_0 && !is_sponge_init) ||
-                                   (in_hash && in_round_0) ||
-                                   (in_hash && in_last_round);
-            
-            // Compute regs only if needed (avoid optional overhead)
-            std::array<BFieldElement, 10> regs;
-            if (needs_regs) {
-                regs = get_regs_optimized(row);
-            }
+            bool in_program_hashing = mode == BFieldElement(HashTableMode::ProgramHashing);
+            bool in_sponge = mode == BFieldElement(HashTableMode::Sponge);
+            bool in_hash = mode == BFieldElement(HashTableMode::Hash);
+        bool in_round_0 = round_number.is_zero();
+        bool in_last_round = round_number == last_round_value;
+            bool is_sponge_init = current_instruction == sponge_init_opcode;
             
             if (in_program_hashing && in_round_0) {
-                // OPTIMIZED: Inline compute_terminal to avoid vector allocation
-                XFieldElement compressed_chunk = compute_terminal_inline(
-                    regs, EvalArg::default_initial(), prepare_chunk_indeterminate);
+                auto regs = get_regs(row);
+            std::vector<BFieldElement> regs_vec(regs.begin(), regs.end());
+                XFieldElement compressed_chunk = EvalArg::compute_terminal(
+                    regs_vec, EvalArg::default_initial(), prepare_chunk_indeterminate);
                 receive_chunk = receive_chunk * send_chunk_indeterminate + compressed_chunk;
             }
             
@@ -994,21 +884,20 @@ void extend_hash_table(
                 if (is_sponge_init) {
                     sponge = sponge * sponge_eval_indeterminate + ci_weight * XFieldElement(current_instruction);
                 } else {
-                    sponge = sponge * sponge_eval_indeterminate + ci_weight * XFieldElement(current_instruction) + compress_optimized(regs);
+                    auto regs = get_regs(row);
+                    sponge = sponge * sponge_eval_indeterminate + ci_weight * XFieldElement(current_instruction) + compress(regs);
                 }
             }
             
             if (in_hash && in_round_0) {
-                hash_input = hash_input * hash_input_eval_indeterminate + compress_optimized(regs);
+                auto regs = get_regs(row);
+                hash_input = hash_input * hash_input_eval_indeterminate + compress(regs);
             }
             
             if (in_hash && in_last_round) {
-                // OPTIMIZED: Unroll digest computation (Digest::LEN = 5)
-                XFieldElement digest = state_weights[0] * XFieldElement(regs[0]) +
-                                      state_weights[1] * XFieldElement(regs[1]) +
-                                      state_weights[2] * XFieldElement(regs[2]) +
-                                      state_weights[3] * XFieldElement(regs[3]) +
-                                      state_weights[4] * XFieldElement(regs[4]);
+                auto regs = get_regs(row);
+                XFieldElement digest = XFieldElement::zero();
+                for (size_t j = 0; j < Digest::LEN; ++j) digest += state_weights[j] * XFieldElement(regs[j]);
                 hash_digest = hash_digest * hash_digest_eval_indeterminate + digest;
             }
             
@@ -1096,9 +985,8 @@ void extend_hash_table(
             cpu_aux_tag_enabled = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
         }
 
-        // OPTIMIZED: Pre-compute which rows contribute (parallelized for large tables)
+        // Pre-compute which rows contribute (to avoid repeated checks)
         std::vector<bool> row_contributes(num_rows, false);
-        #pragma omp parallel for schedule(static)
         for (size_t idx = 0; idx < num_rows; idx++) {
             const auto row = main_table[idx];
             BFieldElement mode = row[main_start + Mode];
@@ -1231,18 +1119,17 @@ void extend_hash_table(
             };
         };
 
-        // OPTIMIZED: compress function using unrolled scalar version
-        // Uses scalar operations for correctness - BFieldElement multiplication requires
-        // proper modular reduction which is complex to implement correctly in SIMD
+        // OPTIMIZED: SIMD-accelerated compress function using pre-extracted weights
+        // This version uses the pre-extracted weights to avoid redundant extraction
         auto compress_optimized = [&](const std::array<BFieldElement, 10>& regs) -> XFieldElement {
-            // Unrolled scalar version with proper BFieldElement modular arithmetic
-            // Compiler may auto-vectorize this unrolled loop
+            // Accumulate coefficients separately (allows compiler auto-vectorization)
+            // Unroll operations for better compiler optimization with AVX2
             BFieldElement acc_c0 = BFieldElement::zero();
             BFieldElement acc_c1 = BFieldElement::zero();
             BFieldElement acc_c2 = BFieldElement::zero();
             
-            // Unroll loop for better compiler optimization (10 iterations)
-            // Each multiplication does proper Goldilocks field reduction
+            // Unroll loop for compiler auto-vectorization (works with AVX2)
+            // Compiler can vectorize these independent operations
             acc_c0 = acc_c0 + weights_c0[0] * regs[0] + weights_c0[1] * regs[1] +
                      weights_c0[2] * regs[2] + weights_c0[3] * regs[3] +
                      weights_c0[4] * regs[4] + weights_c0[5] * regs[5] +
@@ -1289,59 +1176,21 @@ void extend_hash_table(
         const size_t aux_hash_digest = aux_start + HashDigestRunningEvaluation;
         const size_t aux_sponge = aux_start + SpongeRunningEvaluation;
 
-        // OPTIMIZED: Pre-compute row metadata to avoid repeated lookups in hot loop
-        // Use TBB for better work stealing on irregular workloads
-        std::vector<uint8_t> row_modes(num_rows);
-        std::vector<bool> is_round_0(num_rows);
-        std::vector<bool> is_last_round(num_rows);
-        std::vector<bool> is_sponge_init_vec(num_rows);
-        std::vector<BFieldElement> current_instructions(num_rows);
-        
-#ifdef TVM_USE_TBB
-        // Use TBB parallel_for for better work stealing
-        tbb::parallel_for(size_t(0), num_rows, [&](size_t idx) {
-            const auto row = main_table[idx];
-            BFieldElement mode = row[main_start + Mode];
-            BFieldElement round_number = row[main_start + RoundNumber];
-            BFieldElement current_instruction = row[main_start + CI];
-            
-            row_modes[idx] = static_cast<uint8_t>(mode.value());
-            is_round_0[idx] = round_number.is_zero();
-            is_last_round[idx] = (round_number == last_round_value);
-            is_sponge_init_vec[idx] = (current_instruction == sponge_init_opcode);
-            current_instructions[idx] = current_instruction;
-        });
-#else
-        #pragma omp parallel for schedule(static)
-        for (size_t idx = 0; idx < num_rows; idx++) {
-            const auto row = main_table[idx];
-            BFieldElement mode = row[main_start + Mode];
-            BFieldElement round_number = row[main_start + RoundNumber];
-            BFieldElement current_instruction = row[main_start + CI];
-            
-            row_modes[idx] = static_cast<uint8_t>(mode.value());
-            is_round_0[idx] = round_number.is_zero();
-            is_last_round[idx] = (round_number == last_round_value);
-            is_sponge_init_vec[idx] = (current_instruction == sponge_init_opcode);
-            current_instructions[idx] = current_instruction;
-        }
-#endif
-        
-        // OPTIMIZED: Sequential loop with pre-computed metadata (faster lookups)
         for (size_t idx = 0; idx < num_rows; idx++) {
             const auto row = main_table[idx];
             
-            // Use pre-computed metadata (much faster than repeated lookups)
-            uint8_t mode_val = row_modes[idx];
-            bool in_round_0 = is_round_0[idx];
-            bool in_last_round = is_last_round[idx];
-            bool is_sponge_init = is_sponge_init_vec[idx];
-            BFieldElement current_instruction = current_instructions[idx];
+            // OPTIMIZATION: Cache row accesses to reduce redundant lookups
+            const BFieldElement mode = row[main_start + Mode];
+            const BFieldElement round_number = row[main_start + RoundNumber];
+            const BFieldElement current_instruction = row[main_start + CI];
 
-            // OPTIMIZATION: Use direct comparisons with pre-computed values
-            const bool in_program_hashing = (mode_val == static_cast<uint8_t>(HashTableMode::ProgramHashing));
-            const bool in_sponge = (mode_val == static_cast<uint8_t>(HashTableMode::Sponge));
-            const bool in_hash = (mode_val == static_cast<uint8_t>(HashTableMode::Hash));
+            // OPTIMIZATION: Use direct comparisons instead of creating temporary BFieldElements
+            const bool in_program_hashing = (mode == mode_program_hashing);
+            const bool in_sponge = (mode == mode_sponge);
+            const bool in_hash = (mode == mode_hash);
+            const bool in_round_0 = round_number.is_zero();
+            const bool in_last_round = (round_number == last_round_value);
+            const bool is_sponge_init = (current_instruction == sponge_init_opcode);
 
             // OPTIMIZATION: Determine if we need regs computation early to avoid optional overhead
             const bool needs_regs = (in_program_hashing && in_round_0) || 

@@ -147,7 +147,6 @@ __device__ constexpr size_t MAIN_PROCESSOR_START = 7;     // 39 cols
 __device__ constexpr size_t MAIN_OP_STACK_START = 46;     // 4 cols
 __device__ constexpr size_t MAIN_RAM_START = 50;          // 7 cols
 __device__ constexpr size_t MAIN_JUMP_STACK_START = 57;   // 5 cols
-// MAIN_HASH_START is defined in hash_table_constants.cuh
 __device__ constexpr size_t MAIN_CASCADE_START = 129;     // 6 cols
 __device__ constexpr size_t MAIN_LOOKUP_START = 135;      // 4 cols
 __device__ constexpr size_t MAIN_U32_START = 139;         // 15 cols
@@ -2609,394 +2608,6 @@ static void jumpstack_parallel(
     cudaStream_t stream
 );
 
-// Forward declaration for parallel OpStack
-static void opstack_parallel(
-    const uint64_t* d_main,
-    size_t main_width,
-    size_t num_rows,
-    const uint64_t* d_challenges,
-    uint64_t* d_aux,
-    cudaStream_t stream
-);
-
-// =============================================================================
-// Parallel OpStack Implementation (similar to JumpStack pattern)
-// =============================================================================
-__global__ void opstack_compute_diffs_kernel(
-    const uint64_t* __restrict__ d_main,
-    size_t main_width,
-    size_t num_rows,
-    const uint64_t* __restrict__ d_challenges,
-    Xfe3* __restrict__ d_rp_diffs,
-    uint8_t* __restrict__ d_mask
-) {
-    const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_rows) return;
-    
-    constexpr size_t CH_OpStack = 7;
-    constexpr size_t CH_OpStackClk = 16;
-    constexpr size_t CH_OpStackIb1 = 17;
-    constexpr size_t CH_OpStackPtr = 18;
-    constexpr size_t CH_OpStackVal = 19;
-    constexpr uint64_t PADDING_VALUE = 2;
-    
-    size_t row_off = idx * main_width + MAIN_OP_STACK_START;
-    uint64_t ib1 = d_main[row_off + OS_IB1];
-    
-    d_mask[idx] = (ib1 != PADDING_VALUE) ? 1 : 0;
-    
-    if (ib1 != PADDING_VALUE) {
-        uint64_t clk = d_main[row_off + OS_CLK];
-        uint64_t osp = d_main[row_off + OS_OSP];
-        uint64_t osv = d_main[row_off + OS_OSV];
-        
-        uint64_t ind0, ind1, ind2, wc0, wc1, wc2, wi0, wi1, wi2, wp0, wp1, wp2, wv0, wv1, wv2;
-        load_xfe(d_challenges, CH_OpStack, ind0, ind1, ind2);
-        load_xfe(d_challenges, CH_OpStackClk, wc0, wc1, wc2);
-        load_xfe(d_challenges, CH_OpStackIb1, wi0, wi1, wi2);
-        load_xfe(d_challenges, CH_OpStackPtr, wp0, wp1, wp2);
-        load_xfe(d_challenges, CH_OpStackVal, wv0, wv1, wv2);
-        
-        uint64_t t0, t1, t2, sum0 = 0, sum1 = 0, sum2 = 0;
-        bfe_mul_xfe(clk, wc0, wc1, wc2, t0, t1, t2);
-        xfe_add_d(sum0, sum1, sum2, t0, t1, t2, sum0, sum1, sum2);
-        bfe_mul_xfe(ib1, wi0, wi1, wi2, t0, t1, t2);
-        xfe_add_d(sum0, sum1, sum2, t0, t1, t2, sum0, sum1, sum2);
-        bfe_mul_xfe(osp, wp0, wp1, wp2, t0, t1, t2);
-        xfe_add_d(sum0, sum1, sum2, t0, t1, t2, sum0, sum1, sum2);
-        bfe_mul_xfe(osv, wv0, wv1, wv2, t0, t1, t2);
-        xfe_add_d(sum0, sum1, sum2, t0, t1, t2, sum0, sum1, sum2);
-        
-        uint64_t d0, d1, d2;
-        xfe_sub_d(ind0, ind1, ind2, sum0, sum1, sum2, d0, d1, d2);
-        d_rp_diffs[idx] = Xfe3{d0, d1, d2};
-    } else {
-        d_rp_diffs[idx] = xfe3_one();  // Padding: multiply by 1 (no change)
-    }
-}
-
-__global__ void opstack_compute_cjd_diffs_kernel(
-    const uint64_t* __restrict__ d_main,
-    size_t main_width,
-    size_t num_rows,
-    const uint64_t* __restrict__ d_challenges,
-    Xfe3* __restrict__ d_cjd_diffs,
-    uint8_t* __restrict__ d_cjd_mask
-) {
-    const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) {
-        // Row 0: CJD is always 0 (doesn't contribute)
-        d_cjd_mask[0] = 0;
-        d_cjd_diffs[0] = xfe3_one();  // Identity for multiplication (prefix product)
-        return;
-    }
-    if (idx >= num_rows) return;
-    
-    constexpr size_t CH_ClockJumpDiff = 11;
-    constexpr uint64_t PADDING_VALUE = 2;
-    
-    size_t row_off = idx * main_width + MAIN_OP_STACK_START;
-    size_t prev_off = (idx - 1) * main_width + MAIN_OP_STACK_START;
-    
-    uint64_t curr_ib1 = d_main[row_off + OS_IB1];
-    
-    // Stop when we hit padding (like sequential version)
-    if (curr_ib1 == PADDING_VALUE) {
-        d_cjd_mask[idx] = 0;
-        d_cjd_diffs[idx] = xfe3_one();  // Identity for multiplication
-        return;
-    }
-    
-    uint64_t prev_clk = d_main[prev_off + OS_CLK];
-    uint64_t curr_clk = d_main[row_off + OS_CLK];
-    uint64_t prev_osp = d_main[prev_off + OS_OSP];
-    uint64_t curr_osp = d_main[row_off + OS_OSP];
-    
-    // Only add if stack pointer same (CORRECTED: was checking clk == prev_clk, should be osp == prev_osp)
-    if (prev_osp != curr_osp) {
-        d_cjd_mask[idx] = 0;
-        d_cjd_diffs[idx] = xfe3_one();  // Identity for multiplication
-        return;
-    }
-    
-    uint64_t cjd_ind0, cjd_ind1, cjd_ind2;
-    load_xfe(d_challenges, CH_ClockJumpDiff, cjd_ind0, cjd_ind1, cjd_ind2);
-    
-    uint64_t clock_diff = bfield_sub_impl(curr_clk, prev_clk);
-    uint64_t d0, d1, d2;
-    xfe_sub_d(cjd_ind0, cjd_ind1, cjd_ind2, clock_diff, 0, 0, d0, d1, d2);
-    
-    d_cjd_mask[idx] = 1;
-    d_cjd_diffs[idx] = Xfe3{d0, d1, d2};
-}
-
-__global__ void opstack_write_rp_kernel(
-    const Xfe3* d_rp, size_t num_rows, uint64_t* d_aux
-) {
-    const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_rows) return;
-    size_t aux_idx = (idx * AUX_TOTAL_COLS + AUX_OP_STACK_START + 0) * 3;
-    d_aux[aux_idx + 0] = d_rp[idx].c0;
-    d_aux[aux_idx + 1] = d_rp[idx].c1;
-    d_aux[aux_idx + 2] = d_rp[idx].c2;
-}
-
-// Kernel to reverse XFE array (same as JumpStack)
-__global__ void opstack_reverse_kernel(
-    const Xfe3* __restrict__ d_src,
-    Xfe3* __restrict__ d_dst,
-    size_t num_rows
-) {
-    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_rows) return;
-    d_dst[i] = d_src[num_rows - 1 - i];
-}
-
-// Kernel to invert total product (same as JumpStack)
-__global__ void opstack_inv_total_kernel(
-    const Xfe3* __restrict__ d_prefix,
-    size_t num_rows,
-    Xfe3* __restrict__ d_inv_total
-) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-    const Xfe3& last = d_prefix[num_rows - 1];
-    uint64_t inv0, inv1, inv2;
-    xfe_inv_d(last.c0, last.c1, last.c2, inv0, inv1, inv2);
-    *d_inv_total = Xfe3{inv0, inv1, inv2};
-}
-
-// Kernel to compute inverses from prefix products using Montgomery's trick (same as JumpStack)
-__global__ void opstack_compute_cjd_inverses_kernel(
-    const Xfe3* __restrict__ d_prefix,      // Forward prefix products
-    const Xfe3* __restrict__ d_rev_prefix,  // Reverse prefix products (of reversed diffs)
-    const uint8_t* __restrict__ d_mask,     // Which rows contribute
-    size_t num_rows,
-    const Xfe3* __restrict__ d_inv_total,   // 1/total
-    Xfe3* __restrict__ d_inverses           // Output: individual inverses (0 for non-contributing)
-) {
-    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_rows) return;
-    
-    // Non-contributing rows get zero inverse
-    if (d_mask[i] == 0) {
-        d_inverses[i] = Xfe3{0, 0, 0};
-        return;
-    }
-    
-    const Xfe3& inv_total = *d_inv_total;
-    
-    if (num_rows == 1) {
-        // Single element case
-        d_inverses[i] = inv_total;
-        return;
-    }
-    
-    uint64_t result0, result1, result2;
-    
-    if (i == 0) {
-        // inv[0] = inv_total * rev_prefix[n-2]
-        const Xfe3& rev = d_rev_prefix[num_rows - 2];
-        xfe_mul_d(inv_total.c0, inv_total.c1, inv_total.c2, rev.c0, rev.c1, rev.c2, result0, result1, result2);
-    } else if (i == num_rows - 1) {
-        // inv[n-1] = prefix[n-2] * inv_total
-        const Xfe3& pre = d_prefix[num_rows - 2];
-        xfe_mul_d(pre.c0, pre.c1, pre.c2, inv_total.c0, inv_total.c1, inv_total.c2, result0, result1, result2);
-    } else {
-        // inv[i] = prefix[i-1] * inv_total * rev_prefix[n-2-i]
-        const Xfe3& pre = d_prefix[i - 1];
-        const Xfe3& rev = d_rev_prefix[num_rows - 2 - i];
-        uint64_t t0, t1, t2;
-        xfe_mul_d(pre.c0, pre.c1, pre.c2, inv_total.c0, inv_total.c1, inv_total.c2, t0, t1, t2);
-        xfe_mul_d(t0, t1, t2, rev.c0, rev.c1, rev.c2, result0, result1, result2);
-    }
-    
-    d_inverses[i] = Xfe3{result0, result1, result2};
-}
-
-__global__ void opstack_fix_row0_cjd_kernel(Xfe3* d_log_derivatives) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        d_log_derivatives[0] = Xfe3{0, 0, 0};
-    }
-}
-
-// Kernel to propagate last non-padding value to all padding rows
-// Sequential version stops at first padding and fills all subsequent rows with last value
-__global__ void opstack_propagate_padding_cjd_kernel(
-    const uint8_t* __restrict__ d_mask,
-    size_t num_rows,
-    Xfe3* __restrict__ d_log_derivatives
-) {
-    const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0 || idx >= num_rows) return;
-    
-    // If this is a padding row, find the last non-padding row and use its value
-    if (d_mask[idx] == 0) {
-        // Scan backwards to find last row with mask = 1
-        size_t last_idx = idx - 1;
-        while (last_idx > 0 && d_mask[last_idx] == 0) {
-            last_idx--;
-        }
-        // Use the value from the last contributing row
-        d_log_derivatives[idx] = d_log_derivatives[last_idx];
-    }
-}
-
-__global__ void opstack_write_cjd_kernel(
-    const Xfe3* d_log_derivatives, size_t num_rows, uint64_t* d_aux
-) {
-    const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_rows) return;
-    size_t aux_idx = (idx * AUX_TOTAL_COLS + AUX_OP_STACK_START + 1) * 3;
-    d_aux[aux_idx + 0] = d_log_derivatives[idx].c0;
-    d_aux[aux_idx + 1] = d_log_derivatives[idx].c1;
-    d_aux[aux_idx + 2] = d_log_derivatives[idx].c2;
-}
-
-static void opstack_parallel(
-    const uint64_t* d_main,
-    size_t main_width,
-    size_t num_rows,
-    const uint64_t* d_challenges,
-    uint64_t* d_aux,
-    cudaStream_t stream
-) {
-    if (num_rows == 0) return;
-    
-    constexpr int BLOCK = 256;
-    int grid = static_cast<int>((num_rows + BLOCK - 1) / BLOCK);
-    
-    // Allocate buffers
-    static thread_local Xfe3* d_rp_diffs = nullptr;
-    static thread_local Xfe3* d_cjd_diffs = nullptr;
-    static thread_local Xfe3* d_cjd_prefix = nullptr;
-    static thread_local Xfe3* d_cjd_rev = nullptr;
-    static thread_local Xfe3* d_cjd_inverses = nullptr;
-    static thread_local Xfe3* d_inv_total = nullptr;
-    static thread_local uint8_t* d_mask = nullptr;
-    static thread_local uint8_t* d_cjd_mask = nullptr;
-    static thread_local size_t alloc_rows = 0;
-    
-    size_t buf_size = num_rows * sizeof(Xfe3);
-    if (num_rows > alloc_rows) {
-        if (d_rp_diffs) {
-            cudaFree(d_rp_diffs);
-            cudaFree(d_cjd_diffs);
-            cudaFree(d_cjd_prefix);
-            cudaFree(d_cjd_rev);
-            cudaFree(d_cjd_inverses);
-            cudaFree(d_inv_total);
-            cudaFree(d_mask);
-            cudaFree(d_cjd_mask);
-        }
-        CUDA_CHECK(cudaMalloc(&d_rp_diffs, buf_size));
-        CUDA_CHECK(cudaMalloc(&d_cjd_diffs, buf_size));
-        CUDA_CHECK(cudaMalloc(&d_cjd_prefix, buf_size));
-        CUDA_CHECK(cudaMalloc(&d_cjd_rev, buf_size));
-        CUDA_CHECK(cudaMalloc(&d_cjd_inverses, buf_size));
-        CUDA_CHECK(cudaMalloc(&d_inv_total, sizeof(Xfe3)));
-        CUDA_CHECK(cudaMalloc(&d_mask, num_rows));
-        CUDA_CHECK(cudaMalloc(&d_cjd_mask, num_rows));
-        alloc_rows = num_rows;
-    }
-    
-    // Step 1: Compute running product diffs
-    opstack_compute_diffs_kernel<<<grid, BLOCK, 0, stream>>>(
-        d_main, main_width, num_rows, d_challenges, d_rp_diffs, d_mask
-    );
-    
-    // Step 2: CUB prefix product for running product
-    static thread_local void* d_temp_rp = nullptr;
-    static thread_local size_t temp_bytes_rp = 0;
-    size_t need_rp = 0;
-    cub::DeviceScan::InclusiveScan(
-        nullptr, need_rp,
-        d_rp_diffs, d_rp_diffs,
-        XfeMulOp{}, num_rows, stream
-    );
-    if (need_rp > temp_bytes_rp) {
-        if (d_temp_rp) cudaFree(d_temp_rp);
-        CUDA_CHECK(cudaMalloc(&d_temp_rp, need_rp));
-        temp_bytes_rp = need_rp;
-    }
-    cub::DeviceScan::InclusiveScan(
-        d_temp_rp, temp_bytes_rp,
-        d_rp_diffs, d_rp_diffs,
-        XfeMulOp{}, num_rows, stream
-    );
-    
-    // Step 3: Compute CJD diffs
-    opstack_compute_cjd_diffs_kernel<<<grid, BLOCK, 0, stream>>>(
-        d_main, main_width, num_rows, d_challenges, d_cjd_diffs, d_cjd_mask
-    );
-    
-    // Write running product results to aux table
-    opstack_write_rp_kernel<<<grid, BLOCK, 0, stream>>>(d_rp_diffs, num_rows, d_aux);
-    
-    // CJD log derivative: Use batch inversion (Montgomery's trick) - EXACTLY like JumpStack
-    // Complete, proper implementation - no workarounds
-    
-    // Step 4: Forward prefix product over diffs
-    static thread_local void* d_temp_cjd = nullptr;
-    static thread_local size_t temp_bytes_cjd = 0;
-    size_t need_cjd = 0;
-    cub::DeviceScan::InclusiveScan(
-        nullptr, need_cjd,
-        d_cjd_diffs, d_cjd_prefix,
-        XfeMulOp{}, num_rows, stream
-    );
-    if (need_cjd > temp_bytes_cjd) {
-        if (d_temp_cjd) cudaFree(d_temp_cjd);
-        CUDA_CHECK(cudaMalloc(&d_temp_cjd, need_cjd));
-        temp_bytes_cjd = need_cjd;
-    }
-    cub::DeviceScan::InclusiveScan(
-        d_temp_cjd, temp_bytes_cjd,
-        d_cjd_diffs, d_cjd_prefix,
-        XfeMulOp{}, num_rows, stream
-    );
-    
-    // Step 5: Reverse diffs, then prefix product for reverse prefix
-    opstack_reverse_kernel<<<grid, BLOCK, 0, stream>>>(
-        d_cjd_diffs, d_cjd_rev, num_rows
-    );
-    cub::DeviceScan::InclusiveScan(
-        d_temp_cjd, temp_bytes_cjd,
-        d_cjd_rev, d_cjd_rev,
-        XfeMulOp{}, num_rows, stream
-    );
-    
-    // Step 6: Invert total product (single inversion!)
-    opstack_inv_total_kernel<<<1, 1, 0, stream>>>(
-        d_cjd_prefix, num_rows, d_inv_total
-    );
-    
-    // Step 7: Compute individual inverses from prefix products
-    opstack_compute_cjd_inverses_kernel<<<grid, BLOCK, 0, stream>>>(
-        d_cjd_prefix, d_cjd_rev, d_cjd_mask, num_rows, d_inv_total, d_cjd_inverses
-    );
-    
-    // Step 8: Prefix sum over inverses for log derivative
-    // Note: Non-contributing rows have inverses = 0, so prefix sum will carry forward correctly
-    // Padding rows will automatically get the last accumulated value (correct behavior)
-    cub::DeviceScan::InclusiveScan(
-        d_temp_cjd, temp_bytes_cjd,
-        d_cjd_inverses, d_cjd_inverses,
-        XfeAddOp{}, num_rows, stream
-    );
-    
-    // Step 9: Fix row 0 (always 0) - prefix sum may have computed a value for row 0
-    opstack_fix_row0_cjd_kernel<<<1, 1, 0, stream>>>(d_cjd_inverses);
-    
-    // Step 10: Propagate last non-padding value to all padding rows
-    // Sequential version stops at first padding and fills all subsequent rows with last value
-    opstack_propagate_padding_cjd_kernel<<<grid, BLOCK, 0, stream>>>(
-        d_cjd_mask, num_rows, d_cjd_inverses
-    );
-    
-    // Step 11: Write CJD log derivative to aux table
-    opstack_write_cjd_kernel<<<grid, BLOCK, 0, stream>>>(d_cjd_inverses, num_rows, d_aux);
-}
-
 // =============================================================================
 // Host Interface
 // =============================================================================
@@ -3154,10 +2765,10 @@ void extend_aux_table_full_gpu(
     );
     cudaEventRecord(diff_ready, stream);
 
-    // Non-hash tables - Use parallel implementations for better performance
-    // Tables with parallel implementations: JumpStack (4), Hash (7 - handled separately)
-    // Tables still using sequential: Program (0), Processor (1), OpStack (2), RAM (3), 
-    //                                 Lookup (5), U32 (6), Cascade (8), LookupBig (9), DegreeLowering (10)
+    // Non-hash tables
+    // NOTE: Parallel implementations exist but need optimization. The sequential single-thread
+    // implementation currently performs better for most tables due to better memory streaming.
+    // Future work: optimize parallel implementations (reduce CUB overhead, better memory access patterns).
     int non_hash_tables[] = {0, 1, 2, 3, 4, 5, 6, 8, 9, 10};
     
     // For detailed profiling, track each non-hash table
@@ -3171,30 +2782,7 @@ void extend_aux_table_full_gpu(
         }
     }
     
-    // Re-enabling parallel implementations (verification passed with sequential)
-    // Start with known-working implementations: Hash and JumpStack
-    
-    // JumpStack (table_id 1, index 1 in non_hash_tables) - RE-ENABLED (Step 2: testing after Hash running evals passed)
-    jumpstack_parallel(
-        d_main_table, main_width, num_rows, d_challenges, d_aux_table,
-        streams[1]
-    );
-    
-    // OpStack (table 2, index 2) - ENABLED (parallel implementation ready)
-    opstack_parallel(
-        d_main_table, main_width, num_rows, d_challenges, d_aux_table,
-        streams[2]
-    );
-    
-    // Use sequential for remaining tables (skip JumpStack and OpStack if parallel is enabled)
     for (int i = 0; i < NUM_NON_HASH_TABLES; i++) {
-        if (non_hash_tables[i] == 1 || non_hash_tables[i] == 2) {
-            // Skip JumpStack (table_id 1) and OpStack (table_id 2), already handled with parallel versions
-            if (profile_mode) {
-                cudaEventRecord(non_hash_stop[i], streams[i]);
-            }
-            continue;
-        }
         extend_all_tables_kernel<<<1, 1, 0, streams[i]>>>(
             d_main_table, main_width, num_rows, d_challenges, aux_rng_seed_value, d_aux_table,
             non_hash_tables[i]
@@ -3213,7 +2801,7 @@ void extend_aux_table_full_gpu(
         cudaEventRecord(eval_start, streams[NUM_NON_HASH_TABLES]);
     }
 
-    // Hash running evals - RE-ENABLED (testing one by one)
+    // Hash running evals - PARALLEL using CUB prefix scan!
     hash_running_evals_parallel(
         d_main_table, main_width, num_rows, d_challenges, d_aux_table,
         streams[NUM_NON_HASH_TABLES]
@@ -3225,7 +2813,6 @@ void extend_aux_table_full_gpu(
         cudaEventRecord(cascade_start, streams[NUM_NON_HASH_TABLES + 1]);
     }
 
-    // Cascade kernels - RE-ENABLED (known working)
     // Cascade kernels depend on diff_ready (NOT on hash_running_evals - they can overlap!)
     for (int ld = 0; ld < NUM_CASCADE_LDS; ++ld) {
         cudaStream_t s = streams[NUM_NON_HASH_TABLES + 1 + ld];
@@ -3246,7 +2833,6 @@ void extend_aux_table_full_gpu(
         uint64_t* inv_ld = d_hash_cascade_inverses + offset;
         const uint8_t* mask_ld = d_hash_cascade_mask + static_cast<size_t>(ld) * num_rows;
 
-        // Hash cascade parallel - RE-ENABLED (Step 3: testing after Hash running evals and JumpStack passed)
         if (use_cub) {
             // Allocate / reuse temp storage and inv_total buffer (lazy, once per call)
             // We allocate per-stream to avoid cross-stream contention.
@@ -3400,15 +2986,6 @@ __global__ void hash_prepare_diff_kernel(
     uint64_t* __restrict__ d_diffs,
     uint8_t* __restrict__ d_mask
 ) {
-    // Hash table column indices (relative to MAIN_HASH_START)
-    constexpr size_t HASH_MODE_COL = 0;
-    constexpr size_t HASH_CI_COL = 1;
-    constexpr size_t HASH_ROUND_COL = 2;
-    
-    // Hash mode values
-    constexpr uint64_t HASH_MODE_PAD = 0;
-    constexpr uint64_t HASH_SPONGE_INIT_OPCODE = 40;
-    
     const size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     const size_t ld_index = blockIdx.y;
     if (ld_index >= HASH_NUM_CASCADES) {
