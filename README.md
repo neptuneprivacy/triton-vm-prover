@@ -133,14 +133,17 @@ export TVM_USE_TBB=1
 export TRITON_GPU_DEGREE_LOWERING=1
 export TRITON_GPU_U32=1
 export TVM_USE_RUST_TRACE=1
+export TRITON_GPU_USE_RAM_OVERFLOW=1
 export TRITON_MULTI_GPU=0
+export TRITON_GPU_COUNT=1
 ```
 
 These variables control:
 - OpenMP parallelization settings (`TRITON_OMP_*`, `OMP_NUM_THREADS`)
 - CPU/GPU execution modes (`TRITON_AUX_CPU`, `TRITON_GPU_*`)
 - Task scheduling libraries (`TVM_USE_TASKFLOW`, `TVM_USE_TBB`)
-- Multi-GPU support (`TRITON_MULTI_GPU`)
+- Multi-GPU support (`TRITON_MULTI_GPU`, `TRITON_GPU_COUNT`)
+- GPU memory management (`TRITON_GPU_USE_RAM_OVERFLOW` - uses system RAM as VRAM buffer)
 - Rust trace integration (`TVM_USE_RUST_TRACE`)
 
 Adjust `OMP_NUM_THREADS` based on your CPU core count for optimal performance.

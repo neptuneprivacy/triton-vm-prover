@@ -94,7 +94,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 PROVER="$BUILD_DIR/triton_vm_prove_gpu_full"
-VERIFIER_DIR="$SCRIPT_DIR/../triton-cli-1.0.0"
+VERIFIER_DIR="$SCRIPT_DIR/triton-cli-1.0.0"
 VERIFIER="$VERIFIER_DIR/target/release/triton-cli"
 
 # Output files
@@ -146,21 +146,26 @@ echo -e "${YELLOW}━━━ Step 1: Building Project ━━━${NC}"
 cd "$SCRIPT_DIR"
 
 # Set CUDA environment variables FIRST (before checking version)
-# Prefer system CUDA 12.0 (compiles faster), then fall back to CUDA 13.x
-# Note: nvcc 13.0/13.1 with sm_90 can hang on complex kernels during ptxas
-if [[ -x "/usr/bin/nvcc" ]]; then
-    # Use system nvcc (usually CUDA 12.0)
-    export PATH=/usr/bin:$PATH
-elif [[ -d "/usr/local/cuda-13.0" ]]; then
+# Prefer CUDA 13.0, then fall back to other versions
+if [[ -d "/usr/local/cuda-13.0" ]] && [[ -x "/usr/local/cuda-13.0/bin/nvcc" ]]; then
     export CUDA_HOME=/usr/local/cuda-13.0
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export CUDAToolkit_ROOT=/usr/local/cuda-13.0
-elif [[ -d "/usr/local/cuda-13.1" ]]; then
+elif [[ -d "/usr/local/cuda-13.1" ]] && [[ -x "/usr/local/cuda-13.1/bin/nvcc" ]]; then
     export CUDA_HOME=/usr/local/cuda-13.1
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export CUDAToolkit_ROOT=/usr/local/cuda-13.1
+elif [[ -x "/usr/local/cuda/bin/nvcc" ]]; then
+    # Use /usr/local/cuda (symlink, should point to preferred version)
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    export CUDAToolkit_ROOT=/usr/local/cuda
+elif [[ -x "/usr/bin/nvcc" ]]; then
+    # Fall back to system nvcc (usually CUDA 12.0)
+    export PATH=/usr/bin:$PATH
 fi
 
 # Get CUDA version to determine supported architectures
@@ -186,7 +191,6 @@ if [[ -z "$ARCH_OVERRIDE" ]]; then
             DETECTED_ARCH="89"
             echo "  -> Ada Lovelace architecture detected, using sm_89"
         # Blackwell (RTX 50xx, RTX PRO 6000) - sm_90 (Hopper compatibility mode)
-        # Using sm_90 with CUDA 12.0 (nvcc 13.x hangs on sm_90 for complex kernels)
         elif [[ "$GPU_NAME" == *"RTX 50"* ]] || [[ "$GPU_NAME" == *"RTX PRO 6000"* ]] || [[ "$GPU_NAME" == *"Blackwell"* ]]; then
             DETECTED_ARCH="90"
             echo "  -> Blackwell architecture detected, using sm_90 (Hopper compatibility mode)"
@@ -252,15 +256,18 @@ if [[ $NEED_CMAKE -eq 1 ]]; then
         -DBUILD_BENCHMARKS=OFF
     )
 
-    # Prefer system nvcc 12.0 (faster compilation), then CUDA 13.x
-    if [[ -x "/usr/bin/nvcc" ]]; then
-        CMAKE_ARGS+=("-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc")
-    elif [[ -d "/usr/local/cuda-13.0" ]]; then
+    # Prefer CUDA 13.0, then fall back to other versions
+    if [[ -d "/usr/local/cuda-13.0" ]] && [[ -x "/usr/local/cuda-13.0/bin/nvcc" ]]; then
         CMAKE_ARGS+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc")
         CMAKE_ARGS+=("-DCUDAToolkit_ROOT=/usr/local/cuda-13.0")
-    elif [[ -d "/usr/local/cuda-13.1" ]]; then
+    elif [[ -d "/usr/local/cuda-13.1" ]] && [[ -x "/usr/local/cuda-13.1/bin/nvcc" ]]; then
         CMAKE_ARGS+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc")
         CMAKE_ARGS+=("-DCUDAToolkit_ROOT=/usr/local/cuda-13.1")
+    elif [[ -x "/usr/local/cuda/bin/nvcc" ]]; then
+        CMAKE_ARGS+=("-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc")
+        CMAKE_ARGS+=("-DCUDAToolkit_ROOT=/usr/local/cuda")
+    elif [[ -x "/usr/bin/nvcc" ]]; then
+        CMAKE_ARGS+=("-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc")
     fi
 
     if [[ -n "$TARGET_ARCH" ]]; then

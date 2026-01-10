@@ -146,13 +146,14 @@ void pad_processor_table(
     }
 
     // Fill padding section (rows >= table_len) for *processor columns only* - parallelized
-    // OPTIMIZED: Use element-wise copy with compiler-friendly loop (compiler can vectorize)
-    #pragma omp parallel for schedule(static)
+    // Optimize: use memcpy for bulk copy, then update specific columns
+    const size_t row_bytes = PROCESSOR_TABLE_COLS * sizeof(BFieldElement);
+    #pragma omp parallel for schedule(dynamic, 1024)
     for (size_t i = table_len; i < padded_height; ++i) {
-        // Copy template row (compiler will optimize this)
-        for (size_t c = 0; c < PROCESSOR_TABLE_COLS; ++c) {
-            main_table[i][PROCESSOR_TABLE_START + c] = template_row[c];
-        }
+        // Bulk copy template row using memcpy (faster than element-wise copy)
+        std::memcpy(&main_table[i][PROCESSOR_TABLE_START], 
+                   template_row.data(), 
+                   row_bytes);
         // Override specific columns
         main_table[i][is_padding_col] = BFieldElement::one();
         main_table[i][cjd_col] = BFieldElement::zero();
@@ -192,10 +193,9 @@ void pad_op_stack_table(
     // Rust: set IB1ShrinkStack to PADDING_VALUE (2)
     padding_row[IB1ShrinkStack] = PADDING_VALUE;
 
-    // OPTIMIZED: Parallelized padding loop with compiler-friendly copy
+    // Parallelized padding loop
     #pragma omp parallel for schedule(static)
     for (size_t i = table_len; i < padded_height; ++i) {
-        // Element-wise copy (compiler will optimize/vectorize)
         for (size_t c = 0; c < OP_STACK_TABLE_COLS; ++c) {
             main_table[i][OP_STACK_TABLE_START + c] = padding_row[c];
         }
@@ -227,10 +227,9 @@ void pad_ram_table(
     // Set InstructionType to PADDING_INDICATOR (2)
     padding_row[InstructionType] = PADDING_INDICATOR;
     
-    // OPTIMIZED: Fill all padding rows - parallelized with compiler-friendly copy
+    // Fill all padding rows - parallelized
     #pragma omp parallel for schedule(static)
     for (size_t i = table_len; i < padded_height; ++i) {
-        // Element-wise copy (compiler will optimize/vectorize)
         for (size_t c = 0; c < RAM_TABLE_COLS; ++c) {
             main_table[i][RAM_TABLE_START + c] = padding_row[c];
         }
@@ -330,32 +329,23 @@ void pad_hash_table(
         round_consts[k] = Tip5::ROUND_CONSTANTS[k];
     }
 
-    // OPTIMIZED: Parallelized padding loop with better cache locality
-    // Pre-compute all column offsets to avoid repeated calculations
-    const size_t col_state0_inv = HASH_TABLE_START + State0Inv;
-    const size_t col_state1_inv = HASH_TABLE_START + State1Inv;
-    const size_t col_state2_inv = HASH_TABLE_START + State2Inv;
-    const size_t col_state3_inv = HASH_TABLE_START + State3Inv;
-    const size_t col_mode = HASH_TABLE_START + Mode;
-    const size_t col_ci = HASH_TABLE_START + CI;
-    const size_t col_const0 = HASH_TABLE_START + Constant0;
-    
+    // Parallelized padding loop
     #pragma omp parallel for schedule(static)
     for (size_t i = table_len; i < padded_height; ++i) {
         // State inverses
-        main_table[i][col_state0_inv] = inv_2p32_minus_1;
-        main_table[i][col_state1_inv] = inv_2p32_minus_1;
-        main_table[i][col_state2_inv] = inv_2p32_minus_1;
-        main_table[i][col_state3_inv] = inv_2p32_minus_1;
+        main_table[i][HASH_TABLE_START + State0Inv] = inv_2p32_minus_1;
+        main_table[i][HASH_TABLE_START + State1Inv] = inv_2p32_minus_1;
+        main_table[i][HASH_TABLE_START + State2Inv] = inv_2p32_minus_1;
+        main_table[i][HASH_TABLE_START + State3Inv] = inv_2p32_minus_1;
 
-        // Round 0 constants (16 constants) - unroll small loop for better performance
+        // Round 0 constants (16 constants)
         for (size_t k = 0; k < Tip5::STATE_SIZE; ++k) {
-            main_table[i][col_const0 + k] = round_consts[k];
+            main_table[i][HASH_TABLE_START + Constant0 + k] = round_consts[k];
         }
 
         // Mode + CI
-        main_table[i][col_mode] = pad_mode;
-        main_table[i][col_ci] = hash_opcode;
+        main_table[i][HASH_TABLE_START + Mode] = pad_mode;
+        main_table[i][HASH_TABLE_START + CI] = hash_opcode;
     }
 }
 

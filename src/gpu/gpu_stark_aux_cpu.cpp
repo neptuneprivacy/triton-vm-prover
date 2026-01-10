@@ -300,22 +300,14 @@ void GpuStark::compute_aux_table_cpu(
     auto upload_columns = [&](size_t col_start, size_t col_end) {
         auto t_upload_start = std::chrono::high_resolution_clock::now();
         // Use aux_width from outer scope (captured by reference)
-        const size_t num_cols_to_upload = (col_end > col_start && col_end <= aux_width) ? (col_end - col_start) : 0;
-        
 #ifdef _OPENMP
         if (omp_upload_enabled) {
-            // OPTIMIZED: Process rows in parallel with better cache locality
-            // Process columns within each row sequentially (better cache locality)
             #pragma omp parallel for schedule(static)
             for (size_t r = 0; r < num_rows; ++r) {
-                const size_t row_base_idx = static_cast<size_t>(r) * aux_width * 3;
-                const auto& row = aux_table_vec[r];
-                // Process columns sequentially for better cache locality
                 for (size_t c = col_start; c < col_end && c < aux_width; ++c) {
-                    // OPTIMIZED: Pre-compute index once
-                    const size_t idx = row_base_idx + static_cast<size_t>(c) * 3;
-                    const auto& xfe = row[c];
-                    // Direct access to coefficients (faster)
+                    // Cast before multiply to prevent 32-bit overflow
+                    size_t idx = (static_cast<size_t>(r) * aux_width + static_cast<size_t>(c)) * 3;
+                    const auto& xfe = aux_table_vec[r][c];
                     h_aux_ptr[idx + 0] = xfe.coeff(0).value();
                     h_aux_ptr[idx + 1] = xfe.coeff(1).value();
                     h_aux_ptr[idx + 2] = xfe.coeff(2).value();
@@ -323,11 +315,10 @@ void GpuStark::compute_aux_table_cpu(
             }
         } else {
             for (size_t r = 0; r < num_rows; ++r) {
-                const size_t row_base_idx = static_cast<size_t>(r) * aux_width * 3;
-                const auto& row = aux_table_vec[r];
                 for (size_t c = col_start; c < col_end && c < aux_width; ++c) {
-                    const size_t idx = row_base_idx + static_cast<size_t>(c) * 3;
-                    const auto& xfe = row[c];
+                    // Cast before multiply to prevent 32-bit overflow
+                    size_t idx = (static_cast<size_t>(r) * aux_width + static_cast<size_t>(c)) * 3;
+                    const auto& xfe = aux_table_vec[r][c];
                     h_aux_ptr[idx + 0] = xfe.coeff(0).value();
                     h_aux_ptr[idx + 1] = xfe.coeff(1).value();
                     h_aux_ptr[idx + 2] = xfe.coeff(2).value();
@@ -336,11 +327,10 @@ void GpuStark::compute_aux_table_cpu(
         }
 #else
         for (size_t r = 0; r < num_rows; ++r) {
-            const size_t row_base_idx = static_cast<size_t>(r) * aux_width * 3;
-            const auto& row = aux_table_vec[r];
             for (size_t c = col_start; c < col_end && c < aux_width; ++c) {
-                const size_t idx = row_base_idx + static_cast<size_t>(c) * 3;
-                const auto& xfe = row[c];
+                // Cast before multiply to prevent 32-bit overflow
+                size_t idx = (static_cast<size_t>(r) * aux_width + static_cast<size_t>(c)) * 3;
+                const auto& xfe = aux_table_vec[r][c];
                 h_aux_ptr[idx + 0] = xfe.coeff(0).value();
                 h_aux_ptr[idx + 1] = xfe.coeff(1).value();
                 h_aux_ptr[idx + 2] = xfe.coeff(2).value();

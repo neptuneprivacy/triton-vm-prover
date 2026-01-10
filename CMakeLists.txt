@@ -5,13 +5,19 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 option(ENABLE_CUDA "Enable CUDA GPU acceleration" ON)
 
+# Set CUDA 13.0 path BEFORE project() to ensure CMake uses the correct CUDA version
+if(ENABLE_CUDA AND EXISTS "/usr/local/cuda-13.0")
+    set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.0/bin/nvcc" CACHE FILEPATH "CUDA compiler")
+    set(CUDAToolkit_ROOT "/usr/local/cuda-13.0" CACHE PATH "CUDA Toolkit root directory")
+    set(CMAKE_PREFIX_PATH "/usr/local/cuda-13.0" ${CMAKE_PREFIX_PATH})
+endif()
+
 # Set CUDA architectures BEFORE project() to avoid CMake using default (sm_52) during compiler detection
-# Check environment variable first, then cache variable, then default to 90
+# Check environment variable first, then default to 90
+# Note: Cache variable TRITON_CUDA_ARCHITECTURES is set after project() and will override this if needed
 if(ENABLE_CUDA)
     if(DEFINED ENV{CMAKE_CUDA_ARCHITECTURES})
         set(CMAKE_CUDA_ARCHITECTURES "$ENV{CMAKE_CUDA_ARCHITECTURES}")
-    elseif(DEFINED TRITON_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "${TRITON_CUDA_ARCHITECTURES}")
     else()
         set(CMAKE_CUDA_ARCHITECTURES "90")
     endif()
@@ -60,7 +66,10 @@ if(ENABLE_CUDA)
     # For fastest local iteration, compile only for your actual GPU:
     #   cmake -S . -B build -DTRITON_CUDA_ARCHITECTURES=90
     set(TRITON_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA arch list for nvcc (e.g. 90 or 89;90)")
-    set(CMAKE_CUDA_ARCHITECTURES "${TRITON_CUDA_ARCHITECTURES}")
+    # Only override CMAKE_CUDA_ARCHITECTURES if it wasn't already set by environment variable
+    if(NOT DEFINED ENV{CMAKE_CUDA_ARCHITECTURES})
+        set(CMAKE_CUDA_ARCHITECTURES "${TRITON_CUDA_ARCHITECTURES}")
+    endif()
 
     # Speed up nvcc compilation (CUDA 12+): parallel compilation.
     # Set empty to disable if your nvcc doesn't support it.
@@ -80,6 +89,14 @@ if(ENABLE_CUDA)
     set(CMAKE_CUDA_FLAGS "--expt-relaxed-constexpr -diag-suppress=177 -U__STDC_VERSION__ -U__STDC_WANT_IEC_60559_TYPES_EXT__ -U__STDC_WANT_IEC_60559_BFP_EXT__ -U__STDC_WANT_IEC_60559_FUNCS_EXT__ -U__STDC_WANT_IEC_60559_FUNCS_EXT2__")
     if(NOT "${TRITON_NVCC_THREADS}" STREQUAL "")
         set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads=${TRITON_NVCC_THREADS}")
+    endif()
+
+    # CUDA 13.0 workaround: limit ptxas optimizations to prevent hangs on complex kernels
+    # ptxas (PTX assembler) in CUDA 13.0 can hang indefinitely even with -O2 compiler optimization
+    # Using --ptxas-options=-O1 limits ptxas optimizer while keeping nvcc compiler optimizations
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0" AND CUDAToolkit_VERSION VERSION_LESS "14.0")
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-O1")
+        message(STATUS "CUDA 13.0 detected: limiting ptxas optimizations to -O1 to prevent hangs")
     endif()
 
     # Enable libstdc++ runtime assertions in debug/profiling builds.
@@ -328,26 +345,14 @@ if(ENABLE_CUDA AND TRITON_VM_GPU_SOURCES_EXISTING)
     target_sources(triton_vm PRIVATE ${TRITON_VM_GPU_SOURCES_EXISTING})
 endif()
 
-# Enable SIMD optimizations for x86_64 (AVX512 first, fallback to AVX2)
+# Enable SIMD optimizations for x86_64 (AVX2 and FMA)
 # Only apply to C++ files, not CUDA files
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
-    # Check if compiler supports AVX512
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx512f -mavx512dq" COMPILER_SUPPORTS_AVX512)
-    
-    if(COMPILER_SUPPORTS_AVX512)
-        target_compile_options(triton_vm PRIVATE 
-            $<$<COMPILE_LANGUAGE:CXX>:-mavx512f -mavx512dq -mavx2 -mfma>
-        )
-        add_compile_definitions(XFE_SIMD_AVX512_ENABLED=1)
-        message(STATUS "AVX512, AVX2, and FMA SIMD optimizations enabled for C++ code")
-    else()
-        target_compile_options(triton_vm PRIVATE 
-            $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>
-        )
-        add_compile_definitions(XFE_SIMD_AVX2_ENABLED=1)
-        message(STATUS "AVX2 and FMA SIMD optimizations enabled for C++ code (AVX512 not available)")
-    endif()
+    target_compile_options(triton_vm PRIVATE 
+        $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>
+    )
+    add_compile_definitions(XFE_SIMD_AVX2_ENABLED=1)
+    message(STATUS "AVX2 and FMA SIMD optimizations enabled for C++ code")
 endif()
 
 target_include_directories(triton_vm PUBLIC 
@@ -582,8 +587,13 @@ if(ENABLE_CUDA)
     )
 
     # Debug tool: compare decoded proof streams (Rust vs GPU)
-    # Commented out: source file does not exist
-    # add_executable(compare_proof_streams tools/compare_proof_streams.cpp)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/compare_proof_streams.cpp)
+        add_executable(compare_proof_streams tools/compare_proof_streams.cpp)
+        target_link_libraries(compare_proof_streams triton_vm CUDA::cudart_static)
+        target_include_directories(compare_proof_streams PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+    endif()
     
     # Trace dump tool: dump AET and domain data for comparison with Rust
     add_executable(dump_trace src/tools/dump_trace.cpp)
@@ -591,18 +601,15 @@ if(ENABLE_CUDA)
     target_include_directories(dump_trace PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    # target_link_libraries(compare_proof_streams triton_vm CUDA::cudart_static)
-    # target_include_directories(compare_proof_streams PRIVATE
-    #     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    # )
 
     # Debug tool: print proof item encoding sizes
-    # Commented out: source file does not exist
-    # add_executable(print_proof_item_encoding_sizes tools/print_proof_item_encoding_sizes.cpp)
-    # target_link_libraries(print_proof_item_encoding_sizes triton_vm CUDA::cudart_static)
-    # target_include_directories(print_proof_item_encoding_sizes PRIVATE
-    #     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    # )
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/print_proof_item_encoding_sizes.cpp)
+        add_executable(print_proof_item_encoding_sizes tools/print_proof_item_encoding_sizes.cpp)
+        target_link_libraries(print_proof_item_encoding_sizes triton_vm CUDA::cudart_static)
+        target_include_directories(print_proof_item_encoding_sizes PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+    endif()
     
     # ============================================================================
     # GPU Prover Server (Neptune integration)

@@ -21,8 +21,9 @@ if [[ ! -d "$DIR" ]]; then
   exit 1
 fi
 
-GPU_PROVER_DEFAULT="/home/speedy/Documents/workspace-alt/workspace/triton-vm-cpp/build/triton_vm_prove_gpu_full"
-TRITON_CLI_DEFAULT="/home/speedy/Documents/workspace-alt/workspace/triton-cli-1.0.0/target/release/triton-cli"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GPU_PROVER_DEFAULT="$SCRIPT_DIR/build/triton_vm_prove_gpu_full"
+TRITON_CLI_DEFAULT="$SCRIPT_DIR/../triton-cli-1.0.0/target/release/triton-cli"
 
 GPU_PROVER="${TRITON_GPU_PROVER_PATH:-$GPU_PROVER_DEFAULT}"
 TRITON_CLI="${TRITON_CLI:-$TRITON_CLI_DEFAULT}"

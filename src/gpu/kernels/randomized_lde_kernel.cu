@@ -987,7 +987,6 @@ __global__ void generate_powers_chunked_kernel(
     if (chunk_idx >= num_chunks) return;
     
     // Only thread 0 per block does the work (sequential within chunk)
-    // This is fast enough for 4096-element chunks
     if (threadIdx.x != 0) return;
     
     size_t start = chunk_idx * chunk_size;
@@ -1153,19 +1152,12 @@ static void randomized_lde_batch_impl(
     uint64_t offset_pow_n = bfield_pow_host(trace_offset, trace_len);
     
     if (poly_len <= target_len) {
-        // Select kernel variant based on environment variable
-        // TRITON_PAD_SCALE_MODE: 0=original (best), 1=sparse, 2=rowmajor+transpose, 3=tiled, 4=branchless
-        // Note: Sparse mode adds memset overhead, so original is often faster
-        const char* mode_env = std::getenv("TRITON_PAD_SCALE_MODE");
-        int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (best performance)
-        
-        // Generate powers for target_len (needed for all modes except sparse)
-        size_t powers_needed = target_len;
+        // Precompute powers of target_offset once (shared across all columns)
         uint64_t* d_powers;
-        cudaMalloc(&d_powers, powers_needed * sizeof(uint64_t));
+        cudaMalloc(&d_powers, target_len * sizeof(uint64_t));
         
         constexpr size_t POWER_CHUNK_SIZE = 4096;
-        size_t num_chunks = (powers_needed + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+        size_t num_chunks = (target_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
         
         uint64_t* d_chunk_bases;
         cudaMalloc(&d_chunk_bases, num_chunks * sizeof(uint64_t));
@@ -1176,16 +1168,20 @@ static void randomized_lde_batch_impl(
         );
         
         generate_powers_chunked_kernel<<<num_chunks, 1, 0, stream>>>(
-            d_powers, powers_needed, target_offset, POWER_CHUNK_SIZE, d_chunk_bases
+            d_powers, target_len, target_offset, POWER_CHUNK_SIZE, d_chunk_bases
         );
         
         cudaFree(d_chunk_bases);
-        if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] gen_powers (%zu): %.2f ms\n", powers_needed, elapsed()); }
+        if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] gen_powers: %.2f ms\n", elapsed()); }
+        
+        // Select kernel variant based on environment variable
+        // TRITON_PAD_SCALE_MODE: 0=original (best), 1=sparse, 2=rowmajor+transpose, 3=tiled, 4=branchless
+        const char* mode_env = std::getenv("TRITON_PAD_SCALE_MODE");
+        int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (best performance)
         
         if (mode == 1) {
-            // OPTION 1: Sparse kernel - memset zeros first, then only process poly_len rows
-            // This processes only 13% of elements (poly_len/target_len), much faster!
-            // Powers are already generated for poly_len (optimized above)
+            // OPTION A: Sparse kernel - memset zeros first, then only process poly_len rows
+            // This processes only 13% of elements (poly_len/target_len)
             cudaMemsetAsync(d_output, 0, num_cols * target_len * sizeof(uint64_t), stream);
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] memset_zeros: %.2f ms\n", elapsed()); }
             
@@ -1245,7 +1241,7 @@ static void randomized_lde_batch_impl(
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] branchless_kernel: %.2f ms\n", elapsed()); }
         }
         else {
-            // OPTION 0: Original mega-fused kernel (default - best performance)
+            // OPTION 0: Original mega-fused kernel (optimized with cached parameters)
             constexpr int MEGA_ELEMS = 4;
             int grid_mega = (num_cols * target_len + BLOCK_SIZE * MEGA_ELEMS - 1) / (BLOCK_SIZE * MEGA_ELEMS);
             fused_zerofier_pad_scale_kernel<<<grid_mega, BLOCK_SIZE, 0, stream>>>(
