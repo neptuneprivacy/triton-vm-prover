@@ -1081,6 +1081,7 @@ pub(crate) async fn mine(
         let mut stop_guessing = false;
         let mut stop_composing = false;
         let mut stop_looping = false;
+        let mut composition_result_received = false;
 
         // Await a message from either the worker task or from the main loop,
         // or the restart of the guesser-task.
@@ -1186,6 +1187,7 @@ pub(crate) async fn mine(
 
                 match new_composition {
                     Ok((new_block_proposal, composer_utxos)) => {
+                        composition_result_received = true;
                         to_main.send(MinerToMain::BlockProposal(Box::new((new_block_proposal, composer_utxos)))).await?;
                         wait_for_confirmation = true;
                     },
@@ -1243,7 +1245,9 @@ pub(crate) async fn mine(
             global_state_lock.set_mining_status_to_inactive().await;
         }
         if stop_composing {
-            if !composer_task.is_finished() {
+            // Don't cancel if we've already received the result - this prevents
+            // cancelling binary merge Level 2 when the result is about to be sent.
+            if !composer_task.is_finished() && !composition_result_received {
                 cancel_compose_tx.send(())?;
                 debug!("Cancel signal sent to composer worker.");
             }
