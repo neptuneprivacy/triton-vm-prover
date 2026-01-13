@@ -1908,6 +1908,19 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
         }
     }
     
+    // For unified memory, prefetch input and output buffers before transpose
+    if (use_unified_memory()) {
+        size_t data_size = trace_len * width * sizeof(uint64_t);
+        int device;
+        cudaGetDevice(&device);
+        cudaMemLocation location;
+        location.type = cudaMemLocationTypeDevice;
+        location.id = device;
+        cudaMemPrefetchAsync(ctx_->d_main_trace(), data_size, location, 0);
+        cudaMemPrefetchAsync(d_trace_colmajor, data_size, location, 0);
+        cudaStreamSynchronize(ctx_->stream());
+    }
+    
     qzc_rowmajor_to_colmajor_bfe<<<grid, BLOCK, 0, ctx_->stream()>>>(
         ctx_->d_main_trace(), d_trace_colmajor, trace_len, width
     );

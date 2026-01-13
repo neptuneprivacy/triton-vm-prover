@@ -8,6 +8,7 @@
 #ifdef TRITON_CUDA_ENABLED
 
 #include "gpu/kernels/bfield_kernel.cuh"
+#include "gpu/cuda_common.cuh"
 #include <cuda_runtime.h>
 
 namespace triton_vm {
