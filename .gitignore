@@ -71,3 +71,9 @@ Thumbs.db
 *.bak
 *.backup
 *~
+
+# Log files
+*.log
+
+# Index files
+*.idx

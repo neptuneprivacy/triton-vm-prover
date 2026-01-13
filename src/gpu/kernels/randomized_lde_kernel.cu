@@ -640,90 +640,7 @@ __global__ void fused_zerofier_pad_scale_sparse_kernel(
     }
 }
 
-// ============================================================================
-// OPTION B: Row-major output kernel (coalesced writes, requires transpose after)
-// ============================================================================
-__global__ void fused_zerofier_pad_scale_rowmajor_kernel(
-    const uint64_t* __restrict__ d_interpolants,      // [num_cols * trace_len] col-major
-    const uint64_t* __restrict__ d_randomizer_coeffs, // [num_cols * randomizer_len] col-major
-    const uint64_t* __restrict__ d_powers,            // [target_len]
-    size_t trace_len,
-    size_t randomizer_len,
-    size_t poly_len,
-    size_t num_cols,
-    size_t target_len,
-    uint64_t offset_pow_n,
-    uint64_t* __restrict__ d_output  // [target_len * num_cols] ROW-MAJOR!
-) {
-    // Process by row for coalesced writes
-    size_t base_idx = (static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) + static_cast<size_t>(threadIdx.x)) * 4;
-    size_t total = target_len * num_cols;
-    
-    #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        size_t idx = base_idx + i;
-        if (idx >= total) continue;
-        
-        // Row-major indexing: consecutive threads write consecutive memory
-        size_t row = idx / num_cols;
-        size_t col = idx % num_cols;
-        
-        uint64_t result;
-        
-        if (row < poly_len) {
-            uint64_t shifted = 0;
-            if (row >= trace_len) {
-                shifted = d_randomizer_coeffs[col * randomizer_len + (row - trace_len)];
-            }
-            
-            uint64_t scaled = 0;
-            if (row < randomizer_len) {
-                scaled = bfield_mul_impl(d_randomizer_coeffs[col * randomizer_len + row], offset_pow_n);
-            }
-            
-            uint64_t zerofier_val = bfield_sub_impl(shifted, scaled);
-            uint64_t interp_val = (row < trace_len) ? d_interpolants[col * trace_len + row] : 0;
-            uint64_t poly_val = bfield_add_impl(interp_val, zerofier_val);
-            result = bfield_mul_impl(poly_val, d_powers[row]);
-        } else {
-            result = 0;
-        }
-        
-        d_output[idx] = result;  // Row-major: coalesced write!
-    }
-}
 
-// Transpose kernel: row-major to column-major
-__global__ void transpose_rowmajor_to_colmajor_kernel(
-    const uint64_t* __restrict__ d_input,   // [rows * cols] row-major
-    uint64_t* __restrict__ d_output,        // [cols * rows] col-major
-    size_t rows,
-    size_t cols
-) {
-    // Use shared memory tiling for efficient transpose
-    __shared__ uint64_t tile[32][33];  // +1 to avoid bank conflicts
-    
-    size_t bx = blockIdx.x * 32;
-    size_t by = blockIdx.y * 32;
-    size_t tx = threadIdx.x;
-    size_t ty = threadIdx.y;
-    
-    // Load tile from row-major input (coalesced read)
-    size_t in_row = by + ty;
-    size_t in_col = bx + tx;
-    if (in_row < rows && in_col < cols) {
-        tile[ty][tx] = d_input[in_row * cols + in_col];
-    }
-    
-    __syncthreads();
-    
-    // Write tile to column-major output (coalesced write)
-    size_t out_col = by + tx;  // Swapped
-    size_t out_row = bx + ty;
-    if (out_row < cols && out_col < rows) {
-        d_output[out_row * rows + out_col] = tile[tx][ty];  // Transposed read from shared
-    }
-}
 
 // ============================================================================
 // OPTION C: Tiled kernel with shared memory (better cache utilization)
@@ -1175,12 +1092,12 @@ static void randomized_lde_batch_impl(
         if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] gen_powers: %.2f ms\n", elapsed()); }
         
         // Select kernel variant based on environment variable
-        // TRITON_PAD_SCALE_MODE: 0=original (best), 1=sparse, 2=rowmajor+transpose, 3=tiled, 4=branchless
+        // TRITON_PAD_SCALE_MODE: 0=original (best), 1=sparse, 2=tiled, 3=branchless
         const char* mode_env = std::getenv("TRITON_PAD_SCALE_MODE");
         int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (best performance)
         
         if (mode == 1) {
-            // OPTION A: Sparse kernel - memset zeros first, then only process poly_len rows
+            // OPTION 1: Sparse kernel - memset zeros first, then only process poly_len rows
             // This processes only 13% of elements (poly_len/target_len)
             cudaMemsetAsync(d_output, 0, num_cols * target_len * sizeof(uint64_t), stream);
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] memset_zeros: %.2f ms\n", elapsed()); }
@@ -1195,31 +1112,7 @@ static void randomized_lde_batch_impl(
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] sparse_kernel (%zu/%zu rows): %.2f ms\n", poly_len, target_len, elapsed()); }
         }
         else if (mode == 2) {
-            // OPTION B: Row-major output + transpose
-            uint64_t* d_rowmajor;
-            cudaMalloc(&d_rowmajor, num_cols * target_len * sizeof(uint64_t));
-            
-            constexpr int RM_ELEMS = 4;
-            int grid_rm = (num_cols * target_len + BLOCK_SIZE * RM_ELEMS - 1) / (BLOCK_SIZE * RM_ELEMS);
-            fused_zerofier_pad_scale_rowmajor_kernel<<<grid_rm, BLOCK_SIZE, 0, stream>>>(
-                d_interpolants, d_randomizer_coeffs, d_powers,
-                trace_len, randomizer_len, poly_len, num_cols, target_len,
-                offset_pow_n, d_rowmajor
-            );
-            if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] rowmajor_kernel: %.2f ms\n", elapsed()); }
-            
-            // Transpose to column-major
-            dim3 block_t(32, 32);
-            dim3 grid_t((num_cols + 31) / 32, (target_len + 31) / 32);
-            transpose_rowmajor_to_colmajor_kernel<<<grid_t, block_t, 0, stream>>>(
-                d_rowmajor, d_output, target_len, num_cols
-            );
-            if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] transpose: %.2f ms\n", elapsed()); }
-            
-            cudaFree(d_rowmajor);
-        }
-        else if (mode == 3) {
-            // OPTION C: Tiled kernel with shared memory for d_powers
+            // OPTION 2: Tiled kernel with shared memory for d_powers
             dim3 block_tiled(256);
             dim3 grid_tiled((target_len + 255) / 256, num_cols);
             fused_zerofier_pad_scale_tiled_kernel<<<grid_tiled, block_tiled, 0, stream>>>(
@@ -1229,8 +1122,8 @@ static void randomized_lde_batch_impl(
             );
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] tiled_kernel: %.2f ms\n", elapsed()); }
         }
-        else if (mode == 4) {
-            // OPTION D: Branchless kernel with predication
+        else if (mode == 3) {
+            // OPTION 3: Branchless kernel with predication
             constexpr int BL_ELEMS = 4;
             int grid_bl = (num_cols * target_len + BLOCK_SIZE * BL_ELEMS - 1) / (BLOCK_SIZE * BL_ELEMS);
             fused_zerofier_pad_scale_branchless_kernel<<<grid_bl, BLOCK_SIZE, 0, stream>>>(
