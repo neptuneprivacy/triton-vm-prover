@@ -860,6 +860,143 @@ __global__ void batched_ntt_butterfly_ilp32_kernel(
 }
 
 /**
+ * Optimized kernel for later stages (stage > 11) with better memory coalescing
+ * Uses warp-level column processing and L2 cache hints for large strides
+ * Each warp processes multiple columns to improve coalescing
+ */
+__global__ void batched_ntt_butterfly_coalesced_large_stage_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t stage,
+    size_t num_cols,
+    const uint64_t* d_twiddles
+) {
+    constexpr int WARP_SIZE = 32;
+    constexpr int COLS_PER_WARP = 4;  // Process 4 columns per warp for better coalescing
+    
+    size_t warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    size_t lane_id = threadIdx.x % WARP_SIZE;
+    size_t num_butterflies_per_col = n / 2;
+    
+    size_t half_size = 1ULL << stage;
+    size_t full_size = half_size * 2;
+    size_t twiddle_offset = half_size - 1;
+    
+    // Each warp processes COLS_PER_WARP columns
+    size_t base_col = (warp_id * COLS_PER_WARP) % num_cols;
+    size_t base_butterfly = ((warp_id * COLS_PER_WARP) / num_cols) * num_butterflies_per_col;
+    
+    // Process COLS_PER_WARP columns, with each thread handling butterflies across columns
+    #pragma unroll
+    for (int col_offset = 0; col_offset < COLS_PER_WARP; col_offset++) {
+        size_t col = (base_col + col_offset) % num_cols;
+        size_t butterfly_idx = base_butterfly + lane_id;
+        
+        if (butterfly_idx < num_butterflies_per_col) {
+            size_t group = butterfly_idx / half_size;
+            size_t pos = butterfly_idx % half_size;
+            
+            size_t base = col * n;
+            size_t i = base + group * full_size + pos;
+            size_t j = i + half_size;
+            
+            // Use __ldg for read-only data (L2 cache hint)
+            uint64_t a = __ldg(&d_data[i]);
+            uint64_t b_val = __ldg(&d_data[j]);
+            uint64_t tw = __ldg(&d_twiddles[twiddle_offset + pos]);
+            
+            // Compute butterfly
+            uint64_t t = bfield_mul_impl(b_val, tw);
+            uint64_t new_a = bfield_add_impl(a, t);
+            uint64_t new_b = bfield_sub_impl(a, t);
+            
+            // Use __stg for stores (write-through cache hint)
+            __stg(&d_data[i], new_a);
+            __stg(&d_data[j], new_b);
+        }
+    }
+}
+
+/**
+ * ILP-optimized kernel for later stages with warp-level column processing
+ * Combines ILP with better coalescing for large strides
+ */
+__global__ void batched_ntt_butterfly_ilp4_coalesced_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t stage,
+    size_t num_cols,
+    const uint64_t* d_twiddles
+) {
+    constexpr int ILP = 4;
+    constexpr int WARP_SIZE = 32;
+    constexpr int COLS_PER_WARP = 2;  // Process 2 columns per warp
+    
+    size_t warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    size_t lane_id = threadIdx.x % WARP_SIZE;
+    size_t num_butterflies_per_col = n / 2;
+    
+    size_t half_size = 1ULL << stage;
+    size_t full_size = half_size * 2;
+    size_t twiddle_offset = half_size - 1;
+    
+    // Each warp processes COLS_PER_WARP columns
+    size_t base_col = (warp_id * COLS_PER_WARP) % num_cols;
+    size_t base_butterfly = ((warp_id * COLS_PER_WARP) / num_cols) * num_butterflies_per_col;
+    
+    // Process COLS_PER_WARP columns with ILP
+    #pragma unroll
+    for (int col_offset = 0; col_offset < COLS_PER_WARP; col_offset++) {
+        size_t col = (base_col + col_offset) % num_cols;
+        size_t base_idx = base_butterfly + lane_id * ILP;
+        
+        uint64_t a[ILP], b[ILP], tw[ILP];
+        size_t i_pos[ILP], j_pos[ILP];
+        bool valid[ILP];
+        
+        // Load phase with __ldg
+        #pragma unroll
+        for (int k = 0; k < ILP; k++) {
+            size_t butterfly_idx = base_idx + k;
+            valid[k] = (butterfly_idx < num_butterflies_per_col);
+            
+            if (valid[k]) {
+                size_t group = butterfly_idx / half_size;
+                size_t pos = butterfly_idx % half_size;
+                
+                size_t base = col * n;
+                i_pos[k] = base + group * full_size + pos;
+                j_pos[k] = i_pos[k] + half_size;
+                
+                a[k] = __ldg(&d_data[i_pos[k]]);
+                b[k] = __ldg(&d_data[j_pos[k]]);
+                tw[k] = __ldg(&d_twiddles[twiddle_offset + pos]);
+            }
+        }
+        
+        // Compute phase
+        uint64_t t[ILP], new_a[ILP], new_b[ILP];
+        #pragma unroll
+        for (int k = 0; k < ILP; k++) {
+            if (valid[k]) {
+                t[k] = bfield_mul_impl(b[k], tw[k]);
+                new_a[k] = bfield_add_impl(a[k], t[k]);
+                new_b[k] = bfield_sub_impl(a[k], t[k]);
+            }
+        }
+        
+        // Store phase with __stg
+        #pragma unroll
+        for (int k = 0; k < ILP; k++) {
+            if (valid[k]) {
+                __stg(&d_data[i_pos[k]], new_a[k]);
+                __stg(&d_data[j_pos[k]], new_b[k]);
+            }
+        }
+    }
+}
+
+/**
  * Register-based 2-stage kernel: each thread processes 4 elements through 2 stages
  * Reduces kernel launches by 2x without using shared memory
  * 
@@ -2062,29 +2199,77 @@ void ntt_forward_batched_gpu(
     } else if (use_ilp32) {
         // ILP32 kernel for extreme latency hiding
         constexpr int ILP32 = 32;
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
         int grid_ilp32 = ((total_butterflies + ILP32 - 1) / ILP32 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp32_kernel<<<grid_ilp32, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_fwd
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced ILP4 kernel for large stages
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 2;
+                size_t num_butterflies_per_col = n / 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_ilp4_coalesced_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            } else {
+                batched_ntt_butterfly_ilp32_kernel<<<grid_ilp32, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            }
         }
     } else if (use_ilp8) {
         // ILP8 kernel for maximum latency hiding
         constexpr int ILP8 = 8;
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
         int grid_ilp8 = ((total_butterflies + ILP8 - 1) / ILP8 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp8_kernel<<<grid_ilp8, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_fwd
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced ILP4 kernel for large stages
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 2;
+                size_t num_butterflies_per_col = n / 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_ilp4_coalesced_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            } else {
+                batched_ntt_butterfly_ilp8_kernel<<<grid_ilp8, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            }
         }
     } else {
-        // Default: ILP4 kernel for remaining stages
+        // Default: Use coalesced kernels for large stages (stage > 11), ILP4 for smaller stages
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
+        
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp4_kernel<<<grid_butterflies_ilp, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_fwd
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced kernel for large stages with better memory access patterns
+                // Grid size: number of warps needed
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 4;
+                size_t num_butterflies_per_col = n / 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_coalesced_large_stage_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            } else {
+                // Use standard ILP4 kernel for smaller stages
+                batched_ntt_butterfly_ilp4_kernel<<<grid_butterflies_ilp, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_fwd
+                );
+            }
         }
     }
 }
@@ -2337,29 +2522,74 @@ void ntt_inverse_batched_gpu(
     } else if (use_ilp32) {
         // ILP32 kernel for extreme latency hiding
         constexpr int ILP32 = 32;
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
         int grid_ilp32 = ((total_butterflies + ILP32 - 1) / ILP32 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp32_kernel<<<grid_ilp32, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_inv
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced ILP4 kernel for large stages
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_ilp4_coalesced_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            } else {
+                batched_ntt_butterfly_ilp32_kernel<<<grid_ilp32, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            }
         }
     } else if (use_ilp8) {
         // ILP8 kernel
         constexpr int ILP8 = 8;
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
         int grid_ilp8 = ((total_butterflies + ILP8 - 1) / ILP8 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp8_kernel<<<grid_ilp8, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_inv
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced ILP4 kernel for large stages
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_ilp4_coalesced_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            } else {
+                batched_ntt_butterfly_ilp8_kernel<<<grid_ilp8, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            }
         }
     } else {
-        // Default: ILP4 kernel
+        // Default: Use coalesced kernels for large stages (stage > 11), ILP4 for smaller stages
+        constexpr size_t LARGE_STAGE_THRESHOLD = 11;
+        const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
+        
         for (size_t stage = start_stage; stage < log_n; ++stage) {
-            batched_ntt_butterfly_ilp4_kernel<<<grid_butterflies_ilp, block_size, 0, stream>>>(
-                d_data, n, stage, num_cols, d_twiddles_inv
-            );
+            if ((stage > LARGE_STAGE_THRESHOLD || use_coalesced) && num_cols >= 2) {
+                // Use coalesced kernel for large stages with better memory access patterns
+                constexpr int WARP_SIZE = 32;
+                constexpr int COLS_PER_WARP = 4;
+                size_t num_butterflies_per_col = n / 2;
+                size_t num_warps = ((num_butterflies_per_col + WARP_SIZE - 1) / WARP_SIZE) * 
+                                   ((num_cols + COLS_PER_WARP - 1) / COLS_PER_WARP);
+                int grid_warps = (num_warps + block_size - 1) / block_size;
+                batched_ntt_butterfly_coalesced_large_stage_kernel<<<grid_warps, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            } else {
+                // Use standard ILP4 kernel for smaller stages
+                batched_ntt_butterfly_ilp4_kernel<<<grid_butterflies_ilp, block_size, 0, stream>>>(
+                    d_data, n, stage, num_cols, d_twiddles_inv
+                );
+            }
         }
     }
     
