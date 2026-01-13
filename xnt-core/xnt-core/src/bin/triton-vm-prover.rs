@@ -1,27 +1,20 @@
-//! Modified triton-vm-prover with GPU prover socket proxy support
+//! Modified triton-vm-prover with direct GPU prover integration
 //!
-//! When TRITON_VM_PROVER_SOCKET is set (e.g., "127.0.0.1:5555" or "/tmp/prover.sock"),
-//! this binary forwards proving requests to the GPU prover server instead of
-//! running locally.
+//! When TRITON_GPU_PROVER_PATH is set, this binary calls the GPU prover
+//! directly instead of forwarding to a socket server.
 //!
 //! Usage:
-//!   # Run locally (default behavior, same as upstream)
+//!   # Run locally with CPU (default behavior)
 //!   triton-vm-prover
 //!
-//!   # Forward to GPU prover server
-//!   TRITON_VM_PROVER_SOCKET=127.0.0.1:5555 triton-vm-prover
-//!
-//!   # Forward to Unix socket
-//!   TRITON_VM_PROVER_SOCKET=/tmp/gpu-prover.sock triton-vm-prover
+//!   # Use GPU prover directly (no server needed)
+//!   TRITON_GPU_PROVER_PATH=/path/to/triton_vm_prove_gpu_full triton-vm-prover
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::io::BufRead;
-use std::io::Read;
 use std::io::Write;
-use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::process::{Command, Stdio};
 
 use neptune_privacy::application::config::triton_vm_env_vars::TritonVmEnvVars;
 use neptune_privacy::protocol::proof_abstractions::tasm::prover_job::PROOF_PADDED_HEIGHT_TOO_BIG_PROCESS_OFFSET_ERROR_CODE;
@@ -36,17 +29,8 @@ use tasm_lib::triton_vm::vm::VM;
 use thread_priority::set_current_thread_priority;
 use thread_priority::ThreadPriority;
 
-// Socket protocol constants (must match prover_server/src/protocol.rs)
-const MAGIC_REQUEST: u32 = 0x54564D50; // "TVMP"
-const MAGIC_RESPONSE: u32 = 0x54564D52; // "TVMR"
-const PROTOCOL_VERSION: u32 = 1;
-
-const RESPONSE_STATUS_OK: u32 = 0;
-const RESPONSE_STATUS_PADDED_HEIGHT_TOO_BIG: u32 = 1;
-const RESPONSE_STATUS_ERROR: u32 = 2;
-
-// Environment variable name for socket address
-const SOCKET_ENV_VAR: &str = "TRITON_VM_PROVER_SOCKET";
+// Environment variable for GPU prover binary path
+const GPU_PROVER_PATH_ENV: &str = "TRITON_GPU_PROVER_PATH";
 
 // TODO: Replace by value exposed in Triton VM
 const LDE_TRACE_ENV_VAR: &str = "TVM_LDE_TRACE";
@@ -90,7 +74,7 @@ fn set_environment_variables(env_vars: &[(String, String)]) {
     }
 }
 
-/// Execute locally (original behavior)
+/// Execute locally with CPU (original behavior)
 fn execute_local(
     claim: Claim,
     program: Program,
@@ -129,167 +113,222 @@ fn execute_local(
     stark.prove(&claim, &aet).unwrap()
 }
 
-/// Write a length-prefixed string
-fn write_length_prefixed<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
-    let bytes = s.as_bytes();
-    writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    writer.write_all(bytes)?;
-    Ok(())
-}
-
-/// Forward proving request to GPU prover server via socket
-fn execute_via_socket(
-    socket_addr: &str,
-    claim_json: &str,
-    program_json: &str,
-    nondet_json: &str,
-    max_log2_json: &str,
-    env_vars_json: &str,
+/// Execute using GPU prover directly (no socket server)
+fn execute_with_gpu(
+    gpu_prover_path: &str,
+    claim: &Claim,
+    program: &Program,
+    non_determinism: &NonDeterminism,
+    max_log2_padded_height: Option<u8>,
+    _env_vars: &TritonVmEnvVars,
 ) -> Result<Vec<u8>, String> {
-    eprintln!("[proxy] Connecting to GPU prover at {}", socket_addr);
-    
-    // Connect to server
-    let mut stream: Box<dyn ReadWrite> = if socket_addr.starts_with('/') {
-        // Unix socket
-        #[cfg(unix)]
-        {
-            Box::new(UnixStream::connect(socket_addr)
-                .map_err(|e| format!("Failed to connect to Unix socket {}: {}", socket_addr, e))?)
-        }
-        #[cfg(not(unix))]
-        {
-            return Err("Unix sockets not supported on this platform".to_string());
-        }
+    use std::fs;
+
+    eprintln!("[GPU] =========================================");
+    eprintln!("[GPU] Calling GPU prover directly: {}", gpu_prover_path);
+
+    // Create temp directory for files
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("triton_vm_prover_{}", ts));
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let program_json_path = temp_dir.join("program.json");
+    let nondet_json_path = temp_dir.join("nondet.json");
+    let claim_json_path = temp_dir.join("claim.json");
+    let public_input_path = temp_dir.join("public_input.txt");
+    let claim_path = temp_dir.join("program.claim");
+    let proof_path = temp_dir.join("program.proof");
+
+    // Serialize to JSON
+    let program_json = serde_json::to_string(program)
+        .map_err(|e| format!("Failed to serialize program: {}", e))?;
+    let nondet_json = serde_json::to_string(non_determinism)
+        .map_err(|e| format!("Failed to serialize nondeterminism: {}", e))?;
+    let claim_json =
+        serde_json::to_string(claim).map_err(|e| format!("Failed to serialize claim: {}", e))?;
+
+    // Write files
+    fs::write(&program_json_path, &program_json)
+        .map_err(|e| format!("Failed to write program.json: {}", e))?;
+    fs::write(&nondet_json_path, &nondet_json)
+        .map_err(|e| format!("Failed to write nondet.json: {}", e))?;
+    fs::write(&claim_json_path, &claim_json)
+        .map_err(|e| format!("Failed to write claim.json: {}", e))?;
+
+    eprintln!(
+        "[GPU] Wrote program JSON to {} ({} bytes)",
+        program_json_path.display(),
+        program_json.len()
+    );
+    eprintln!(
+        "[GPU] Wrote NonDeterminism JSON to {} ({} bytes)",
+        nondet_json_path.display(),
+        nondet_json.len()
+    );
+
+    // Format public input as comma-separated
+    let public_input_str: String = if claim.input.is_empty() {
+        String::new()
     } else {
-        // TCP socket
-        Box::new(TcpStream::connect(socket_addr)
-            .map_err(|e| format!("Failed to connect to TCP socket {}: {}", socket_addr, e))?)
+        claim
+            .input
+            .iter()
+            .map(|bfe| bfe.value().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     };
-    
-    eprintln!("[proxy] Connected, sending request");
-    
-    // Generate a job ID
-    let job_id: u32 = std::process::id();
-    
-    // Write request header
-    stream.write_all(&MAGIC_REQUEST.to_le_bytes())
-        .map_err(|e| format!("Failed to write magic: {}", e))?;
-    stream.write_all(&PROTOCOL_VERSION.to_le_bytes())
-        .map_err(|e| format!("Failed to write version: {}", e))?;
-    stream.write_all(&job_id.to_le_bytes())
-        .map_err(|e| format!("Failed to write job_id: {}", e))?;
-    
-    // Write 5 JSON strings
-    write_length_prefixed(&mut stream, claim_json)
-        .map_err(|e| format!("Failed to write claim: {}", e))?;
-    write_length_prefixed(&mut stream, program_json)
-        .map_err(|e| format!("Failed to write program: {}", e))?;
-    write_length_prefixed(&mut stream, nondet_json)
-        .map_err(|e| format!("Failed to write nondet: {}", e))?;
-    write_length_prefixed(&mut stream, max_log2_json)
-        .map_err(|e| format!("Failed to write max_log2: {}", e))?;
-    write_length_prefixed(&mut stream, env_vars_json)
-        .map_err(|e| format!("Failed to write env_vars: {}", e))?;
-    
-    stream.flush().map_err(|e| format!("Failed to flush: {}", e))?;
-    
-    eprintln!("[proxy] Request sent (job_id={}), waiting for response...", job_id);
-    
-    // Read response
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-    
-    eprintln!("[proxy] [WAIT] Reading response header...");
-    
-    // Read and verify magic
-    stream.read_exact(&mut buf4)
-        .map_err(|e| format!("Failed to read response magic: {}", e))?;
-    let magic = u32::from_le_bytes(buf4);
-    if magic != MAGIC_RESPONSE {
-        return Err(format!("Invalid response magic: expected 0x{:08X}, got 0x{:08X}", MAGIC_RESPONSE, magic));
+
+    let _ = fs::write(&public_input_path, &public_input_str);
+
+    // Check if NonDeterminism is non-trivial
+    let has_nondet = !non_determinism.individual_tokens.is_empty()
+        || !non_determinism.digests.is_empty()
+        || !non_determinism.ram.is_empty();
+
+    // Build GPU prover command
+    // Usage: triton_vm_prove_gpu_full <program.json> <public_input> <output_claim> <output_proof> [nondet.json] [program.json]
+    let mut cmd = Command::new(gpu_prover_path);
+    cmd.arg(&program_json_path)
+        .arg(&public_input_str)
+        .arg(&claim_path)
+        .arg(&proof_path);
+
+    // Add NonDeterminism and Program JSON arguments if NonDeterminism is present
+    if has_nondet {
+        cmd.arg(&nondet_json_path);
+        cmd.arg(&program_json_path);
     }
-    eprintln!("[proxy] [WAIT] Response magic OK");
-    
-    // Read status
-    stream.read_exact(&mut buf4)
-        .map_err(|e| format!("Failed to read status: {}", e))?;
-    let status = u32::from_le_bytes(buf4);
-    eprintln!("[proxy] [WAIT] Response status: {}", status);
-    
-    // Read job_id (echo back)
-    stream.read_exact(&mut buf4)
-        .map_err(|e| format!("Failed to read job_id: {}", e))?;
-    let response_job_id = u32::from_le_bytes(buf4);
-    eprintln!("[proxy] [WAIT] Response job_id: {} (expected: {})", response_job_id, job_id);
-    
-    match status {
-        RESPONSE_STATUS_OK => {
-            eprintln!("[proxy] [WAIT] Status OK, reading proof length...");
-            // Read proof length
-            stream.read_exact(&mut buf8)
-                .map_err(|e| format!("Failed to read proof length: {}", e))?;
-            let proof_len = u64::from_le_bytes(buf8);
-            
-            eprintln!("[proxy] [WAIT] Proof length: {} bytes, receiving proof data...", proof_len);
-            
-            // Read proof bytes
-            let mut proof_bincode = vec![0u8; proof_len as usize];
-            stream.read_exact(&mut proof_bincode)
-                .map_err(|e| format!("Failed to read proof: {}", e))?;
-            
-            eprintln!("[proxy] [DONE] Proof received successfully ({} bytes)", proof_bincode.len());
-            Ok(proof_bincode)
+
+    // Inherit GPU/OpenMP environment variables
+    // CUDA_VISIBLE_DEVICES, OMP_NUM_THREADS, TRITON_OMP_INIT
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    eprintln!(
+        "[GPU] Calling GPU prover: {} {} {} {} {}{}",
+        gpu_prover_path,
+        program_json_path.display(),
+        if public_input_str.is_empty() {
+            "<empty>"
+        } else {
+            &public_input_str
+        },
+        claim_path.display(),
+        proof_path.display(),
+        if has_nondet {
+            format!(
+                " {} {}",
+                nondet_json_path.display(),
+                program_json_path.display()
+            )
+        } else {
+            String::new()
         }
-        RESPONSE_STATUS_PADDED_HEIGHT_TOO_BIG => {
-            // Read observed log2
-            stream.read_exact(&mut buf4)
-                .map_err(|e| format!("Failed to read observed_log2: {}", e))?;
-            let observed_log2 = u32::from_le_bytes(buf4);
-            
-            eprintln!("[proxy] Padded height too big: {}", observed_log2);
-            
+    );
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to execute GPU prover: {}", e))?;
+
+    // Log GPU prover output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !stdout.is_empty() {
+        for line in stdout.lines() {
+            eprintln!("[GPU stdout] {}", line);
+        }
+    }
+    if !stderr.is_empty() {
+        for line in stderr.lines() {
+            eprintln!("[GPU stderr] {}", line);
+        }
+    }
+
+    if !output.status.success() {
+        // Check if this is a program execution error (expected for invalid programs)
+        let stderr_lower = stderr.to_lowercase();
+        let is_program_error = stderr_lower.contains("opstack underflow")
+            || stderr_lower.contains("trace execution failed")
+            || stderr_lower.contains("vm error")
+            || stderr_lower.contains("assertion failed");
+
+        // Save failure artifacts
+        let failed_dir = std::env::temp_dir().join(format!("triton_vm_prover_failed_{}", ts));
+        let _ = fs::rename(&temp_dir, &failed_dir);
+        let _ = fs::write(failed_dir.join("gpu_stdout.log"), stdout.as_bytes());
+        let _ = fs::write(failed_dir.join("gpu_stderr.log"), stderr.as_bytes());
+
+        eprintln!(
+            "[GPU] GPU prover failed; saved artifacts to {}",
+            failed_dir.display()
+        );
+
+        return Err(format!(
+            "GPU prover failed with exit code: {:?}\nstderr: {}{}\n(artifacts saved to: {})",
+            output.status.code(),
+            stderr,
+            if is_program_error {
+                "\n(This appears to be a program execution error, not a prover bug)"
+            } else {
+                ""
+            },
+            failed_dir.display(),
+        ));
+    }
+
+    // Read proof file
+    if !proof_path.exists() {
+        return Err(format!(
+            "GPU prover did not create proof file: {}",
+            proof_path.display()
+        ));
+    }
+
+    let proof_bytes =
+        fs::read(&proof_path).map_err(|e| format!("Failed to read proof file: {}", e))?;
+
+    eprintln!(
+        "[GPU] Proof file read successfully ({} bytes)",
+        proof_bytes.len()
+    );
+
+    // Validate that we can deserialize the proof
+    let proof: Proof = bincode::deserialize(&proof_bytes)
+        .map_err(|e| format!("Failed to deserialize GPU proof: {}", e))?;
+
+    eprintln!("[GPU] Proof deserialized successfully (verification skipped - will be verified by xnt-core)");
+
+    // Check padded height if limit specified
+    if let Some(limit) = max_log2_padded_height {
+        let padded_height = proof
+            .padded_height()
+            .map_err(|e| format!("Failed to get padded height: {}", e))?;
+        let log2_padded_height = padded_height.ilog2() as u8;
+
+        if log2_padded_height > limit {
+            eprintln!(
+                "[GPU] Padded height {} exceeds limit {}",
+                log2_padded_height, limit
+            );
+            // Cleanup
+            let _ = fs::remove_dir_all(&temp_dir);
             // Exit with the same error code xnt-core expects
             std::process::exit(
-                PROOF_PADDED_HEIGHT_TOO_BIG_PROCESS_OFFSET_ERROR_CODE + observed_log2 as i32
+                PROOF_PADDED_HEIGHT_TOO_BIG_PROCESS_OFFSET_ERROR_CODE + log2_padded_height as i32,
             );
         }
-        RESPONSE_STATUS_ERROR => {
-            // Read error message length
-            stream.read_exact(&mut buf4)
-                .map_err(|e| format!("Failed to read error length: {}", e))?;
-            let msg_len = u32::from_le_bytes(buf4) as usize;
-            
-            // Read error message
-            let mut msg_bytes = vec![0u8; msg_len];
-            stream.read_exact(&mut msg_bytes)
-                .map_err(|e| format!("Failed to read error message: {}", e))?;
-            let message = String::from_utf8_lossy(&msg_bytes);
-            
-            // Check if this is a program execution error (invalid program)
-            // These are expected during block composition and should not cause xnt-core to shut down
-            let is_program_error = message.contains("OpStack underflow") 
-                || message.contains("would go below")
-                || message.contains("execution failed")
-                || message.contains("invalid program");
-            
-            if is_program_error {
-                eprintln!("[proxy] INFO: GPU prover reported program execution error: {}", message);
-                // Return empty proof - xnt-core will handle this gracefully
-                Ok(vec![])
-            } else {
-                // Fatal error - exit with code 1
-                Err(format!("GPU prover error: {}", message))
-            }
-        }
-        _ => {
-            Err(format!("Unknown response status: {}", status))
-        }
     }
-}
 
-/// Trait for unified Read + Write
-trait ReadWrite: Read + Write {}
-impl<T: Read + Write> ReadWrite for T {}
+    // Cleanup temp files
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    eprintln!("[GPU] =========================================");
+
+    Ok(proof_bytes)
+}
 
 fn main() {
     // run with a low priority so that xnt-core can remain responsive.
@@ -298,41 +337,38 @@ fn main() {
     // Read 5 JSON lines from stdin
     let stdin = std::io::stdin();
     let mut iterator = stdin.lock().lines();
-    
+
     let claim_json = iterator.next().unwrap().unwrap();
     let program_json = iterator.next().unwrap().unwrap();
     let nondet_json = iterator.next().unwrap().unwrap();
     let max_log2_json = iterator.next().unwrap().unwrap();
     let env_vars_json = iterator.next().unwrap().unwrap();
-    
-    // Check if we should forward to GPU prover server
-    let proof_bytes = if let Ok(socket_addr) = std::env::var(SOCKET_ENV_VAR) {
-        eprintln!("[proxy] =========================================");
-        eprintln!("[proxy] Forwarding to GPU prover server at {}", socket_addr);
-        eprintln!("[proxy] =========================================");
-        
-        match execute_via_socket(
-            &socket_addr,
-            &claim_json,
-            &program_json,
-            &nondet_json,
-            &max_log2_json,
-            &env_vars_json,
+
+    // Parse JSON inputs
+    let claim: Claim = serde_json::from_str(&claim_json).unwrap();
+    let program: Program = serde_json::from_str(&program_json).unwrap();
+    let non_determinism: NonDeterminism = serde_json::from_str(&nondet_json).unwrap();
+    let max_log2_padded_height: Option<u8> = serde_json::from_str(&max_log2_json).unwrap();
+    let env_variables: TritonVmEnvVars = serde_json::from_str(&env_vars_json).unwrap();
+
+    // Check if we should use GPU prover
+    let proof_bytes = if let Ok(gpu_prover_path) = std::env::var(GPU_PROVER_PATH_ENV) {
+        match execute_with_gpu(
+            &gpu_prover_path,
+            &claim,
+            &program,
+            &non_determinism,
+            max_log2_padded_height,
+            &env_variables,
         ) {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!("[proxy] ERROR: {}", e);
+                eprintln!("[GPU] ERROR: {}", e);
                 std::process::exit(1);
             }
         }
     } else {
-        // Parse JSON and execute locally (original behavior)
-        let claim: Claim = serde_json::from_str(&claim_json).unwrap();
-        let program: Program = serde_json::from_str(&program_json).unwrap();
-        let non_determinism: NonDeterminism = serde_json::from_str(&nondet_json).unwrap();
-        let max_log2_padded_height: Option<u8> = serde_json::from_str(&max_log2_json).unwrap();
-        let env_variables: TritonVmEnvVars = serde_json::from_str(&env_vars_json).unwrap();
-
+        // Use CPU prover (original behavior)
         let proof = execute_local(
             claim,
             program,
@@ -340,7 +376,7 @@ fn main() {
             max_log2_padded_height,
             env_variables,
         );
-        
+
         eprintln!("triton-vm: completed proof");
         bincode::serialize(&proof).unwrap()
     };
