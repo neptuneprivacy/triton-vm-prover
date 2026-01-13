@@ -910,9 +910,9 @@ __global__ void batched_ntt_butterfly_coalesced_large_stage_kernel(
             uint64_t new_a = bfield_add_impl(a, t);
             uint64_t new_b = bfield_sub_impl(a, t);
             
-            // Use __stg for stores (write-through cache hint)
-            __stg(&d_data[i], new_a);
-            __stg(&d_data[j], new_b);
+            // Store results
+            d_data[i] = new_a;
+            d_data[j] = new_b;
         }
     }
 }
@@ -985,12 +985,12 @@ __global__ void batched_ntt_butterfly_ilp4_coalesced_kernel(
             }
         }
         
-        // Store phase with __stg
+        // Store phase
         #pragma unroll
         for (int k = 0; k < ILP; k++) {
             if (valid[k]) {
-                __stg(&d_data[i_pos[k]], new_a[k]);
-                __stg(&d_data[j_pos[k]], new_b[k]);
+                d_data[i_pos[k]] = new_a[k];
+                d_data[j_pos[k]] = new_b[k];
             }
         }
     }
@@ -2042,7 +2042,6 @@ void ntt_forward_batched_gpu(
     // Extended (12 stages, 4096 elements) is fastest when n >= 4096
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
-    const bool use_warp_shuffle = (std::getenv("TRITON_NTT_WARP") != nullptr);
     const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
@@ -2052,14 +2051,7 @@ void ntt_forward_batched_gpu(
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
     if (!disable_fused) {
-        if (use_warp_shuffle && n >= FUSED_SIZE_12) {
-            // Use 12-stage fused kernel with warp-shuffle for stages 0-4
-            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
-            batched_ntt_fused_warp_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
-                d_data, n, num_cols, d_twiddles_fwd
-            );
-            start_stage = FUSED_STAGES_12;  // Continue from stage 12
-        } else if (use_fused12 && n >= FUSED_SIZE_12) {
+        if (use_fused12 && n >= FUSED_SIZE_12) {
             // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
             size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
             batched_ntt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
@@ -2371,7 +2363,6 @@ void ntt_inverse_batched_gpu(
     // Choose fused kernel based on n size and environment
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
-    const bool use_warp_shuffle = (std::getenv("TRITON_NTT_WARP") != nullptr);
     const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
@@ -2381,14 +2372,7 @@ void ntt_inverse_batched_gpu(
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
     if (!disable_fused) {
-        if (use_warp_shuffle && n >= FUSED_SIZE_12) {
-            // Use 12-stage fused kernel with warp-shuffle for stages 0-4
-            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
-            batched_intt_fused_warp_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
-                d_data, n, num_cols, d_twiddles_inv
-            );
-            start_stage = FUSED_STAGES_12;  // Continue from stage 12
-        } else if (use_fused12 && n >= FUSED_SIZE_12) {
+        if (use_fused12 && n >= FUSED_SIZE_12) {
             // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
             size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
             batched_intt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
@@ -2524,6 +2508,7 @@ void ntt_inverse_batched_gpu(
         constexpr int ILP32 = 32;
         constexpr size_t LARGE_STAGE_THRESHOLD = 11;
         const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
+        size_t num_butterflies_per_col = n / 2;
         int grid_ilp32 = ((total_butterflies + ILP32 - 1) / ILP32 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
@@ -2548,6 +2533,7 @@ void ntt_inverse_batched_gpu(
         constexpr int ILP8 = 8;
         constexpr size_t LARGE_STAGE_THRESHOLD = 11;
         const bool use_coalesced = (std::getenv("TRITON_NTT_COALESCED") != nullptr);
+        size_t num_butterflies_per_col = n / 2;
         int grid_ilp8 = ((total_butterflies + ILP8 - 1) / ILP8 + block_size - 1) / block_size;
         
         for (size_t stage = start_stage; stage < log_n; ++stage) {
