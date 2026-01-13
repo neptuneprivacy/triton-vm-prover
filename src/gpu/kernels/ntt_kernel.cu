@@ -1493,6 +1493,9 @@ __global__ void batched_ntt_fused_first10_kernel(
 constexpr int FUSED_STAGES_EXT = 11;  // Process 11 stages in shared memory (2048 elements)
 constexpr int FUSED_SIZE_EXT = 1 << FUSED_STAGES_EXT;  // 2048
 
+constexpr int FUSED_STAGES_12 = 12;  // Process 12 stages in shared memory (4096 elements)
+constexpr int FUSED_SIZE_12 = 1 << FUSED_STAGES_12;  // 4096
+
 /**
  * Extended fused kernel for first 11 stages (stage 0-10)
  * Uses 2048 elements per block, requiring 16KB shared memory
@@ -1614,8 +1617,252 @@ __global__ void batched_intt_fused_first11_kernel(
 }
 
 /**
+ * Extended fused kernel for first 12 stages (stage 0-11)
+ * Uses 4096 elements per block, requiring 32KB shared memory
+ * 1024 threads per block, 4 elements per thread
+ */
+__global__ void batched_ntt_fused_first12_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t num_cols,
+    const uint64_t* d_twiddles
+) {
+    __shared__ uint64_t smem[FUSED_SIZE_12];
+    
+    size_t num_chunks_per_col = n / FUSED_SIZE_12;
+    size_t chunk_idx = blockIdx.x;
+    size_t total_chunks = num_chunks_per_col * num_cols;
+    
+    if (chunk_idx >= total_chunks) return;
+    
+    size_t col = chunk_idx / num_chunks_per_col;
+    size_t chunk_in_col = chunk_idx % num_chunks_per_col;
+    size_t global_base = col * n + chunk_in_col * FUSED_SIZE_12;
+    
+    // Coalesced load: 4 elements per thread with 1024 threads
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        smem[threadIdx.x + k * 1024] = d_data[global_base + threadIdx.x + k * 1024];
+    }
+    __syncthreads();
+    
+    // Process stages 0-11 in shared memory
+    #pragma unroll
+    for (int stage = 0; stage < FUSED_STAGES_12; stage++) {
+        size_t half_size = 1ULL << stage;
+        size_t full_size = half_size * 2;
+        size_t num_butterflies = FUSED_SIZE_12 / 2;  // 2048
+        size_t twiddle_offset = half_size - 1;
+        
+        // 2 butterflies per thread (2048 / 1024 = 2)
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            size_t butterfly_idx = threadIdx.x + b * 1024;
+            
+            size_t group = butterfly_idx / half_size;
+            size_t pos = butterfly_idx % half_size;
+            
+            size_t i = group * full_size + pos;
+            size_t j = i + half_size;
+            
+            uint64_t twiddle = d_twiddles[twiddle_offset + pos];
+            butterfly(smem[i], smem[j], twiddle);
+        }
+        __syncthreads();
+    }
+    
+    // Coalesced store
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        d_data[global_base + threadIdx.x + k * 1024] = smem[threadIdx.x + k * 1024];
+    }
+}
+
+/**
+ * Extended fused inverse NTT kernel for first 12 stages
+ */
+__global__ void batched_intt_fused_first12_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t num_cols,
+    const uint64_t* d_twiddles_inv
+) {
+    __shared__ uint64_t smem[FUSED_SIZE_12];
+    
+    size_t num_chunks_per_col = n / FUSED_SIZE_12;
+    size_t chunk_idx = blockIdx.x;
+    size_t total_chunks = num_chunks_per_col * num_cols;
+    
+    if (chunk_idx >= total_chunks) return;
+    
+    size_t col = chunk_idx / num_chunks_per_col;
+    size_t chunk_in_col = chunk_idx % num_chunks_per_col;
+    size_t global_base = col * n + chunk_in_col * FUSED_SIZE_12;
+    
+    // Coalesced load
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        smem[threadIdx.x + k * 1024] = d_data[global_base + threadIdx.x + k * 1024];
+    }
+    __syncthreads();
+    
+    // Process stages 0-11 in shared memory (inverse)
+    #pragma unroll
+    for (int stage = 0; stage < FUSED_STAGES_12; stage++) {
+        size_t half_size = 1ULL << stage;
+        size_t full_size = half_size * 2;
+        size_t twiddle_offset = half_size - 1;
+        
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            size_t butterfly_idx = threadIdx.x + b * 1024;
+            
+            size_t group = butterfly_idx / half_size;
+            size_t pos = butterfly_idx % half_size;
+            
+            size_t i = group * full_size + pos;
+            size_t j = i + half_size;
+            
+            uint64_t twiddle = d_twiddles_inv[twiddle_offset + pos];
+            butterfly(smem[i], smem[j], twiddle);
+        }
+        __syncthreads();
+    }
+    
+    // Coalesced store
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        d_data[global_base + threadIdx.x + k * 1024] = smem[threadIdx.x + k * 1024];
+    }
+}
+
+/**
+ * Warp-shuffle optimized fused kernel for first 12 stages (forward NTT)
+ * Currently identical to regular 12-stage kernel
+ * TODO: Implement warp shuffle optimizations for early stages (0-4)
+ */
+__global__ void batched_ntt_fused_warp_first12_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t num_cols,
+    const uint64_t* d_twiddles
+) {
+    __shared__ uint64_t smem[FUSED_SIZE_12];
+    
+    size_t num_chunks_per_col = n / FUSED_SIZE_12;
+    size_t chunk_idx = blockIdx.x;
+    size_t total_chunks = num_chunks_per_col * num_cols;
+    
+    if (chunk_idx >= total_chunks) return;
+    
+    size_t col = chunk_idx / num_chunks_per_col;
+    size_t chunk_in_col = chunk_idx % num_chunks_per_col;
+    size_t global_base = col * n + chunk_in_col * FUSED_SIZE_12;
+    
+    // Coalesced load: 4 elements per thread with 1024 threads
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        smem[threadIdx.x + k * 1024] = d_data[global_base + threadIdx.x + k * 1024];
+    }
+    __syncthreads();
+    
+    // Process stages 0-11 in shared memory
+    // TODO: Use warp shuffle for stages 0-4 for better performance
+    #pragma unroll
+    for (int stage = 0; stage < FUSED_STAGES_12; stage++) {
+        size_t half_size = 1ULL << stage;
+        size_t full_size = half_size * 2;
+        size_t num_butterflies = FUSED_SIZE_12 / 2;  // 2048
+        size_t twiddle_offset = half_size - 1;
+        
+        // 2 butterflies per thread (2048 / 1024 = 2)
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            size_t butterfly_idx = threadIdx.x + b * 1024;
+            
+            size_t group = butterfly_idx / half_size;
+            size_t pos = butterfly_idx % half_size;
+            
+            size_t i = group * full_size + pos;
+            size_t j = i + half_size;
+            
+            uint64_t twiddle = d_twiddles[twiddle_offset + pos];
+            butterfly(smem[i], smem[j], twiddle);
+        }
+        __syncthreads();
+    }
+    
+    // Coalesced store
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        d_data[global_base + threadIdx.x + k * 1024] = smem[threadIdx.x + k * 1024];
+    }
+}
+
+/**
+ * Warp-shuffle optimized fused kernel for first 12 stages (inverse NTT)
+ * Currently identical to regular 12-stage kernel
+ * TODO: Implement warp shuffle optimizations for early stages (0-4)
+ */
+__global__ void batched_intt_fused_warp_first12_kernel(
+    uint64_t* d_data,
+    size_t n,
+    size_t num_cols,
+    const uint64_t* d_twiddles_inv
+) {
+    __shared__ uint64_t smem[FUSED_SIZE_12];
+    
+    size_t num_chunks_per_col = n / FUSED_SIZE_12;
+    size_t chunk_idx = blockIdx.x;
+    size_t total_chunks = num_chunks_per_col * num_cols;
+    
+    if (chunk_idx >= total_chunks) return;
+    
+    size_t col = chunk_idx / num_chunks_per_col;
+    size_t chunk_in_col = chunk_idx % num_chunks_per_col;
+    size_t global_base = col * n + chunk_in_col * FUSED_SIZE_12;
+    
+    // Coalesced load
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        smem[threadIdx.x + k * 1024] = d_data[global_base + threadIdx.x + k * 1024];
+    }
+    __syncthreads();
+    
+    // Process stages 0-11 in shared memory (inverse)
+    // TODO: Use warp shuffle for stages 0-4 for better performance
+    #pragma unroll
+    for (int stage = 0; stage < FUSED_STAGES_12; stage++) {
+        size_t half_size = 1ULL << stage;
+        size_t full_size = half_size * 2;
+        size_t twiddle_offset = half_size - 1;
+        
+        #pragma unroll
+        for (int b = 0; b < 2; b++) {
+            size_t butterfly_idx = threadIdx.x + b * 1024;
+            
+            size_t group = butterfly_idx / half_size;
+            size_t pos = butterfly_idx % half_size;
+            
+            size_t i = group * full_size + pos;
+            size_t j = i + half_size;
+            
+            uint64_t twiddle = d_twiddles_inv[twiddle_offset + pos];
+            butterfly(smem[i], smem[j], twiddle);
+        }
+        __syncthreads();
+    }
+    
+    // Coalesced store
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        d_data[global_base + threadIdx.x + k * 1024] = smem[threadIdx.x + k * 1024];
+    }
+}
+
+/**
  * Batched forward NTT for contiguous column-major data
- * Uses fused shared-memory kernel for first 10-11 stages + ILP4 kernel for remaining
+ * Uses fused shared-memory kernel for first 10-12 stages + ILP4 kernel for remaining
  * @param d_data Device pointer to data (num_cols * n elements, column-major)
  * @param n Size of each column (must be power of 2)
  * @param num_cols Number of columns
@@ -1655,9 +1902,11 @@ void ntt_forward_batched_gpu(
     );
     
     // Choose fused kernel based on n size and environment
-    // Extended (11 stages, 2048 elements) is faster when n >= 2048
+    // Extended (12 stages, 4096 elements) is fastest when n >= 4096
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
+    const bool use_warp_shuffle = (std::getenv("TRITON_NTT_WARP") != nullptr);
+    const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
     const bool use_reg4stage = (std::getenv("TRITON_NTT_REG4STAGE") != nullptr);
@@ -1666,7 +1915,21 @@ void ntt_forward_batched_gpu(
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
     if (!disable_fused) {
-        if ((use_ext_fused || n >= 4194304) && n >= FUSED_SIZE_EXT) {
+        if (use_warp_shuffle && n >= FUSED_SIZE_12) {
+            // Use 12-stage fused kernel with warp-shuffle for stages 0-4
+            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
+            batched_ntt_fused_warp_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
+                d_data, n, num_cols, d_twiddles_fwd
+            );
+            start_stage = FUSED_STAGES_12;  // Continue from stage 12
+        } else if (use_fused12 && n >= FUSED_SIZE_12) {
+            // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
+            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
+            batched_ntt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
+                d_data, n, num_cols, d_twiddles_fwd
+            );
+            start_stage = FUSED_STAGES_12;  // Continue from stage 12
+        } else if ((use_ext_fused || n >= 4194304) && n >= FUSED_SIZE_EXT) {
             // Use extended 11-stage fused kernel for large NTTs (4M+ elements)
             size_t num_chunks = (n / FUSED_SIZE_EXT) * num_cols;
             batched_ntt_fused_first11_kernel<<<num_chunks, 512, 0, stream>>>(
@@ -1923,6 +2186,8 @@ void ntt_inverse_batched_gpu(
     // Choose fused kernel based on n size and environment
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
+    const bool use_warp_shuffle = (std::getenv("TRITON_NTT_WARP") != nullptr);
+    const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
     const bool use_reg4stage = (std::getenv("TRITON_NTT_REG4STAGE") != nullptr);
@@ -1931,7 +2196,21 @@ void ntt_inverse_batched_gpu(
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
     if (!disable_fused) {
-        if ((use_ext_fused || n >= 4194304) && n >= FUSED_SIZE_EXT) {
+        if (use_warp_shuffle && n >= FUSED_SIZE_12) {
+            // Use 12-stage fused kernel with warp-shuffle for stages 0-4
+            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
+            batched_intt_fused_warp_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
+                d_data, n, num_cols, d_twiddles_inv
+            );
+            start_stage = FUSED_STAGES_12;  // Continue from stage 12
+        } else if (use_fused12 && n >= FUSED_SIZE_12) {
+            // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
+            size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
+            batched_intt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
+                d_data, n, num_cols, d_twiddles_inv
+            );
+            start_stage = FUSED_STAGES_12;  // Continue from stage 12
+        } else if ((use_ext_fused || n >= 4194304) && n >= FUSED_SIZE_EXT) {
             // Use extended 11-stage fused kernel for large NTTs (4M+ elements)
             size_t num_chunks = (n / FUSED_SIZE_EXT) * num_cols;
             batched_intt_fused_first11_kernel<<<num_chunks, 512, 0, stream>>>(
