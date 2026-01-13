@@ -1092,12 +1092,15 @@ static void randomized_lde_batch_impl(
         if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] gen_powers: %.2f ms\n", elapsed()); }
         
         // Select kernel variant based on environment variable
-        // TRITON_PAD_SCALE_MODE: 0=original (best), 1=sparse, 2=tiled, 3=branchless
+        // TRITON_PAD_SCALE_MODE: 0=original (best for unified memory), 1=sparse (best for device memory), 2=tiled, 3=branchless
+        // Note: Mode 1 (sparse) uses cudaMemset which is VERY slow on unified memory (~664ms vs ~7ms on device memory)
+        // Default to mode 0 which handles zeros inline and works well with unified memory
         const char* mode_env = std::getenv("TRITON_PAD_SCALE_MODE");
-        int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (best performance)
+        int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (works best with unified memory)
         
         if (mode == 1) {
             // OPTION 1: Sparse kernel - memset zeros first, then only process poly_len rows
+            // WARNING: cudaMemset is very slow on unified memory! Use mode 0 for unified memory.
             // This processes only 13% of elements (poly_len/target_len)
             cudaMemsetAsync(d_output, 0, num_cols * target_len * sizeof(uint64_t), stream);
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] memset_zeros: %.2f ms\n", elapsed()); }

@@ -2039,20 +2039,24 @@ void ntt_forward_batched_gpu(
     );
     
     // Choose fused kernel based on n size and environment
-    // Extended (12 stages, 4096 elements) is fastest when n >= 4096
+    // Default: 12-stage fused + reg6stage for best performance on large NTTs
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
-    const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
+    const bool disable_fused12 = (std::getenv("TRITON_NTT_NO_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
     const bool use_reg4stage = (std::getenv("TRITON_NTT_REG4STAGE") != nullptr);
-    const bool use_reg6stage = (std::getenv("TRITON_NTT_REG6STAGE") != nullptr);
+    const bool disable_reg6stage = (std::getenv("TRITON_NTT_NO_REG6STAGE") != nullptr);
     const bool use_ilp8 = (std::getenv("TRITON_NTT_ILP8") != nullptr);
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
+    // Fused12 + reg6stage are now DEFAULT for large NTTs (best performance)
+    const bool use_fused12 = !disable_fused12 && (n >= FUSED_SIZE_12);
+    const bool use_reg6stage = !disable_reg6stage;
+    
     if (!disable_fused) {
-        if (use_fused12 && n >= FUSED_SIZE_12) {
-            // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
+        if (use_fused12) {
+            // Use 12-stage fused kernel (32KB shared memory, 1024 threads) - DEFAULT for large NTTs
             size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
             batched_ntt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
                 d_data, n, num_cols, d_twiddles_fwd
@@ -2361,19 +2365,24 @@ void ntt_inverse_batched_gpu(
     );
     
     // Choose fused kernel based on n size and environment
+    // Default: 12-stage fused + reg6stage for best performance on large NTTs
     size_t start_stage = 0;
     const bool disable_fused = (std::getenv("TRITON_DISABLE_FUSED_NTT") != nullptr);
-    const bool use_fused12 = (std::getenv("TRITON_NTT_FUSED12") != nullptr);
+    const bool disable_fused12 = (std::getenv("TRITON_NTT_NO_FUSED12") != nullptr);
     const bool use_ext_fused = (std::getenv("TRITON_NTT_FUSED11") != nullptr);
     const bool use_reg2stage = (std::getenv("TRITON_NTT_REG2STAGE") != nullptr);
     const bool use_reg4stage = (std::getenv("TRITON_NTT_REG4STAGE") != nullptr);
-    const bool use_reg6stage = (std::getenv("TRITON_NTT_REG6STAGE") != nullptr);
+    const bool disable_reg6stage = (std::getenv("TRITON_NTT_NO_REG6STAGE") != nullptr);
     const bool use_ilp8 = (std::getenv("TRITON_NTT_ILP8") != nullptr);
     const bool use_ilp32 = (std::getenv("TRITON_NTT_ILP32") != nullptr);
     
+    // Fused12 + reg6stage are now DEFAULT for large NTTs (best performance)
+    const bool use_fused12 = !disable_fused12 && (n >= FUSED_SIZE_12);
+    const bool use_reg6stage = !disable_reg6stage;
+    
     if (!disable_fused) {
-        if (use_fused12 && n >= FUSED_SIZE_12) {
-            // Use 12-stage fused kernel (32KB shared memory, 1024 threads)
+        if (use_fused12) {
+            // Use 12-stage fused kernel (32KB shared memory, 1024 threads) - DEFAULT for large NTTs
             size_t num_chunks = (n / FUSED_SIZE_12) * num_cols;
             batched_intt_fused_first12_kernel<<<num_chunks, 1024, 0, stream>>>(
                 d_data, n, num_cols, d_twiddles_inv
