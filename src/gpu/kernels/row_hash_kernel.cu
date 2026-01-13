@@ -130,26 +130,183 @@ __device__ __forceinline__ uint64_t rh_power7_sbox(uint64_t x) {
     return bfield_mul_impl(bfield_mul_impl(x, x2), x4);
 }
 
+// Optimized MDS layer - preload state into registers to avoid array access overhead
+// The MDS matrix is circulant, enabling efficient computation with register reuse
 __device__ __forceinline__ void rh_mds_layer(uint64_t state[TIP5_STATE_SIZE]) {
-    uint64_t new_state[TIP5_STATE_SIZE];
+    // Load state into registers (avoid repeated array indexing in inner loop)
+    const uint64_t s0 = state[0], s1 = state[1], s2 = state[2], s3 = state[3];
+    const uint64_t s4 = state[4], s5 = state[5], s6 = state[6], s7 = state[7];
+    const uint64_t s8 = state[8], s9 = state[9], s10 = state[10], s11 = state[11];
+    const uint64_t s12 = state[12], s13 = state[13], s14 = state[14], s15 = state[15];
     
-    #pragma unroll
-    for (int row = 0; row < TIP5_STATE_SIZE; ++row) {
-        uint64_t acc = 0;
-        #pragma unroll
-        for (int col = 0; col < TIP5_STATE_SIZE; ++col) {
-            int idx = (row - col) & 15;
-            uint64_t coeff = ROW_HASH_MDS[idx];
-            uint64_t prod = bfield_mul_impl(coeff, state[col]);
-            acc = bfield_add_impl(acc, prod);
-        }
-        new_state[row] = acc;
-    }
+    // Load MDS coefficients (from constant memory, will be cached)
+    const uint64_t m0 = ROW_HASH_MDS[0], m1 = ROW_HASH_MDS[1], m2 = ROW_HASH_MDS[2], m3 = ROW_HASH_MDS[3];
+    const uint64_t m4 = ROW_HASH_MDS[4], m5 = ROW_HASH_MDS[5], m6 = ROW_HASH_MDS[6], m7 = ROW_HASH_MDS[7];
+    const uint64_t m8 = ROW_HASH_MDS[8], m9 = ROW_HASH_MDS[9], m10 = ROW_HASH_MDS[10], m11 = ROW_HASH_MDS[11];
+    const uint64_t m12 = ROW_HASH_MDS[12], m13 = ROW_HASH_MDS[13], m14 = ROW_HASH_MDS[14], m15 = ROW_HASH_MDS[15];
     
-    #pragma unroll
-    for (int i = 0; i < TIP5_STATE_SIZE; ++i) {
-        state[i] = new_state[i];
-    }
+    // Compute MDS matrix-vector product: new_state[r] = sum(MDS[(r-c)&15] * state[c])
+    // Each row uses a rotated version of the MDS coefficients
+    
+    // Row 0: m0*s0 + m15*s1 + m14*s2 + ... + m1*s15
+    state[0] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m0, s0), bfield_mul_impl(m15, s1)), bfield_mul_impl(m14, s2)), bfield_mul_impl(m13, s3)),
+                   bfield_mul_impl(m12, s4)), bfield_mul_impl(m11, s5)), bfield_mul_impl(m10, s6)), bfield_mul_impl(m9, s7)),
+                   bfield_mul_impl(m8, s8)), bfield_mul_impl(m7, s9)), bfield_mul_impl(m6, s10)), bfield_mul_impl(m5, s11)),
+                   bfield_mul_impl(m4, s12)), bfield_mul_impl(m3, s13)), bfield_mul_impl(m2, s14)), bfield_mul_impl(m1, s15));
+    
+    // Row 1: m1*s0 + m0*s1 + m15*s2 + ...
+    state[1] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m1, s0), bfield_mul_impl(m0, s1)), bfield_mul_impl(m15, s2)), bfield_mul_impl(m14, s3)),
+                   bfield_mul_impl(m13, s4)), bfield_mul_impl(m12, s5)), bfield_mul_impl(m11, s6)), bfield_mul_impl(m10, s7)),
+                   bfield_mul_impl(m9, s8)), bfield_mul_impl(m8, s9)), bfield_mul_impl(m7, s10)), bfield_mul_impl(m6, s11)),
+                   bfield_mul_impl(m5, s12)), bfield_mul_impl(m4, s13)), bfield_mul_impl(m3, s14)), bfield_mul_impl(m2, s15));
+    
+    // Row 2
+    state[2] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m2, s0), bfield_mul_impl(m1, s1)), bfield_mul_impl(m0, s2)), bfield_mul_impl(m15, s3)),
+                   bfield_mul_impl(m14, s4)), bfield_mul_impl(m13, s5)), bfield_mul_impl(m12, s6)), bfield_mul_impl(m11, s7)),
+                   bfield_mul_impl(m10, s8)), bfield_mul_impl(m9, s9)), bfield_mul_impl(m8, s10)), bfield_mul_impl(m7, s11)),
+                   bfield_mul_impl(m6, s12)), bfield_mul_impl(m5, s13)), bfield_mul_impl(m4, s14)), bfield_mul_impl(m3, s15));
+    
+    // Row 3
+    state[3] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m3, s0), bfield_mul_impl(m2, s1)), bfield_mul_impl(m1, s2)), bfield_mul_impl(m0, s3)),
+                   bfield_mul_impl(m15, s4)), bfield_mul_impl(m14, s5)), bfield_mul_impl(m13, s6)), bfield_mul_impl(m12, s7)),
+                   bfield_mul_impl(m11, s8)), bfield_mul_impl(m10, s9)), bfield_mul_impl(m9, s10)), bfield_mul_impl(m8, s11)),
+                   bfield_mul_impl(m7, s12)), bfield_mul_impl(m6, s13)), bfield_mul_impl(m5, s14)), bfield_mul_impl(m4, s15));
+    
+    // Row 4
+    state[4] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m4, s0), bfield_mul_impl(m3, s1)), bfield_mul_impl(m2, s2)), bfield_mul_impl(m1, s3)),
+                   bfield_mul_impl(m0, s4)), bfield_mul_impl(m15, s5)), bfield_mul_impl(m14, s6)), bfield_mul_impl(m13, s7)),
+                   bfield_mul_impl(m12, s8)), bfield_mul_impl(m11, s9)), bfield_mul_impl(m10, s10)), bfield_mul_impl(m9, s11)),
+                   bfield_mul_impl(m8, s12)), bfield_mul_impl(m7, s13)), bfield_mul_impl(m6, s14)), bfield_mul_impl(m5, s15));
+    
+    // Row 5
+    state[5] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m5, s0), bfield_mul_impl(m4, s1)), bfield_mul_impl(m3, s2)), bfield_mul_impl(m2, s3)),
+                   bfield_mul_impl(m1, s4)), bfield_mul_impl(m0, s5)), bfield_mul_impl(m15, s6)), bfield_mul_impl(m14, s7)),
+                   bfield_mul_impl(m13, s8)), bfield_mul_impl(m12, s9)), bfield_mul_impl(m11, s10)), bfield_mul_impl(m10, s11)),
+                   bfield_mul_impl(m9, s12)), bfield_mul_impl(m8, s13)), bfield_mul_impl(m7, s14)), bfield_mul_impl(m6, s15));
+    
+    // Row 6
+    state[6] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m6, s0), bfield_mul_impl(m5, s1)), bfield_mul_impl(m4, s2)), bfield_mul_impl(m3, s3)),
+                   bfield_mul_impl(m2, s4)), bfield_mul_impl(m1, s5)), bfield_mul_impl(m0, s6)), bfield_mul_impl(m15, s7)),
+                   bfield_mul_impl(m14, s8)), bfield_mul_impl(m13, s9)), bfield_mul_impl(m12, s10)), bfield_mul_impl(m11, s11)),
+                   bfield_mul_impl(m10, s12)), bfield_mul_impl(m9, s13)), bfield_mul_impl(m8, s14)), bfield_mul_impl(m7, s15));
+    
+    // Row 7
+    state[7] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m7, s0), bfield_mul_impl(m6, s1)), bfield_mul_impl(m5, s2)), bfield_mul_impl(m4, s3)),
+                   bfield_mul_impl(m3, s4)), bfield_mul_impl(m2, s5)), bfield_mul_impl(m1, s6)), bfield_mul_impl(m0, s7)),
+                   bfield_mul_impl(m15, s8)), bfield_mul_impl(m14, s9)), bfield_mul_impl(m13, s10)), bfield_mul_impl(m12, s11)),
+                   bfield_mul_impl(m11, s12)), bfield_mul_impl(m10, s13)), bfield_mul_impl(m9, s14)), bfield_mul_impl(m8, s15));
+    
+    // Row 8
+    state[8] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m8, s0), bfield_mul_impl(m7, s1)), bfield_mul_impl(m6, s2)), bfield_mul_impl(m5, s3)),
+                   bfield_mul_impl(m4, s4)), bfield_mul_impl(m3, s5)), bfield_mul_impl(m2, s6)), bfield_mul_impl(m1, s7)),
+                   bfield_mul_impl(m0, s8)), bfield_mul_impl(m15, s9)), bfield_mul_impl(m14, s10)), bfield_mul_impl(m13, s11)),
+                   bfield_mul_impl(m12, s12)), bfield_mul_impl(m11, s13)), bfield_mul_impl(m10, s14)), bfield_mul_impl(m9, s15));
+    
+    // Row 9
+    state[9] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+               bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                   bfield_mul_impl(m9, s0), bfield_mul_impl(m8, s1)), bfield_mul_impl(m7, s2)), bfield_mul_impl(m6, s3)),
+                   bfield_mul_impl(m5, s4)), bfield_mul_impl(m4, s5)), bfield_mul_impl(m3, s6)), bfield_mul_impl(m2, s7)),
+                   bfield_mul_impl(m1, s8)), bfield_mul_impl(m0, s9)), bfield_mul_impl(m15, s10)), bfield_mul_impl(m14, s11)),
+                   bfield_mul_impl(m13, s12)), bfield_mul_impl(m12, s13)), bfield_mul_impl(m11, s14)), bfield_mul_impl(m10, s15));
+    
+    // Row 10
+    state[10] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m10, s0), bfield_mul_impl(m9, s1)), bfield_mul_impl(m8, s2)), bfield_mul_impl(m7, s3)),
+                    bfield_mul_impl(m6, s4)), bfield_mul_impl(m5, s5)), bfield_mul_impl(m4, s6)), bfield_mul_impl(m3, s7)),
+                    bfield_mul_impl(m2, s8)), bfield_mul_impl(m1, s9)), bfield_mul_impl(m0, s10)), bfield_mul_impl(m15, s11)),
+                    bfield_mul_impl(m14, s12)), bfield_mul_impl(m13, s13)), bfield_mul_impl(m12, s14)), bfield_mul_impl(m11, s15));
+    
+    // Row 11
+    state[11] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m11, s0), bfield_mul_impl(m10, s1)), bfield_mul_impl(m9, s2)), bfield_mul_impl(m8, s3)),
+                    bfield_mul_impl(m7, s4)), bfield_mul_impl(m6, s5)), bfield_mul_impl(m5, s6)), bfield_mul_impl(m4, s7)),
+                    bfield_mul_impl(m3, s8)), bfield_mul_impl(m2, s9)), bfield_mul_impl(m1, s10)), bfield_mul_impl(m0, s11)),
+                    bfield_mul_impl(m15, s12)), bfield_mul_impl(m14, s13)), bfield_mul_impl(m13, s14)), bfield_mul_impl(m12, s15));
+    
+    // Row 12
+    state[12] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m12, s0), bfield_mul_impl(m11, s1)), bfield_mul_impl(m10, s2)), bfield_mul_impl(m9, s3)),
+                    bfield_mul_impl(m8, s4)), bfield_mul_impl(m7, s5)), bfield_mul_impl(m6, s6)), bfield_mul_impl(m5, s7)),
+                    bfield_mul_impl(m4, s8)), bfield_mul_impl(m3, s9)), bfield_mul_impl(m2, s10)), bfield_mul_impl(m1, s11)),
+                    bfield_mul_impl(m0, s12)), bfield_mul_impl(m15, s13)), bfield_mul_impl(m14, s14)), bfield_mul_impl(m13, s15));
+    
+    // Row 13
+    state[13] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m13, s0), bfield_mul_impl(m12, s1)), bfield_mul_impl(m11, s2)), bfield_mul_impl(m10, s3)),
+                    bfield_mul_impl(m9, s4)), bfield_mul_impl(m8, s5)), bfield_mul_impl(m7, s6)), bfield_mul_impl(m6, s7)),
+                    bfield_mul_impl(m5, s8)), bfield_mul_impl(m4, s9)), bfield_mul_impl(m3, s10)), bfield_mul_impl(m2, s11)),
+                    bfield_mul_impl(m1, s12)), bfield_mul_impl(m0, s13)), bfield_mul_impl(m15, s14)), bfield_mul_impl(m14, s15));
+    
+    // Row 14
+    state[14] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m14, s0), bfield_mul_impl(m13, s1)), bfield_mul_impl(m12, s2)), bfield_mul_impl(m11, s3)),
+                    bfield_mul_impl(m10, s4)), bfield_mul_impl(m9, s5)), bfield_mul_impl(m8, s6)), bfield_mul_impl(m7, s7)),
+                    bfield_mul_impl(m6, s8)), bfield_mul_impl(m5, s9)), bfield_mul_impl(m4, s10)), bfield_mul_impl(m3, s11)),
+                    bfield_mul_impl(m2, s12)), bfield_mul_impl(m1, s13)), bfield_mul_impl(m0, s14)), bfield_mul_impl(m15, s15));
+    
+    // Row 15
+    state[15] = bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                bfield_add_impl(bfield_add_impl(bfield_add_impl(
+                    bfield_mul_impl(m15, s0), bfield_mul_impl(m14, s1)), bfield_mul_impl(m13, s2)), bfield_mul_impl(m12, s3)),
+                    bfield_mul_impl(m11, s4)), bfield_mul_impl(m10, s5)), bfield_mul_impl(m9, s6)), bfield_mul_impl(m8, s7)),
+                    bfield_mul_impl(m7, s8)), bfield_mul_impl(m6, s9)), bfield_mul_impl(m5, s10)), bfield_mul_impl(m4, s11)),
+                    bfield_mul_impl(m3, s12)), bfield_mul_impl(m2, s13)), bfield_mul_impl(m1, s14)), bfield_mul_impl(m0, s15));
 }
 
 __device__ __forceinline__ void rh_tip5_permutation(uint64_t state[TIP5_STATE_SIZE]) {
@@ -336,7 +493,8 @@ void hash_bfield_rows_gpu(
 ) {
     if (num_rows == 0) return;
     
-    int block_size = 256;
+    // Block size 512 for better occupancy on modern GPUs
+    int block_size = 512;
     int grid_size = (num_rows + block_size - 1) / block_size;
     
     hash_bfield_rows_kernel<<<grid_size, block_size, 0, stream>>>(
