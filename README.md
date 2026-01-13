@@ -136,6 +136,9 @@ export TVM_USE_RUST_TRACE=1
 export TRITON_GPU_USE_RAM_OVERFLOW=1
 export TRITON_MULTI_GPU=0
 export TRITON_GPU_COUNT=1
+export TRITON_PAD_SCALE_MODE=4
+export TRITON_NTT_REG6STAGE=1
+export TRITON_NTT_FUSED12=1
 ```
 
 These variables control:
@@ -145,6 +148,8 @@ These variables control:
 - Multi-GPU support (`TRITON_MULTI_GPU`, `TRITON_GPU_COUNT`)
 - GPU memory management (`TRITON_GPU_USE_RAM_OVERFLOW` - uses system RAM as VRAM buffer)
 - Rust trace integration (`TVM_USE_RUST_TRACE`)
+- Table padding and scaling (`TRITON_PAD_SCALE_MODE`)
+- NTT optimizations (`TRITON_NTT_REG6STAGE`, `TRITON_NTT_FUSED12`)
 
 Adjust `OMP_NUM_THREADS` based on your CPU core count for optimal performance.
 
