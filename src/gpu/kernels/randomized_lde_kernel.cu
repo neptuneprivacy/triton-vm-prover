@@ -16,6 +16,7 @@
 #include "gpu/kernels/randomized_lde_kernel.cuh"
 #include "gpu/kernels/ntt_kernel.cuh"
 #include "gpu/kernels/bfield_kernel.cuh"
+#include "gpu/cuda_common.cuh"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <vector>
@@ -527,6 +528,24 @@ __global__ void fused_zerofier_add_kernel(
         uint64_t interp_val = (row < trace_len) ? d_interpolants[col * trace_len + row] : 0;
         
         d_output[idx] = bfield_add_impl(interp_val, zerofier_val);
+    }
+}
+
+// GPU kernel to zero memory - much faster than cudaMemset on unified memory
+// cudaMemset uses DMA which causes slow page faults on unified memory
+// This kernel writes zeros in parallel which is faster for unified memory
+__global__ void gpu_memset_zero_kernel(
+    uint64_t* __restrict__ d_output,
+    size_t total_elements
+) {
+    size_t base_idx = (static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) + static_cast<size_t>(threadIdx.x)) * 8;
+    
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        size_t idx = base_idx + i;
+        if (idx < total_elements) {
+            d_output[idx] = 0;
+        }
     }
 }
 
@@ -1091,16 +1110,23 @@ static void randomized_lde_batch_impl(
         cudaFree(d_chunk_bases);
         if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] gen_powers: %.2f ms\n", elapsed()); }
         
-        // Select kernel variant based on environment variable
-        // TRITON_PAD_SCALE_MODE: 0=original (best for unified memory), 1=sparse (best for device memory), 2=tiled, 3=branchless
-        // Note: Mode 1 (sparse) uses cudaMemset which is VERY slow on unified memory (~664ms vs ~7ms on device memory)
-        // Default to mode 0 which handles zeros inline and works well with unified memory
+        // Select kernel variant based on environment variable and memory type
+        // TRITON_PAD_SCALE_MODE: 0=original, 1=sparse+cudaMemset, 2=tiled, 3=branchless, 4=sparse+gpuZero (best for unified)
+        // Auto-detect: Use mode 4 (GPU zero + sparse) for unified memory, mode 1 (cudaMemset + sparse) for device memory
         const char* mode_env = std::getenv("TRITON_PAD_SCALE_MODE");
-        int mode = mode_env ? std::atoi(mode_env) : 0;  // Default to original (works best with unified memory)
+        int mode;
+        if (mode_env) {
+            mode = std::atoi(mode_env);
+        } else {
+            // Auto-detect best mode based on memory type
+            // Mode 4 (GPU zero + sparse) is fastest for unified memory
+            // Mode 1 (cudaMemset + sparse) is fastest for device memory
+            mode = triton_vm::gpu::use_unified_memory() ? 4 : 1;
+        }
         
         if (mode == 1) {
-            // OPTION 1: Sparse kernel - memset zeros first, then only process poly_len rows
-            // WARNING: cudaMemset is very slow on unified memory! Use mode 0 for unified memory.
+            // OPTION 1: Sparse kernel - cudaMemset zeros first, then only process poly_len rows
+            // WARNING: cudaMemset is very slow on unified memory! Use mode 4 for unified memory.
             // This processes only 13% of elements (poly_len/target_len)
             cudaMemsetAsync(d_output, 0, num_cols * target_len * sizeof(uint64_t), stream);
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] memset_zeros: %.2f ms\n", elapsed()); }
@@ -1113,6 +1139,28 @@ static void randomized_lde_batch_impl(
                 offset_pow_n, d_output
             );
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] sparse_kernel (%zu/%zu rows): %.2f ms\n", poly_len, target_len, elapsed()); }
+        }
+        else if (mode == 4) {
+            // OPTION 4: Prefetch + original kernel - BEST for unified memory
+            // Pre-fault pages with cudaMemPrefetchAsync, then run original kernel
+            // This avoids page faults during kernel execution
+            size_t output_size = num_cols * target_len * sizeof(uint64_t);
+            int device;
+            cudaGetDevice(&device);
+            cudaMemLocation location;
+            location.type = cudaMemLocationTypeDevice;
+            location.id = device;
+            cudaMemPrefetchAsync(d_output, output_size, location, 0);
+            if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] prefetch: %.2f ms\n", elapsed()); }
+            
+            constexpr int MEGA_ELEMS = 4;
+            int grid_mega = (num_cols * target_len + BLOCK_SIZE * MEGA_ELEMS - 1) / (BLOCK_SIZE * MEGA_ELEMS);
+            fused_zerofier_pad_scale_kernel<<<grid_mega, BLOCK_SIZE, 0, stream>>>(
+                d_interpolants, d_randomizer_coeffs, d_powers,
+                trace_len, randomizer_len, poly_len, num_cols, target_len,
+                offset_pow_n, d_output
+            );
+            if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] fused_zerofier_pad_scale: %.2f ms\n", elapsed()); }
         }
         else if (mode == 2) {
             // OPTION 2: Tiled kernel with shared memory for d_powers
@@ -1137,7 +1185,7 @@ static void randomized_lde_batch_impl(
             if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] branchless_kernel: %.2f ms\n", elapsed()); }
         }
         else {
-            // OPTION 0: Original mega-fused kernel (optimized with cached parameters)
+            // OPTION 0: Original mega-fused kernel (writes all elements including zeros)
             constexpr int MEGA_ELEMS = 4;
             int grid_mega = (num_cols * target_len + BLOCK_SIZE * MEGA_ELEMS - 1) / (BLOCK_SIZE * MEGA_ELEMS);
             fused_zerofier_pad_scale_kernel<<<grid_mega, BLOCK_SIZE, 0, stream>>>(
