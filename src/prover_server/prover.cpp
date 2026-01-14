@@ -1,4 +1,5 @@
 #include "prover.hpp"
+#include "common/debug_control.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -622,7 +623,7 @@ ProverResponse prove_request(const ProverRequest& request) {
         return ProverResponse::error(request.job_id, error_msg);
     }
     
-    std::cout << "[prover] GPU prover completed in " << prove_time << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[prover] GPU prover completed in " << prove_time << " ms" << std::endl);
     
     // Check if proof file exists
     if (!std::filesystem::exists(proof_path)) {

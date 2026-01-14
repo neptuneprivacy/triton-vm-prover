@@ -2,6 +2,7 @@
 #include "proof_stream/proof_stream.hpp"
 #include "ntt/ntt.hpp"
 #include "merkle/merkle_tree.hpp"
+#include "common/debug_control.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <iostream>

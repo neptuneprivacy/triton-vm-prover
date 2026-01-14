@@ -15,6 +15,7 @@
  * - Proof encoding
  */
 
+#include "common/debug_control.hpp"
 #include <iostream>
 #include <fstream>
 #include <chrono>

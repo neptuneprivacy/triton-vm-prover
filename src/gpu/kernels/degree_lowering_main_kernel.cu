@@ -10,6 +10,7 @@
 #include "gpu/kernels/degree_lowering_main_kernel.cuh"
 #include "gpu/kernels/bfield_kernel.cuh"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include <iostream>
 #include <chrono>
 #include <cstdlib>
@@ -568,7 +569,7 @@ void gpu_degree_lowering_main(
 ) {
     if (num_rows == 0 || num_cols < 379) return;
     
-    const bool profile = (std::getenv("TVM_PROFILE_GPU_DL") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t_start = std::chrono::high_resolution_clock::now();
     
     // Initialize constants

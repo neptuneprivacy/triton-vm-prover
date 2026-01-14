@@ -17,6 +17,7 @@
 #include "gpu/kernels/ntt_kernel.cuh"
 #include "gpu/kernels/bfield_kernel.cuh"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <vector>
@@ -968,7 +969,7 @@ static void randomized_lde_batch_impl(
     cudaStream_t stream
 ) {
     constexpr int BLOCK_SIZE = 256;
-    const bool profile = std::getenv("TRITON_PROFILE_LDE_DETAIL") != nullptr;
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t0 = std::chrono::high_resolution_clock::now();
     auto elapsed = [&t0]() {
         auto now = std::chrono::high_resolution_clock::now();

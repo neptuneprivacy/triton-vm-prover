@@ -16,6 +16,7 @@
 #include "stark/challenges.hpp"
 #include "chacha12_rng.hpp"
 #include "types/b_field_element.hpp"
+#include "common/debug_control.hpp"
 #include <cuda_runtime.h>
 #include <iostream>
 #include <chrono>
@@ -125,7 +126,7 @@ void GpuStark::compute_aux_table_cpu(
     if (omp_init_enabled == -1) {
         const char* env = std::getenv("TRITON_OMP_INIT");
         omp_init_enabled = (env == nullptr || (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
-        std::cout << "[CPU AUX] OpenMP init parallelization: " << (omp_init_enabled ? "enabled" : "disabled") << std::endl;
+        TRITON_PROFILE_COUT("[CPU AUX] OpenMP init parallelization: " << (omp_init_enabled ? "enabled" : "disabled") << std::endl);
     }
     
     auto t_init_start = std::chrono::high_resolution_clock::now();
@@ -149,13 +150,13 @@ void GpuStark::compute_aux_table_cpu(
     auto t_init_end = std::chrono::high_resolution_clock::now();
     double init_ms = std::chrono::duration<double, std::milli>(t_init_end - t_init_start).count();
     if (init_ms > 1.0) {
-        std::cout << "[CPU AUX] Aux table init: " << init_ms << " ms" << std::endl;
+        TRITON_PROFILE_COUT("[CPU AUX] Aux table init: " << init_ms << " ms" << std::endl);
     }
     
     // Run CPU extend functions with CONSERVATIVE parallelization
     // Phase 1: Run small/stateless tables in parallel (write to non-overlapping columns)
     // Phase 2: Run stateful tables sequentially (Hash, Processor, DegreeLowering)
-    std::cout << "[CPU AUX] Running hybrid parallel/sequential CPU extend..." << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX] Running hybrid parallel/sequential CPU extend..." << std::endl);
     auto t_extend_start = std::chrono::high_resolution_clock::now();
     
     // Timing variables
@@ -271,15 +272,17 @@ void GpuStark::compute_aux_table_cpu(
     double t_phase1 = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_phase1_start).count();
     
-    std::cout << "[CPU AUX] Phase 1 (parallel small tables):" << std::endl;
-    std::cout << "[CPU AUX]   Program: " << t_program.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   OpStack: " << t_opstack.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   JumpStack: " << t_jumpstack.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   RAM: " << t_ram.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Lookup: " << t_lookup.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   U32: " << t_u32.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Cascade: " << t_cascade.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Phase 1 wall time: " << t_phase1 << " ms" << std::endl;
+    TRITON_IF_PROFILE {
+        std::cout << "[CPU AUX] Phase 1 (parallel small tables):" << std::endl;
+        std::cout << "[CPU AUX]   Program: " << t_program.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   OpStack: " << t_opstack.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   JumpStack: " << t_jumpstack.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   RAM: " << t_ram.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Lookup: " << t_lookup.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   U32: " << t_u32.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Cascade: " << t_cascade.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Phase 1 wall time: " << t_phase1 << " ms" << std::endl;
+    }
     
     // Allocate host buffer for aux table (device pointer cannot be written from CPU)
     // Cast to size_t before multiply to prevent 32-bit overflow (critical for large inputs like input21)
@@ -294,7 +297,7 @@ void GpuStark::compute_aux_table_cpu(
     if (omp_upload_enabled == -1) {
         const char* env = std::getenv("TRITON_OMP_UPLOAD");
         omp_upload_enabled = (env == nullptr || (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
-        std::cout << "[CPU AUX] OpenMP upload parallelization: " << (omp_upload_enabled ? "enabled" : "disabled") << std::endl;
+        TRITON_PROFILE_COUT("[CPU AUX] OpenMP upload parallelization: " << (omp_upload_enabled ? "enabled" : "disabled") << std::endl);
     }
     
     auto upload_columns = [&](size_t col_start, size_t col_end) {
@@ -349,7 +352,7 @@ void GpuStark::compute_aux_table_cpu(
     
     // Phase 2: Hash + Processor + OVERLAPPED UPLOAD of Phase 1 columns
     // Using TBB parallel_invoke for better work stealing
-    std::cout << "[CPU AUX] Phase 2 (Hash + Processor + Upload P1 cols parallel):" << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX] Phase 2 (Hash + Processor + Upload P1 cols parallel):" << std::endl);
     auto t_phase2_start = std::chrono::high_resolution_clock::now();
     std::atomic<double> t_upload_p1{0};
     {
@@ -416,10 +419,12 @@ void GpuStark::compute_aux_table_cpu(
     }
     double t_phase2 = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_phase2_start).count();
-    std::cout << "[CPU AUX]   Hash: " << t_hash << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Processor: " << t_processor << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Upload P1 cols (overlapped): " << t_upload_p1.load() << " ms" << std::endl;
-    std::cout << "[CPU AUX]   Phase 2 wall time: " << t_phase2 << " ms" << std::endl;
+    TRITON_IF_PROFILE {
+        std::cout << "[CPU AUX]   Hash: " << t_hash << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Processor: " << t_processor << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Upload P1 cols (overlapped): " << t_upload_p1.load() << " ms" << std::endl;
+        std::cout << "[CPU AUX]   Phase 2 wall time: " << t_phase2 << " ms" << std::endl;
+    }
     
     // Upload remaining columns (Hash and Processor from Phase 2)
     upload_columns(3, 14);      // Processor (cols 3-13)
@@ -431,7 +436,7 @@ void GpuStark::compute_aux_table_cpu(
     constexpr size_t RANDOMIZER_COL = 87;
 
     // Apply randomizers directly to h_aux_buffer (no download needed!)
-    std::cout << "[CPU AUX] Applying aux table randomizers..." << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX] Applying aux table randomizers..." << std::endl);
     auto t_randomizer_start = std::chrono::high_resolution_clock::now();
 
     // Try to load randomizer column values from Rust test data (for deterministic comparison)
@@ -607,14 +612,14 @@ void GpuStark::compute_aux_table_cpu(
     
     double t_copy = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_copy_start).count();
-    std::cout << "[CPU AUX]   Copy to device (with randomizers): " << t_copy << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX]   Copy to device (with randomizers): " << t_copy << " ms" << std::endl);
 
     auto t_randomizer_end = std::chrono::high_resolution_clock::now();
     double randomizer_ms = std::chrono::duration<double, std::milli>(t_randomizer_end - t_randomizer_start).count();
-    std::cout << "[CPU AUX]   Randomizers applied: " << randomizer_ms << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX]   Randomizers applied: " << randomizer_ms << " ms" << std::endl);
 
     // Phase 4: Run DegreeLowering on GPU (much faster than Rust FFI)
-    std::cout << "[CPU AUX] Running DegreeLowering on GPU..." << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX] Running DegreeLowering on GPU..." << std::endl);
     auto t_degree_start = std::chrono::high_resolution_clock::now();
 
     kernels::degree_lowering_only_gpu(
@@ -629,7 +634,7 @@ void GpuStark::compute_aux_table_cpu(
 
     auto t_degree_end = std::chrono::high_resolution_clock::now();
     double degree_ms = std::chrono::duration<double, std::milli>(t_degree_end - t_degree_start).count();
-    std::cout << "[CPU AUX]   DegreeLowering (GPU): " << degree_ms << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[CPU AUX]   DegreeLowering (GPU): " << degree_ms << " ms" << std::endl);
 }
 
 void GpuStark::compute_aux_table_cpu_extension_only(

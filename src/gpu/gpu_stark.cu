@@ -13,6 +13,7 @@
 #include "gpu/gpu_stark.hpp"
 #include "gpu/gpu_proof_context.hpp"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include <fstream>
 #include <iomanip>
 
@@ -1454,27 +1455,31 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     }
     size_t available = available_gpu + usable_ram;
     
-    std::cout << "[GPU] Memory check:" << std::endl;
-    std::cout << "  Required: " << (required / (1024 * 1024)) << " MB" << std::endl;
-    std::cout << "  Available: " << (available / (1024 * 1024)) << " MB" << std::endl;
-    if (using_ram_overflow) {
-        std::cout << "    (GPU: " << (available_gpu / (1024 * 1024)) << " MB + System RAM: " 
-                  << ((available - available_gpu) / (1024 * 1024)) << " MB)" << std::endl;
-    }
-    std::cout << "  Total: " << (total / (1024 * 1024)) << " MB" << std::endl;
-    if (use_unified_memory()) {
-        device_count = get_effective_gpu_count();
-        if (device_count > 1) {
-            std::cout << "  Mode: Multi-GPU Unified Memory (" << device_count << " GPUs)";
-        } else {
-            std::cout << "  Mode: Single-GPU Unified Memory";
-        }
+    TRITON_PROFILE_COUT("[GPU] Memory check:" << std::endl);
+    TRITON_PROFILE_COUT("  Required: " << (required / (1024 * 1024)) << " MB" << std::endl);
+    TRITON_PROFILE_COUT("  Available: " << (available / (1024 * 1024)) << " MB" << std::endl);
+    TRITON_IF_PROFILE {
         if (using_ram_overflow) {
-            std::cout << " + System RAM overflow";
+            std::cout << "    (GPU: " << (available_gpu / (1024 * 1024)) << " MB + System RAM: " 
+                      << ((available - available_gpu) / (1024 * 1024)) << " MB)" << std::endl;
         }
-        std::cout << std::endl;
-    } else {
-        std::cout << "  Mode: Single-GPU (device memory only)" << std::endl;
+    }
+    TRITON_PROFILE_COUT("  Total: " << (total / (1024 * 1024)) << " MB" << std::endl);
+    TRITON_IF_PROFILE {
+        if (use_unified_memory()) {
+            device_count = get_effective_gpu_count();
+            if (device_count > 1) {
+                std::cout << "  Mode: Multi-GPU Unified Memory (" << device_count << " GPUs)";
+            } else {
+                std::cout << "  Mode: Single-GPU Unified Memory";
+            }
+            if (using_ram_overflow) {
+                std::cout << " + System RAM overflow";
+            }
+            std::cout << std::endl;
+        } else {
+            std::cout << "  Mode: Single-GPU (device memory only)" << std::endl;
+        }
     }
     
     // Optional escape hatch for very large instances (e.g., big padded heights) on machines
@@ -1501,15 +1506,15 @@ Proof GpuStark::prove(
     const std::vector<uint64_t>& main_randomizer_coeffs,
     const std::vector<uint64_t>& aux_randomizer_coeffs
 ) {
-    std::cout << "[DEBUG] GpuStark::prove() called with main_table_data=" << (main_table_data != nullptr ? "VALID" : "NULL") << std::endl;
+    TRITON_DEBUG_COUT("[DEBUG] GpuStark::prove() called with main_table_data=" << (main_table_data != nullptr ? "VALID" : "NULL") << std::endl);
     auto total_start = std::chrono::high_resolution_clock::now();
     // Persist randomness seed for downstream aux-table randomizer generation (col 87).
     std::copy(randomness_seed, randomness_seed + 32, randomness_seed_.begin());
     
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPU STARK Proof Generation (Zero-Copy)" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Trace dimensions: " << num_rows << " x " << num_cols << std::endl;
+    TRITON_PROFILE_COUT("\n========================================" << std::endl);
+    TRITON_PROFILE_COUT("GPU STARK Proof Generation (Zero-Copy)" << std::endl);
+    TRITON_PROFILE_COUT("========================================" << std::endl);
+    TRITON_PROFILE_COUT("Trace dimensions: " << num_rows << " x " << num_cols << std::endl);
     
     // Check GPU memory
     if (!check_gpu_memory(num_rows)) {
@@ -1568,7 +1573,7 @@ Proof GpuStark::prove(
     dims_.num_quotient_segments = 4;
     dims_.num_fri_rounds = static_cast<size_t>(std::log2(dims_.fri_length)) - 9;
 
-    std::cout << "[GPU] Domains: trace(len=" << dims_.padded_height
+    TRITON_PROFILE_COUT("[GPU] Domains: trace(len=" << dims_.padded_height
               << ", offset=" << dims_.trace_offset
               << ", gen=" << dims_.trace_generator
               << ") quotient(len=" << dims_.quotient_length
@@ -1577,10 +1582,10 @@ Proof GpuStark::prove(
               << ") fri(len=" << dims_.fri_length
               << ", offset=" << dims_.fri_offset
               << ", gen=" << dims_.fri_generator
-              << ")\n";
+              << ")\n");
     
-    std::cout << "FRI domain: " << dims_.fri_length << " points" << std::endl;
-    std::cout << "FRI rounds: " << dims_.num_fri_rounds << std::endl;
+    TRITON_PROFILE_COUT("FRI domain: " << dims_.fri_length << " points" << std::endl);
+    TRITON_PROFILE_COUT("FRI rounds: " << dims_.num_fri_rounds << std::endl);
     
     // Create GPU proof context
     ctx_ = std::make_unique<GpuProofContext>(dims_);
@@ -1597,8 +1602,8 @@ Proof GpuStark::prove(
     // ONLY H2D TRANSFER: Upload main table to GPU
     // =========================================================================
     auto upload_start = std::chrono::high_resolution_clock::now();
-    std::cout << "\n[H2D] Uploading main table (" 
-              << (num_rows * num_cols * 8 / (1024 * 1024)) << " MB)..." << std::endl;
+    TRITON_PROFILE_COUT("\n[H2D] Uploading main table (" 
+              << (num_rows * num_cols * 8 / (1024 * 1024)) << " MB)..." << std::endl);
     ctx_->upload_main_table(main_table_data, num_rows * num_cols);
     // Upload trace randomizer coefficients (tiny H2D, kept for entire proof)
     CUDA_CHECK(cudaMemcpyAsync(
@@ -1630,7 +1635,7 @@ Proof GpuStark::prove(
     }
     ctx_->synchronize();
     double upload_time = elapsed_ms(upload_start);
-    std::cout << "[H2D] Upload complete: " << upload_time << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[H2D] Upload complete: " << upload_time << " ms" << std::endl);
     
     // =========================================================================
     // GPU Degree Lowering (if enabled via TRITON_GPU_DEGREE_LOWERING=1)
@@ -1643,7 +1648,7 @@ Proof GpuStark::prove(
     
     if (use_gpu_degree_lowering) {
         auto t_dl = std::chrono::high_resolution_clock::now();
-        std::cout << "[GPU] Computing degree lowering columns on GPU..." << std::endl;
+        TRITON_PROFILE_COUT("[GPU] Computing degree lowering columns on GPU..." << std::endl);
         kernels::gpu_degree_lowering_main(
             ctx_->d_main_trace(),
             dims_.padded_height,
@@ -1653,19 +1658,19 @@ Proof GpuStark::prove(
         ctx_->synchronize();
         double dl_time = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t_dl).count();
-        std::cout << "[GPU] Degree lowering: " << dl_time << " ms" << std::endl;
+        TRITON_PROFILE_COUT("[GPU] Degree lowering: " << dl_time << " ms" << std::endl);
     }
     
     // =========================================================================
     // ALL COMPUTATION ON GPU (no intermediate memory transfers)
     // =========================================================================
-    std::cout << "\n[GPU] Starting proof computation..." << std::endl;
+    TRITON_PROFILE_COUT("\n[GPU] Starting proof computation..." << std::endl);
     
     double step_times[8] = {0};
     
     // Step 1: Initialize Fiat-Shamir with claim
     auto t1 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 1: Initialize Fiat-Shamir" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 1: Initialize Fiat-Shamir" << std::endl);
     step_initialize_fiat_shamir(claim);
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -1676,7 +1681,7 @@ Proof GpuStark::prove(
     // Hybrid CPU aux now reads directly from the flat `uint64_t*` host buffer.
     
     auto t2 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl);
     step_main_table_commitment(main_randomizer_coeffs);
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -1686,7 +1691,7 @@ Proof GpuStark::prove(
     
     // Step 3: Aux table commitment
     auto t3 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 3: Aux table commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 3: Aux table commitment" << std::endl);
     step_aux_table_commitment(aux_randomizer_coeffs);
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -1700,77 +1705,79 @@ Proof GpuStark::prove(
     
     // Step 4: Quotient computation
     auto t4 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 4: Quotient computation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 4: Quotient computation" << std::endl);
     step_quotient_commitment();
     ctx_->synchronize();
     step_times[3] = elapsed_ms(t4);
     
     // Step 5: Out-of-domain evaluation
     auto t5 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 5: Out-of-domain evaluation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 5: Out-of-domain evaluation" << std::endl);
     step_out_of_domain_evaluation();
     ctx_->synchronize();
     step_times[4] = elapsed_ms(t5);
     
     // Step 6: FRI protocol
     auto t6 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 6: FRI protocol" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 6: FRI protocol" << std::endl);
     step_fri_protocol();
     ctx_->synchronize();
     step_times[5] = elapsed_ms(t6);
     
     // Step 7: Open trace at query indices
     auto t7 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 7: Open trace leaves" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 7: Open trace leaves" << std::endl);
     step_open_trace();
     ctx_->synchronize();
     step_times[6] = elapsed_ms(t7);
     
     // Step 8: Finalize proof buffer
     auto t8 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 8: Finalize proof" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 8: Finalize proof" << std::endl);
     step_encode_proof();
     ctx_->synchronize();
     step_times[7] = elapsed_ms(t8);
     
-    std::cout << "[GPU] Proof computation complete" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Proof computation complete" << std::endl);
     
     // =========================================================================
     // ONLY D2H TRANSFER: Download final proof
     // =========================================================================
     auto download_start = std::chrono::high_resolution_clock::now();
-    std::cout << "\n[D2H] Downloading proof..." << std::endl;
+    TRITON_PROFILE_COUT("\n[D2H] Downloading proof..." << std::endl);
     auto proof_data = ctx_->download_proof();
     double download_time = elapsed_ms(download_start);
-    std::cout << "[D2H] Download complete: " << proof_data.size() << " elements, " 
-              << download_time << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[D2H] Download complete: " << proof_data.size() << " elements, " 
+              << download_time << " ms" << std::endl);
     
     // Print timing summary
     double total_time = elapsed_ms(total_start);
     double gpu_time = 0;
     for (int i = 0; i < 8; ++i) gpu_time += step_times[i];
     
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPU Proof Generation Complete!" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Timing breakdown:" << std::endl;
-    std::cout << "  H2D Upload:     " << upload_time << " ms" << std::endl;
-    std::cout << "  Step 1 (F-S):   " << step_times[0] << " ms" << std::endl;
-    std::cout << "  Step 2 (Main):  " << step_times[1] << " ms" << std::endl;
-    std::cout << "  Step 3 (Aux):   " << step_times[2] << " ms" << std::endl;
-    std::cout << "  Step 4 (Quot):  " << step_times[3] << " ms" << std::endl;
-    std::cout << "  Step 5 (OOD):   " << step_times[4] << " ms" << std::endl;
-    std::cout << "  Step 6 (FRI):   " << step_times[5] << " ms" << std::endl;
-    std::cout << "  Step 7 (Open):  " << step_times[6] << " ms" << std::endl;
-    std::cout << "  Step 8 (Enc):   " << step_times[7] << " ms" << std::endl;
-    std::cout << "  D2H Download:   " << download_time << " ms" << std::endl;
-    std::cout << "  --------------------------" << std::endl;
-    std::cout << "  GPU compute:    " << gpu_time << " ms" << std::endl;
-    std::cout << "  Total:          " << total_time << " ms" << std::endl;
-    std::cout << "  Proof size:     " << (proof_data.size() * 8 / 1024) << " KB" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    
-    ctx_->print_memory_usage();
+    TRITON_IF_PROFILE {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "GPU Proof Generation Complete!" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "Timing breakdown:" << std::endl;
+        std::cout << "  H2D Upload:     " << upload_time << " ms" << std::endl;
+        std::cout << "  Step 1 (F-S):   " << step_times[0] << " ms" << std::endl;
+        std::cout << "  Step 2 (Main):  " << step_times[1] << " ms" << std::endl;
+        std::cout << "  Step 3 (Aux):   " << step_times[2] << " ms" << std::endl;
+        std::cout << "  Step 4 (Quot):  " << step_times[3] << " ms" << std::endl;
+        std::cout << "  Step 5 (OOD):   " << step_times[4] << " ms" << std::endl;
+        std::cout << "  Step 6 (FRI):   " << step_times[5] << " ms" << std::endl;
+        std::cout << "  Step 7 (Open):  " << step_times[6] << " ms" << std::endl;
+        std::cout << "  Step 8 (Enc):   " << step_times[7] << " ms" << std::endl;
+        std::cout << "  D2H Download:   " << download_time << " ms" << std::endl;
+        std::cout << "  --------------------------" << std::endl;
+        std::cout << "  GPU compute:    " << gpu_time << " ms" << std::endl;
+        std::cout << "  Total:          " << total_time << " ms" << std::endl;
+        std::cout << "  Proof size:     " << (proof_data.size() * 8 / 1024) << " KB" << std::endl;
+        std::cout << "========================================\n" << std::endl;
+        
+        ctx_->print_memory_usage();
+    }
     
     // Convert to Proof object
     std::vector<BFieldElement> proof_bfe;
@@ -1875,7 +1882,7 @@ void GpuStark::step_initialize_fiat_shamir(const Claim& claim) {
 // ============================================================================
 
 void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_randomizer_coeffs) {
-    const bool profile_main = std::getenv("TRITON_PROFILE_MAIN") != nullptr;
+    const bool profile_main = TRITON_PROFILE_ENABLED();
     
     // 1) Transpose main trace table row-major -> column-major (required by NTT/LDE kernels)
     auto t_transpose = std::chrono::high_resolution_clock::now();
@@ -2201,8 +2208,8 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
         const char* env = std::getenv("TRITON_AUX_CPU");
         use_cpu_aux = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
         if (use_cpu_aux) {
-            std::cout << "[AUX] Using CPU computation mode (TRITON_AUX_CPU=1)" << std::endl;
-            std::cout << "🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl;
+            TRITON_PROFILE_COUT("[AUX] Using CPU computation mode (TRITON_AUX_CPU=1)" << std::endl);
+            TRITON_PROFILE_COUT("🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl);
         }
     }
     
@@ -2374,8 +2381,8 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
 
     if (use_cpu_aux && h_main_table_data_ != nullptr) {
         // Hybrid CPU/GPU mode: Use CPU for parallel table extension, GPU for DegreeLowering
-        std::cout << "🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl;
-        std::cout << "[CPU-AUX TAG] Using CPU parallel extension + GPU DegreeLowering" << std::endl;
+        TRITON_PROFILE_COUT("🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl);
+        TRITON_PROFILE_COUT("[CPU-AUX TAG] Using CPU parallel extension + GPU DegreeLowering" << std::endl);
 
         // Construct Challenges object from GPU challenges (all 63, including derived)
         // IMPORTANT: Use EXACT challenges from GPU to match quotient computation
@@ -2407,7 +2414,7 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
             ctx_->stream()
         );
 
-        std::cout << "✅ [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation completed" << std::endl;
+        TRITON_PROFILE_COUT("✅ [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation completed" << std::endl);
     } else {
         // GPU mode: Use GPU kernel for aux table extension
         kernels::extend_aux_table_full_gpu(
@@ -2831,7 +2838,7 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
 // ============================================================================
 
 void GpuStark::step_quotient_commitment() {
-    std::cout << "[GPU] ENTERING step_quotient_commitment (GPU constraint evaluation)" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] ENTERING step_quotient_commitment (GPU constraint evaluation)" << std::endl);
     
     // Debug: Print first 3 challenges for comparison with Rust
     if (std::getenv("TVM_DEBUG_CHALLENGES")) {
@@ -2845,7 +2852,7 @@ void GpuStark::step_quotient_commitment() {
     }
     
     // Profiling flag
-    bool profile_quot = std::getenv("TRITON_PROFILE_QUOT") != nullptr;
+    bool profile_quot = TRITON_PROFILE_ENABLED();
     auto t_start = std::chrono::high_resolution_clock::now();
     auto elapsed_ms = [](auto start) {
         return std::chrono::duration<double, std::milli>(
@@ -3557,7 +3564,7 @@ void GpuStark::step_out_of_domain_evaluation() {
         }
     }
 
-    const bool profile_ood = std::getenv("TRITON_PROFILE_OOD") != nullptr;
+    const bool profile_ood = TRITON_PROFILE_ENABLED();
     auto compute_weight_and_eval_point = [&](const uint64_t* d_point3,
                                              uint64_t* d_out_main,
                                              uint64_t* d_out_aux,
@@ -4483,7 +4490,7 @@ void GpuStark::step_fri_protocol() {
     constexpr int BLOCK = 256;
     int grid_n = (int)((n + BLOCK - 1) / BLOCK);
 
-    const bool profile_fri = (std::getenv("TRITON_PROFILE_FRI") != nullptr);
+    const bool profile_fri = TRITON_PROFILE_ENABLED();
     cudaEvent_t ev0{}, ev_build{}, ev_round0{}, ev_loop{}, ev_queries{}, ev_end{};
     if (profile_fri) {
         CUDA_CHECK(cudaEventCreate(&ev0));
@@ -5069,11 +5076,11 @@ Proof GpuStark::prove_with_gpu_padding(
     std::copy(randomness_seed, randomness_seed + 32, randomness_seed_.begin());
     auto total_start = std::chrono::high_resolution_clock::now();
     
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPU STARK Proof Generation (GPU Padding)" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Unpadded rows: " << unpadded_rows << ", Padded height: " << padded_height << std::endl;
-    std::cout << "Columns: " << num_cols << std::endl;
+    TRITON_PROFILE_COUT("\n========================================" << std::endl);
+    TRITON_PROFILE_COUT("GPU STARK Proof Generation (GPU Padding)" << std::endl);
+    TRITON_PROFILE_COUT("========================================" << std::endl);
+    TRITON_PROFILE_COUT("Unpadded rows: " << unpadded_rows << ", Padded height: " << padded_height << std::endl);
+    TRITON_PROFILE_COUT("Columns: " << num_cols << std::endl);
     
     // Check GPU memory
     if (!check_gpu_memory(padded_height)) {
@@ -5113,8 +5120,8 @@ Proof GpuStark::prove_with_gpu_padding(
     dims_.num_quotient_segments = 4;
     dims_.num_fri_rounds = static_cast<size_t>(std::log2(dims_.fri_length)) - 9;
     
-    std::cout << "[GPU] FRI domain: " << dims_.fri_length << " points" << std::endl;
-    std::cout << "[GPU] FRI rounds: " << dims_.num_fri_rounds << std::endl;
+    TRITON_PROFILE_COUT("[GPU] FRI domain: " << dims_.fri_length << " points" << std::endl);
+    TRITON_PROFILE_COUT("[GPU] FRI rounds: " << dims_.num_fri_rounds << std::endl);
     
     // Create GPU proof context
     ctx_ = std::make_unique<GpuProofContext>(dims_);
@@ -5143,7 +5150,7 @@ Proof GpuStark::prove_with_gpu_padding(
     ));
     
     // Pad on GPU
-    std::cout << "[GPU] Padding table on GPU..." << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Padding table on GPU..." << std::endl);
     kernels::gpu_pad_main_table(
         ctx_->d_main_trace(),
         num_cols,
@@ -5174,65 +5181,65 @@ Proof GpuStark::prove_with_gpu_padding(
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
     
     // From here on, continue with the same proof generation as prove()
-    std::cout << "\n[GPU] Starting proof computation..." << std::endl;
+    TRITON_PROFILE_COUT("\n[GPU] Starting proof computation..." << std::endl);
     
     auto step1_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 1: Initialize Fiat-Shamir" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 1: Initialize Fiat-Shamir" << std::endl);
     step_initialize_fiat_shamir(claim);
     auto step1_end = std::chrono::high_resolution_clock::now();
     double step1_time = std::chrono::duration<double, std::milli>(step1_end - step1_start).count();
     
     auto step2_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl);
     step_main_table_commitment(main_randomizer_coeffs);
     auto step2_end = std::chrono::high_resolution_clock::now();
     double step2_time = std::chrono::duration<double, std::milli>(step2_end - step2_start).count();
     
     auto step3_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 3: Aux table commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 3: Aux table commitment" << std::endl);
     step_aux_table_commitment(aux_randomizer_coeffs);
     auto step3_end = std::chrono::high_resolution_clock::now();
     double step3_time = std::chrono::duration<double, std::milli>(step3_end - step3_start).count();
     
     auto step4_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 4: Quotient computation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 4: Quotient computation" << std::endl);
     step_quotient_commitment();
     auto step4_end = std::chrono::high_resolution_clock::now();
     double step4_time = std::chrono::duration<double, std::milli>(step4_end - step4_start).count();
     
     auto step5_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 5: Out-of-domain evaluation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 5: Out-of-domain evaluation" << std::endl);
     step_out_of_domain_evaluation();
     auto step5_end = std::chrono::high_resolution_clock::now();
     double step5_time = std::chrono::duration<double, std::milli>(step5_end - step5_start).count();
     
     auto step6_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 6: FRI protocol" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 6: FRI protocol" << std::endl);
     step_fri_protocol();
     auto step6_end = std::chrono::high_resolution_clock::now();
     double step6_time = std::chrono::duration<double, std::milli>(step6_end - step6_start).count();
     
     auto step7_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 7: Open trace leaves" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 7: Open trace leaves" << std::endl);
     step_open_trace();
     auto step7_end = std::chrono::high_resolution_clock::now();
     double step7_time = std::chrono::duration<double, std::milli>(step7_end - step7_start).count();
     
     auto step8_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 8: Finalize proof" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 8: Finalize proof" << std::endl);
     step_encode_proof();
     auto step8_end = std::chrono::high_resolution_clock::now();
     double step8_time = std::chrono::duration<double, std::milli>(step8_end - step8_start).count();
     
-    std::cout << "[GPU] Proof computation complete" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Proof computation complete" << std::endl);
     
     // Download proof
     auto download_start = std::chrono::high_resolution_clock::now();
-    std::cout << "\n[D2H] Downloading proof..." << std::endl;
+    TRITON_PROFILE_COUT("\n[D2H] Downloading proof..." << std::endl);
     
     std::vector<BFieldElement> proof_elements(proof_size_);
-    std::cout << "[GPU] Downloading proof: " << proof_size_ << " elements ("
-              << (proof_size_ * sizeof(uint64_t) / 1024) << " KB)" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Downloading proof: " << proof_size_ << " elements ("
+              << (proof_size_ * sizeof(uint64_t) / 1024) << " KB)" << std::endl);
     
     CUDA_CHECK(cudaMemcpyAsync(
         proof_elements.data(),
@@ -5245,33 +5252,35 @@ Proof GpuStark::prove_with_gpu_padding(
     
     auto download_end = std::chrono::high_resolution_clock::now();
     double download_time = std::chrono::duration<double, std::milli>(download_end - download_start).count();
-    std::cout << "[D2H] Download complete: " << proof_size_ << " elements, " 
-              << download_time << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[D2H] Download complete: " << proof_size_ << " elements, " 
+              << download_time << " ms" << std::endl);
     
     auto total_end = std::chrono::high_resolution_clock::now();
     double gpu_compute = step1_time + step2_time + step3_time + step4_time + 
                          step5_time + step6_time + step7_time + step8_time;
     double total_time = std::chrono::duration<double, std::milli>(total_end - total_start).count();
     
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPU Proof Generation Complete!" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Timing breakdown:" << std::endl;
-    std::cout << "  H2D+Pad:        " << upload_time << " ms" << std::endl;
-    std::cout << "  Step 1 (F-S):   " << step1_time << " ms" << std::endl;
-    std::cout << "  Step 2 (Main):  " << step2_time << " ms" << std::endl;
-    std::cout << "  Step 3 (Aux):   " << step3_time << " ms" << std::endl;
-    std::cout << "  Step 4 (Quot):  " << step4_time << " ms" << std::endl;
-    std::cout << "  Step 5 (OOD):   " << step5_time << " ms" << std::endl;
-    std::cout << "  Step 6 (FRI):   " << step6_time << " ms" << std::endl;
-    std::cout << "  Step 7 (Open):  " << step7_time << " ms" << std::endl;
-    std::cout << "  Step 8 (Enc):   " << step8_time << " ms" << std::endl;
-    std::cout << "  D2H Download:   " << download_time << " ms" << std::endl;
-    std::cout << "  --------------------------" << std::endl;
-    std::cout << "  GPU compute:    " << gpu_compute << " ms" << std::endl;
-    std::cout << "  Total:          " << total_time << " ms" << std::endl;
-    std::cout << "  Proof size:     " << (proof_size_ * sizeof(uint64_t) / 1024) << " KB" << std::endl;
-    std::cout << "========================================\n" << std::endl;
+    TRITON_IF_PROFILE {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "GPU Proof Generation Complete!" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "Timing breakdown:" << std::endl;
+        std::cout << "  H2D+Pad:        " << upload_time << " ms" << std::endl;
+        std::cout << "  Step 1 (F-S):   " << step1_time << " ms" << std::endl;
+        std::cout << "  Step 2 (Main):  " << step2_time << " ms" << std::endl;
+        std::cout << "  Step 3 (Aux):   " << step3_time << " ms" << std::endl;
+        std::cout << "  Step 4 (Quot):  " << step4_time << " ms" << std::endl;
+        std::cout << "  Step 5 (OOD):   " << step5_time << " ms" << std::endl;
+        std::cout << "  Step 6 (FRI):   " << step6_time << " ms" << std::endl;
+        std::cout << "  Step 7 (Open):  " << step7_time << " ms" << std::endl;
+        std::cout << "  Step 8 (Enc):   " << step8_time << " ms" << std::endl;
+        std::cout << "  D2H Download:   " << download_time << " ms" << std::endl;
+        std::cout << "  --------------------------" << std::endl;
+        std::cout << "  GPU compute:    " << gpu_compute << " ms" << std::endl;
+        std::cout << "  Total:          " << total_time << " ms" << std::endl;
+        std::cout << "  Proof size:     " << (proof_size_ * sizeof(uint64_t) / 1024) << " KB" << std::endl;
+        std::cout << "========================================\n" << std::endl;
+    }
     
     Proof proof;
     proof.elements = std::move(proof_elements);
@@ -5295,10 +5304,10 @@ Proof GpuStark::prove_with_gpu_phase1(
     auto total_start = std::chrono::high_resolution_clock::now();
     auto bytes_to_mb = [](size_t bytes) { return (double)bytes / (1024.0 * 1024.0); };
 
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GPU STARK Proof Generation (GPU Phase 1 + Zero-Copy)" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Trace dimensions: " << padded_height << " x " << num_cols << std::endl;
+    TRITON_PROFILE_COUT("\n========================================" << std::endl);
+    TRITON_PROFILE_COUT("GPU STARK Proof Generation (GPU Phase 1 + Zero-Copy)" << std::endl);
+    TRITON_PROFILE_COUT("========================================" << std::endl);
+    TRITON_PROFILE_COUT("Trace dimensions: " << padded_height << " x " << num_cols << std::endl);
 
     // Check GPU memory
     if (!check_gpu_memory(padded_height)) {
@@ -5354,7 +5363,7 @@ Proof GpuStark::prove_with_gpu_phase1(
     dims_.num_quotient_segments = 4;
     dims_.num_fri_rounds = static_cast<size_t>(std::log2(dims_.fri_length)) - 9;
 
-    std::cout << "[GPU] Domains: trace(len=" << dims_.padded_height
+    TRITON_PROFILE_COUT("[GPU] Domains: trace(len=" << dims_.padded_height
               << ", offset=" << dims_.trace_offset
               << ", gen=" << dims_.trace_generator
               << ") quotient(len=" << dims_.quotient_length
@@ -5363,10 +5372,10 @@ Proof GpuStark::prove_with_gpu_phase1(
               << ") fri(len=" << dims_.fri_length
               << ", offset=" << dims_.fri_offset
               << ", gen=" << dims_.fri_generator
-              << ")\n";
+              << ")\n");
 
-    std::cout << "FRI domain: " << dims_.fri_length << " points" << std::endl;
-    std::cout << "FRI rounds: " << dims_.num_fri_rounds << std::endl;
+    TRITON_PROFILE_COUT("FRI domain: " << dims_.fri_length << " points" << std::endl);
+    TRITON_PROFILE_COUT("FRI rounds: " << dims_.num_fri_rounds << std::endl);
 
     // Create GPU proof context
     ctx_ = std::make_unique<GpuProofContext>(dims_);
@@ -5487,18 +5496,18 @@ Proof GpuStark::prove_with_gpu_phase1(
     // =========================================================================
     // ALL COMPUTATION ON GPU (no big H2D transfer)
     // =========================================================================
-    std::cout << "\n[GPU] Starting proof computation..." << std::endl;
+    TRITON_PROFILE_COUT("\n[GPU] Starting proof computation..." << std::endl);
     double step_times[8] = {0};
 
     auto t1 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 1: Initialize Fiat-Shamir" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 1: Initialize Fiat-Shamir" << std::endl);
     step_initialize_fiat_shamir(claim);
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[0] = elapsed_ms(t1);
 
     auto t2 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 2: Main table LDE + Merkle commitment" << std::endl);
 
     // No background main-table pre-conversion. Hybrid CPU aux reads from the flat host buffer.
 
@@ -5508,28 +5517,28 @@ Proof GpuStark::prove_with_gpu_phase1(
     step_times[1] = elapsed_ms(t2);
 
     auto t3 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 3: Aux table commitment" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 3: Aux table commitment" << std::endl);
     step_aux_table_commitment(aux_randomizer_coeffs);
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[2] = elapsed_ms(t3);
 
     auto t4 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 4: Quotient computation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 4: Quotient computation" << std::endl);
     step_quotient_commitment();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[3] = elapsed_ms(t4);
 
     auto t5 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 5: Out-of-domain evaluation" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 5: Out-of-domain evaluation" << std::endl);
     step_out_of_domain_evaluation();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[4] = elapsed_ms(t5);
 
     auto t6 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 6: FRI protocol" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 6: FRI protocol" << std::endl);
     step_fri_protocol();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -5537,7 +5546,7 @@ Proof GpuStark::prove_with_gpu_phase1(
 
     // Step 7: Open trace at query indices
     auto t7 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 7: Open trace leaves" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 7: Open trace leaves" << std::endl);
     step_open_trace();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -5545,7 +5554,7 @@ Proof GpuStark::prove_with_gpu_phase1(
 
     // Step 8: Finalize proof buffer
     auto t8 = std::chrono::high_resolution_clock::now();
-    std::cout << "[GPU] Step 8: Finalize proof" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Step 8: Finalize proof" << std::endl);
     step_encode_proof();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
@@ -5555,16 +5564,16 @@ Proof GpuStark::prove_with_gpu_phase1(
 
     // Download final proof (only D2H)
     auto download_start = std::chrono::high_resolution_clock::now();
-    std::cout << "\n[D2H] Downloading proof..." << std::endl;
+    TRITON_PROFILE_COUT("\n[D2H] Downloading proof..." << std::endl);
     auto proof_data = ctx_->download_proof();
     double download_time = elapsed_ms(download_start);
-    std::cout << "[D2H] Download complete: " << proof_data.size() << " elements, "
-              << download_time << " ms" << std::endl;
+    TRITON_PROFILE_COUT("[D2H] Download complete: " << proof_data.size() << " elements, "
+              << download_time << " ms" << std::endl);
 
     {
         double total_ms = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - total_start).count();
-        std::cout << "\n[GPU] Timing summary (GPU Phase1 path):" << std::endl;
+        TRITON_PROFILE_COUT("\n[GPU] Timing summary (GPU Phase1 path):" << std::endl);
         std::cout << "  Phase1 (upload+build): " << elapsed_ms(t_p1) << " ms" << std::endl;
         std::cout << "  Step1 (F-S):           " << step_times[0] << " ms" << std::endl;
         std::cout << "  Step2 (Main):          " << step_times[1] << " ms" << std::endl;
