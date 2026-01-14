@@ -342,12 +342,8 @@ void GpuStark::compute_aux_table_cpu(
 #endif
         auto t_upload_end = std::chrono::high_resolution_clock::now();
         double upload_ms = std::chrono::duration<double, std::milli>(t_upload_end - t_upload_start).count();
-        if (omp_upload_enabled && upload_ms > 10.0) {  // Only log if significant time
-            // Thread-safe output: format string first, then print atomically
-            std::stringstream ss;
-            ss << "[CPU AUX]   Upload cols [" << col_start << "-" << col_end << "]: " << upload_ms << " ms\n";
-            std::cout << ss.str();
-        }
+        // Logging removed: upload timing messages
+        (void)upload_ms;  // Suppress unused variable warning
     };
     
     // Phase 2: Hash + Processor + OVERLAPPED UPLOAD of Phase 1 columns
@@ -554,10 +550,10 @@ void GpuStark::compute_aux_table_cpu(
                 std::cerr << "[CPU AUX] Warning: Failed to load randomizer from test data: " << e.what() << std::endl;
             }
         } else {
-            std::cout << "[CPU AUX] Test data file not found, will generate randomizers using RNG" << std::endl;
+            // Logging removed: Test data file not found message
         }
     } else {
-        std::cout << "[CPU AUX] TVM_RUST_TEST_DATA_DIR not set, will generate randomizers using RNG" << std::endl;
+        // Logging removed: TVM_RUST_TEST_DATA_DIR message
     }
     
     // Generate randomizer values using RNG if not loaded from test data

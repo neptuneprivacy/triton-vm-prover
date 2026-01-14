@@ -2058,7 +2058,11 @@ int main(int argc, char* argv[]) {
         
         // Step 1a: Load program from TASM file
         Program program = Program::from_file(program_path);
-        TRITON_PROFILE_COUT("  [1a] Load program: " << elapsed_ms(step_start) << " ms" << std::endl);
+        double step_time = 0.0;
+        if (TRITON_PROFILE_ENABLED()) {
+            step_time = elapsed_ms(step_start);
+        }
+        TRITON_PROFILE_COUT("  [1a] Load program: " << step_time << " ms" << std::endl);
         step_start = std::chrono::high_resolution_clock::now();
         
         // Step 1b: Convert public input to BFieldElements
@@ -2959,7 +2963,11 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << elapsed_ms(step_start) << " ms" << std::endl);
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);
         } else {
             // Use Rust FFI trace execution (without NonDeterminism)
             TRITON_PROFILE_COUT("  [1c] Using Rust FFI trace execution..." << std::endl);
@@ -3061,7 +3069,11 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << elapsed_ms(step_start) << " ms" << std::endl);
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);n
         }
         
         const AlgebraicExecutionTrace& aet = trace_result.aet;
@@ -3083,7 +3095,11 @@ int main(int argc, char* argv[]) {
             fri_domain,
             stark.max_degree(padded_height)
         );
-        TRITON_PROFILE_COUT("  [1d] Domain setup: " << elapsed_ms(step_start) << " ms" << std::endl);
+        double step_time = 0.0;
+        if (TRITON_PROFILE_ENABLED()) {
+            step_time = elapsed_ms(step_start);
+        }
+        TRITON_PROFILE_COUT("  [1d] Domain setup: " << step_time << " ms" << std::endl);
         step_start = std::chrono::high_resolution_clock::now();
         
         // Step 1e: Generate randomizer seed
@@ -3149,7 +3165,11 @@ int main(int argc, char* argv[]) {
             // CPU main table creation (default)
             MasterMainTable main_table = MasterMainTable::from_aet(
                 aet, domains, stark.num_trace_randomizers(), randomness_seed);
-            TRITON_PROFILE_COUT("  [1f] Create main table (incl. Bézout): " << elapsed_ms(step_start) << " ms" << std::endl);
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1f] Create main table (incl. Bézout): " << step_time << " ms" << std::endl);
             
             // Debug: Check rows 181-186 after from_aet (before padding)
             if (const char* debug_flag = std::getenv("TVM_DEBUG_U32_FILL")) {
@@ -3168,7 +3188,11 @@ int main(int argc, char* argv[]) {
             step_start = std::chrono::high_resolution_clock::now();
 
             main_table.pad(padded_height, table_lengths);
-            TRITON_PROFILE_COUT("  [1g] Pad main table: " << elapsed_ms(step_start) << " ms" << std::endl);
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1g] Pad main table: " << step_time << " ms" << std::endl);
             
             // Compare padded main table with Rust test data
             if (const char* test_data_dir = std::getenv("TVM_RUST_TEST_DATA_DIR")) {
@@ -3205,7 +3229,11 @@ int main(int argc, char* argv[]) {
                            row_bytes);
             }
             flat_table = flat_table_mem;
-            TRITON_PROFILE_COUT("  [1h] Flatten table (aligned): " << elapsed_ms(step_start) << " ms" << std::endl);
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1h] Flatten table (aligned): " << step_time << " ms" << std::endl);
 
             // Optional: Verify main table creation against Rust reference implementation
             const char* verify_main_table_env = std::getenv("TVM_VERIFY_MAIN_TABLE");
