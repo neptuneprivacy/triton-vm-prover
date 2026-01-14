@@ -1381,6 +1381,34 @@ static size_t get_system_ram_available() {
 }
 
 bool GpuStark::check_gpu_memory(size_t padded_height) {
+    // Dynamic environment variable configuration based on padded height threshold
+    // Threshold: 2^21 (padded_height = 2,097,152)
+    const size_t THRESHOLD_HEIGHT = 2097152;  // 2^21
+    
+    // Calculate log2 of padded height for reporting
+    uint32_t log2_height = 0;
+    size_t temp = padded_height;
+    while (temp > 1) {
+        temp >>= 1;
+        log2_height++;
+    }
+    
+    // Automatically configure environment based on padded height
+    // Always override user settings to ensure optimal configuration
+    if (padded_height >= THRESHOLD_HEIGHT) {
+        // Large instances (>= 2^21): Enable RAM overflow mode
+        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "1", 1);  // Always override
+        setenv("TRITON_PAD_SCALE_MODE", "4", 1);
+        std::cout << "[GPU] Auto-config: Padded height >= 2^21 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4" << std::endl;
+    } else {
+        // Small instances (<= 2^20): Use direct GPU mode
+        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);  // Always override
+        setenv("TRITON_PAD_SCALE_MODE", "0", 1);
+        std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
+    }
+    
     size_t required = estimate_gpu_memory(padded_height);
     
     size_t free_mem, total_mem;

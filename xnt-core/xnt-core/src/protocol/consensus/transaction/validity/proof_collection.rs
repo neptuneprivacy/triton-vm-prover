@@ -87,8 +87,10 @@ impl ProofCollection {
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
         mut proof_job_options: TritonVmProofJobOptions,
     ) -> Result<Self, CreateProofError> {
-        // Force CPU execution for proof collections (4x faster than GPU)
-        proof_job_options.job_settings.force_cpu = true;
+        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
+        // The actual decision will be made in the prover based on calculated padded height
+        // For now, don't force CPU - let the prover decide based on padded height
+        proof_job_options.job_settings.force_cpu = false;
         let (
             removal_records_integrity_witness,
             collect_lock_scripts_witness,

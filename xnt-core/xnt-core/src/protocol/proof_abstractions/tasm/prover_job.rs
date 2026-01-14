@@ -186,7 +186,9 @@ impl ProverJob {
     // then it is unlikely this hardware will be able to generate the
     // corresponding proof.  In this case a `ProofComplexityLimitExceeded`
     // error is returned.
-    async fn check_if_allowed(&self) -> Result<(), ProverJobError> {
+    //
+    // Returns the calculated padded height along with the result
+    async fn check_if_allowed(&self) -> Result<u32, ProverJobError> {
         tracing::debug!("job settings: {:?}", self.job_settings);
 
         let capability = self.job_settings.tx_proving_capability;
@@ -263,7 +265,7 @@ impl ProverJob {
                     limit: ph_limit,
                 })
             }
-            _ => Ok(()),
+            _ => Ok(padded_height_processor_table),
         }
     }
 
@@ -568,10 +570,11 @@ impl Job for ProverJob {
     // The select!() and kill() occur in Self::prove_out_of_process().
     async fn run_async_cancellable(&self, mut rx: JobCancelReceiver) -> JobCompletion {
         // check if allowed, and listen for cancel messages.
-        tokio::select!(
+        let padded_height = tokio::select!(
             result = self.check_if_allowed() => {
-                if let Err(e) = result {
-                    return ProverJobResult::new(Err(e)).into()
+                match result {
+                    Ok(ph) => ph,
+                    Err(e) => return ProverJobResult::new(Err(e)).into()
                 }
             }
 
@@ -581,8 +584,33 @@ impl Job for ProverJob {
             }
         );
 
+        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
+        const GPU_THRESHOLD: u32 = 32768; // 2^15
+        
+        // Create a mutable copy of job_settings to conditionally override force_cpu
+        let mut job_settings = self.job_settings.clone();
+        if padded_height >= GPU_THRESHOLD {
+            // Override force_cpu to use GPU for proofs >= 2^15
+            job_settings.force_cpu = false;
+            tracing::info!(
+                "[HYBRID] Padded height {} >= 2^15, using GPU execution",
+                padded_height
+            );
+        } else {
+            // Use CPU for smaller proofs
+            job_settings.force_cpu = true;
+            tracing::info!(
+                "[HYBRID] Padded height {} < 2^15, using CPU execution",
+                padded_height
+            );
+        }
+        
+        // Create a new ProverJob with updated settings
+        let mut prover_job = self.clone();
+        prover_job.job_settings = job_settings;
+
         // all is well, let's prove!
-        self.prove(rx).await // handles cancellation internally
+        prover_job.prove(rx).await // handles cancellation internally
     }
 }
 
