@@ -365,14 +365,14 @@ impl ProverJob {
                 serde_json::to_string(&self.job_settings.triton_vm_env_vars)?,
             ];
 
-            tracing::info!("[NEPTUNE] =========================================");
-            tracing::info!("[NEPTUNE] Spawning triton-vm-prover process...");
-            tracing::info!("[NEPTUNE] Sending proving request:");
-            tracing::info!("[NEPTUNE]   Claim JSON: {} bytes", inputs[0].len());
-            tracing::info!("[NEPTUNE]   Program JSON: {} bytes", inputs[1].len());
-            tracing::info!("[NEPTUNE]   NonDet JSON: {} bytes", inputs[2].len());
-            tracing::info!("[NEPTUNE]   MaxLog2: {}", inputs[3]);
-            tracing::info!("[NEPTUNE]   EnvVars JSON: {} bytes", inputs[4].len());
+            tracing::debug!("[NEPTUNE] =========================================");
+            tracing::debug!("[NEPTUNE] Spawning triton-vm-prover process...");
+            tracing::debug!("[NEPTUNE] Sending proving request:");
+            tracing::debug!("[NEPTUNE]   Claim JSON: {} bytes", inputs[0].len());
+            tracing::debug!("[NEPTUNE]   Program JSON: {} bytes", inputs[1].len());
+            tracing::debug!("[NEPTUNE]   NonDet JSON: {} bytes", inputs[2].len());
+            tracing::debug!("[NEPTUNE]   MaxLog2: {}", inputs[3]);
+            tracing::debug!("[NEPTUNE]   EnvVars JSON: {} bytes", inputs[4].len());
             
             // Hybrid CPU/GPU routing: If force_cpu is true, remove TRITON_VM_PROVER_SOCKET
             // to force CPU execution (faster for proof collections)
@@ -412,7 +412,7 @@ impl ProverJob {
                         
                         // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this process
                         cmd.env("CUDA_VISIBLE_DEVICES", assigned_gpu);
-                        tracing::info!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
+                        tracing::debug!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
                             assigned_gpu, cuda_visible, device_index, gpu_ids.len());
                     } else {
                         tracing::warn!("[GPU] CUDA_VISIBLE_DEVICES={} contains no valid GPU IDs", cuda_visible);
@@ -425,9 +425,9 @@ impl ProverJob {
             let mut child = cmd.spawn()?;
 
             let mut child_stdin = child.stdin.take().ok_or(VmProcessError::StdinUnavailable)?;
-            tracing::info!("[NEPTUNE] Writing request to triton-vm-prover stdin...");
+            tracing::debug!("[NEPTUNE] Writing request to triton-vm-prover stdin...");
             child_stdin.write_all(inputs.join("\n").as_bytes()).await?;
-            tracing::info!("[NEPTUNE] Request sent to triton-vm-prover");
+            tracing::debug!("[NEPTUNE] Request sent to triton-vm-prover");
 
             child
         };
@@ -455,16 +455,16 @@ impl ProverJob {
         }
 
         // see <https://github.com/tokio-rs/tokio/discussions/7132>
-        tracing::info!("[NEPTUNE] Waiting for triton-vm-prover to complete...");
+        tracing::debug!("[NEPTUNE] Waiting for triton-vm-prover to complete...");
         tokio::select! {
             result = process_util::wait_with_output(&mut child) => {
                 let output = result?;
                 match output.status.code() {
                     Some(0) => {
-                        tracing::info!("[NEPTUNE] =========================================");
-                        tracing::info!("[NEPTUNE] triton-vm-prover completed successfully");
-                        tracing::info!("[NEPTUNE] Received {} bytes from stdout", output.stdout.len());
-                        tracing::info!("[NEPTUNE] Deserializing proof...");
+                        tracing::debug!("[NEPTUNE] =========================================");
+                        tracing::debug!("[NEPTUNE] triton-vm-prover completed successfully");
+                        tracing::debug!("[NEPTUNE] Received {} bytes from stdout", output.stdout.len());
+                        tracing::debug!("[NEPTUNE] Deserializing proof...");
                         
                         let proof: Proof = bincode::deserialize(&output.stdout)?;
                         
@@ -472,10 +472,10 @@ impl ProverJob {
                                 .map(|x| x.to_string())
                             .unwrap_or_else(|e| format!("could not get padded height from proof.\nGot: {e}"));
                         
-                        tracing::info!(
+                        tracing::debug!(
                             "[NEPTUNE] Proof deserialized successfully"
                         );
-                        tracing::info!(
+                        tracing::debug!(
                             "[NEPTUNE] Proof padded height: {}",
                             padded_height_str
                         );

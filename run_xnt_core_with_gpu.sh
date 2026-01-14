@@ -102,7 +102,7 @@ exec "$XNT_CORE_PATH" \
   --peer 103.78.0.72:9898 \
   --peer 5.21.91.33:9898 \
   --compose \
-  --guesser-fraction 0.871 \
+  --guesser-fraction 0.5 \
   --tx-proof-upgrading \
   --tx-proving-capability=singleproof \
   --gobbling-fraction=0.6 \

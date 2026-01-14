@@ -87,71 +87,20 @@ The script will automatically:
 - Run the prover with the specified program and input
 - Verify the proof against the Rust reference implementation
 
-## Running the Prover Server
+## Running with xnt-core
 
-To run the Triton VM prover server with GPU support:
-
-```bash
-./run_rust_prover_server_gpu.sh \
-    --tcp 127.0.0.1:5555 \
-    --num-gpus 2 \
-    --omp-threads 60 \
-    --omp-init 0
-```
-
-Server options:
-- `--tcp <ADDR>` - TCP address to listen on (default: 127.0.0.1:5555)
-- `--num-gpus <N>` - Number of GPU devices to use
-- `--omp-threads <N>` - OpenMP thread count
-- `--omp-init <0|1>` - Enable/disable OpenMP init parallelization (0 = disabled, 1 = enabled)
-- `--unix <PATH>` - Use Unix socket instead of TCP
-- `--max-jobs <N>` - Maximum concurrent jobs (default: matches num-gpus)
-
-### Forwarding Proof Generation to GPU Prover
-
-To forward proof generation requests from external tools (such as xnt-core) to the GPU prover server, set the `TRITON_VM_PROVER_SOCKET` environment variable to match the server's socket address:
+To run xnt-core with GPU-accelerated proof generation, simply run:
 
 ```bash
-export TRITON_VM_PROVER_SOCKET=127.0.0.1:5555
+./run_xnt_core_with_gpu.sh
 ```
 
-This tells the external tool to connect to the GPU prover server running on the specified address instead of using CPU-based proof generation. The socket address must match the `--tcp` argument used when starting the prover server.
+This script automatically:
+- Configures all GPU and performance optimization settings
+- Sets up the direct GPU prover integration (no separate server needed)
+- Launches xnt-core with optimal settings for GPU acceleration
 
-## Performance Optimization
-
-To optimize performance, you can set the following environment variables:
-
-```bash
-export TRITON_OMP_UPLOAD=1
-export TRITON_OMP_INIT=0
-export TRITON_OMP_QUOTIENT=1
-export TRITON_OMP_PROCESSOR=1
-export OMP_NUM_THREADS=96
-export TRITON_AUX_CPU=1
-export TVM_USE_TASKFLOW=1
-export TVM_USE_TBB=1
-export TRITON_GPU_DEGREE_LOWERING=1
-export TRITON_GPU_U32=1
-export TVM_USE_RUST_TRACE=1
-export TRITON_GPU_USE_RAM_OVERFLOW=1
-export TRITON_MULTI_GPU=0
-export TRITON_GPU_COUNT=1
-export TRITON_PAD_SCALE_MODE=4
-export TRITON_NTT_REG6STAGE=1
-export TRITON_NTT_FUSED12=1
-```
-
-These variables control:
-- OpenMP parallelization settings (`TRITON_OMP_*`, `OMP_NUM_THREADS`)
-- CPU/GPU execution modes (`TRITON_AUX_CPU`, `TRITON_GPU_*`)
-- Task scheduling libraries (`TVM_USE_TASKFLOW`, `TVM_USE_TBB`)
-- Multi-GPU support (`TRITON_MULTI_GPU`, `TRITON_GPU_COUNT`)
-- GPU memory management (`TRITON_GPU_USE_RAM_OVERFLOW` - uses system RAM as VRAM buffer)
-- Rust trace integration (`TVM_USE_RUST_TRACE`)
-- Table padding and scaling (`TRITON_PAD_SCALE_MODE`)
-- NTT optimizations (`TRITON_NTT_REG6STAGE`, `TRITON_NTT_FUSED12`)
-
-Adjust `OMP_NUM_THREADS` based on your CPU core count for optimal performance.
+The script uses sensible defaults for most settings, but you can customize them by setting environment variables before running the script. See `run_xnt_core_with_gpu.sh` for all available configuration options.
 
 ## License
 
