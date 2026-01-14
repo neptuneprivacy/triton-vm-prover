@@ -16,6 +16,8 @@ use tasm_lib::triton_vm::error::InstructionError;
 #[cfg(not(test))]
 use tokio::io::AsyncWriteExt;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::application::config::network::Network;
 use crate::application::config::triton_vm_env_vars::TritonVmEnvVars;
 use crate::application::job_queue::channels::JobCancelReceiver;
@@ -33,6 +35,9 @@ use crate::protocol::proof_abstractions::NonDeterminism;
 use crate::protocol::proof_abstractions::Program;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::triton_vm::vm::VMState;
+
+/// Atomic counter for round-robin GPU assignment when using direct GPU prover
+static GPU_DEVICE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Error code from the spawned prover process in the range 200-232 are reserved
 /// for communicating that the proof is too big. The error code returned is
@@ -181,7 +186,9 @@ impl ProverJob {
     // then it is unlikely this hardware will be able to generate the
     // corresponding proof.  In this case a `ProofComplexityLimitExceeded`
     // error is returned.
-    async fn check_if_allowed(&self) -> Result<(), ProverJobError> {
+    //
+    // Returns the calculated padded height along with the result
+    async fn check_if_allowed(&self) -> Result<u32, ProverJobError> {
         tracing::debug!("job settings: {:?}", self.job_settings);
 
         let capability = self.job_settings.tx_proving_capability;
@@ -258,7 +265,7 @@ impl ProverJob {
                     limit: ph_limit,
                 })
             }
-            _ => Ok(()),
+            _ => Ok(padded_height_processor_table),
         }
     }
 
@@ -358,14 +365,14 @@ impl ProverJob {
                 serde_json::to_string(&self.job_settings.triton_vm_env_vars)?,
             ];
 
-            tracing::info!("[NEPTUNE] =========================================");
-            tracing::info!("[NEPTUNE] Spawning triton-vm-prover process...");
-            tracing::info!("[NEPTUNE] Sending proving request:");
-            tracing::info!("[NEPTUNE]   Claim JSON: {} bytes", inputs[0].len());
-            tracing::info!("[NEPTUNE]   Program JSON: {} bytes", inputs[1].len());
-            tracing::info!("[NEPTUNE]   NonDet JSON: {} bytes", inputs[2].len());
-            tracing::info!("[NEPTUNE]   MaxLog2: {}", inputs[3]);
-            tracing::info!("[NEPTUNE]   EnvVars JSON: {} bytes", inputs[4].len());
+            tracing::debug!("[NEPTUNE] =========================================");
+            tracing::debug!("[NEPTUNE] Spawning triton-vm-prover process...");
+            tracing::debug!("[NEPTUNE] Sending proving request:");
+            tracing::debug!("[NEPTUNE]   Claim JSON: {} bytes", inputs[0].len());
+            tracing::debug!("[NEPTUNE]   Program JSON: {} bytes", inputs[1].len());
+            tracing::debug!("[NEPTUNE]   NonDet JSON: {} bytes", inputs[2].len());
+            tracing::debug!("[NEPTUNE]   MaxLog2: {}", inputs[3]);
+            tracing::debug!("[NEPTUNE]   EnvVars JSON: {} bytes", inputs[4].len());
             
             // Hybrid CPU/GPU routing: If force_cpu is true, remove TRITON_VM_PROVER_SOCKET
             // to force CPU execution (faster for proof collections)
@@ -390,12 +397,37 @@ impl ProverJob {
                 }
             }
             
+            // Assign GPU device for direct GPU prover mode (TRITON_GPU_PROVER_PATH)
+            // When using direct GPU prover with multiple GPUs, assign different devices
+            // to each concurrent process to avoid resource contention
+            if std::env::var("TRITON_GPU_PROVER_PATH").is_ok() && !self.job_settings.force_cpu {
+                if let Ok(cuda_visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
+                    // Parse CUDA_VISIBLE_DEVICES to get available GPU IDs
+                    let gpu_ids: Vec<&str> = cuda_visible.split(',').filter(|s| !s.trim().is_empty()).collect();
+                    if !gpu_ids.is_empty() {
+                        // Round-robin assignment: get next GPU device index
+                        // Use modulo to wrap around if we have fewer GPUs than jobs
+                        let device_index = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % gpu_ids.len();
+                        let assigned_gpu = gpu_ids[device_index];
+                        
+                        // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this process
+                        cmd.env("CUDA_VISIBLE_DEVICES", assigned_gpu);
+                        tracing::debug!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
+                            assigned_gpu, cuda_visible, device_index, gpu_ids.len());
+                    } else {
+                        tracing::warn!("[GPU] CUDA_VISIBLE_DEVICES={} contains no valid GPU IDs", cuda_visible);
+                    }
+                } else {
+                    tracing::debug!("[GPU] CUDA_VISIBLE_DEVICES not set, cannot assign specific GPU device");
+                }
+            }
+            
             let mut child = cmd.spawn()?;
 
             let mut child_stdin = child.stdin.take().ok_or(VmProcessError::StdinUnavailable)?;
-            tracing::info!("[NEPTUNE] Writing request to triton-vm-prover stdin...");
+            tracing::debug!("[NEPTUNE] Writing request to triton-vm-prover stdin...");
             child_stdin.write_all(inputs.join("\n").as_bytes()).await?;
-            tracing::info!("[NEPTUNE] Request sent to triton-vm-prover");
+            tracing::debug!("[NEPTUNE] Request sent to triton-vm-prover");
 
             child
         };
@@ -423,16 +455,16 @@ impl ProverJob {
         }
 
         // see <https://github.com/tokio-rs/tokio/discussions/7132>
-        tracing::info!("[NEPTUNE] Waiting for triton-vm-prover to complete...");
+        tracing::debug!("[NEPTUNE] Waiting for triton-vm-prover to complete...");
         tokio::select! {
             result = process_util::wait_with_output(&mut child) => {
                 let output = result?;
                 match output.status.code() {
                     Some(0) => {
-                        tracing::info!("[NEPTUNE] =========================================");
-                        tracing::info!("[NEPTUNE] triton-vm-prover completed successfully");
-                        tracing::info!("[NEPTUNE] Received {} bytes from stdout", output.stdout.len());
-                        tracing::info!("[NEPTUNE] Deserializing proof...");
+                        tracing::debug!("[NEPTUNE] =========================================");
+                        tracing::debug!("[NEPTUNE] triton-vm-prover completed successfully");
+                        tracing::debug!("[NEPTUNE] Received {} bytes from stdout", output.stdout.len());
+                        tracing::debug!("[NEPTUNE] Deserializing proof...");
                         
                         let proof: Proof = bincode::deserialize(&output.stdout)?;
                         
@@ -440,10 +472,10 @@ impl ProverJob {
                                 .map(|x| x.to_string())
                             .unwrap_or_else(|e| format!("could not get padded height from proof.\nGot: {e}"));
                         
-                        tracing::info!(
+                        tracing::debug!(
                             "[NEPTUNE] Proof deserialized successfully"
                         );
-                        tracing::info!(
+                        tracing::debug!(
                             "[NEPTUNE] Proof padded height: {}",
                             padded_height_str
                         );
@@ -538,10 +570,11 @@ impl Job for ProverJob {
     // The select!() and kill() occur in Self::prove_out_of_process().
     async fn run_async_cancellable(&self, mut rx: JobCancelReceiver) -> JobCompletion {
         // check if allowed, and listen for cancel messages.
-        tokio::select!(
+        let padded_height = tokio::select!(
             result = self.check_if_allowed() => {
-                if let Err(e) = result {
-                    return ProverJobResult::new(Err(e)).into()
+                match result {
+                    Ok(ph) => ph,
+                    Err(e) => return ProverJobResult::new(Err(e)).into()
                 }
             }
 
@@ -551,8 +584,33 @@ impl Job for ProverJob {
             }
         );
 
+        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
+        const GPU_THRESHOLD: u32 = 32768; // 2^15
+        
+        // Create a mutable copy of job_settings to conditionally override force_cpu
+        let mut job_settings = self.job_settings.clone();
+        if padded_height >= GPU_THRESHOLD {
+            // Override force_cpu to use GPU for proofs >= 2^15
+            job_settings.force_cpu = false;
+            tracing::info!(
+                "[HYBRID] Padded height {} >= 2^15, using GPU execution",
+                padded_height
+            );
+        } else {
+            // Use CPU for smaller proofs
+            job_settings.force_cpu = true;
+            tracing::info!(
+                "[HYBRID] Padded height {} < 2^15, using CPU execution",
+                padded_height
+            );
+        }
+        
+        // Create a new ProverJob with updated settings
+        let mut prover_job = self.clone();
+        prover_job.job_settings = job_settings;
+
         // all is well, let's prove!
-        self.prove(rx).await // handles cancellation internally
+        prover_job.prove(rx).await // handles cancellation internally
     }
 }
 

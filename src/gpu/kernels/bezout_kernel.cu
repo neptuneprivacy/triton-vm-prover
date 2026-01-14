@@ -11,6 +11,7 @@
 #include "gpu/kernels/bfield_kernel.cuh"
 #include "gpu/kernels/ntt_kernel.cuh"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include "ntt/ntt.hpp"
 #include <cuda_runtime.h>
 #include <vector>
@@ -234,7 +235,7 @@ gpu_compute_bezout_coefficients(
     const size_t n = unique_ramps.size();
     if (n == 0) return {{}, {}};
     
-    const bool profile = (std::getenv("TVM_PROFILE_GPU_BEZOUT") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t_start = std::chrono::high_resolution_clock::now();
     auto log_time = [&](const char* msg) {
         if (profile) {

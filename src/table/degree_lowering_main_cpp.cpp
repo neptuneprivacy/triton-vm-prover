@@ -3,6 +3,7 @@
 
 #include "table/master_table.hpp"
 #include "types/b_field_element.hpp"
+#include "common/debug_control.hpp"
 #include <vector>
 #include <omp.h>
 #include <chrono>
@@ -48,7 +49,7 @@ using namespace degree_lowering_constants;
 void fill_degree_lowering_main_columns_cpp(std::vector<std::vector<BFieldElement>>& data) {
     if (data.empty() || data[0].empty()) return;
     
-    const bool profile = (std::getenv("TVM_PROFILE_PAD") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t_start = std::chrono::high_resolution_clock::now();
     
     const size_t num_rows = data.size();

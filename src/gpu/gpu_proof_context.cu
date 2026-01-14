@@ -10,6 +10,7 @@
 #include "gpu/cuda_common.cuh"
 #include "gpu/kernels/hash_table_constants.cuh"
 #include "quotient/quotient.hpp"
+#include "common/debug_control.hpp"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
@@ -234,7 +235,7 @@ void GpuProofContext::allocate_memory() {
     
     total_allocated_ = total;
     
-    std::cout << "[GPU] Allocated " << (total / (1024 * 1024)) << " MB for proof context" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Allocated " << (total / (1024 * 1024)) << " MB for proof context" << std::endl);
 }
 
 void GpuProofContext::free_memory() {
@@ -278,8 +279,8 @@ void GpuProofContext::free_memory() {
 }
 
 void GpuProofContext::upload_main_table(const uint64_t* host_data, size_t num_elements) {
-    std::cout << "[GPU] Uploading main table: " << num_elements << " elements ("
-              << (num_elements * sizeof(uint64_t) / (1024 * 1024)) << " MB)" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Uploading main table: " << num_elements << " elements ("
+              << (num_elements * sizeof(uint64_t) / (1024 * 1024)) << " MB)" << std::endl);
     
     CUDA_CHECK(cudaMemcpyAsync(
         d_main_trace_,
@@ -326,8 +327,8 @@ void GpuProofContext::upload_claim(
 }
 
 std::vector<uint64_t> GpuProofContext::download_proof() {
-    std::cout << "[GPU] Downloading proof: " << proof_size_ << " elements ("
-              << (proof_size_ * sizeof(uint64_t) / 1024) << " KB)" << std::endl;
+    TRITON_PROFILE_COUT("[GPU] Downloading proof: " << proof_size_ << " elements ("
+              << (proof_size_ * sizeof(uint64_t) / 1024) << " KB)" << std::endl);
     
     std::vector<uint64_t> proof(proof_size_);
     

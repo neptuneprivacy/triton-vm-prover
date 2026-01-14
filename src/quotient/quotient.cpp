@@ -1,6 +1,7 @@
 #include "quotient/quotient.hpp"
 #include "stark/challenges.hpp"
 #include "ntt/ntt.hpp"
+#include "common/debug_control.hpp"
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>

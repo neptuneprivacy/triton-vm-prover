@@ -11,6 +11,7 @@
  * - D2H: Proof items for encoding (once at end)
  */
 
+#include "common/debug_control.hpp"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -97,7 +98,7 @@ std::vector<uint64_t> parse_u64_list(const std::string& s) {
 void validate_trace_execution(const std::string& rust_test_data_dir, size_t processor_trace_height, size_t processor_trace_width, const std::vector<uint64_t>& public_output_sampled, size_t padded_height) {
     std::ifstream file(rust_test_data_dir + "/01_trace_execution.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 01_trace_execution.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 01_trace_execution.json not found" << std::endl;
         return;
     }
 
@@ -144,9 +145,9 @@ void validate_trace_execution(const std::string& rust_test_data_dir, size_t proc
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 1 (Trace Execution): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 1 (Trace Execution): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 1 (Trace Execution): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 1 (Trace Execution): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -156,7 +157,7 @@ void validate_trace_execution(const std::string& rust_test_data_dir, size_t proc
 void validate_claim(const std::string& rust_test_data_dir, const std::vector<uint64_t>& program_digest, const std::vector<uint64_t>& input_sampled, const std::vector<uint64_t>& output_sampled) {
     std::ifstream file(rust_test_data_dir + "/02_claim.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 02_claim.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 02_claim.json not found" << std::endl;
         return;
     }
 
@@ -217,9 +218,9 @@ void validate_claim(const std::string& rust_test_data_dir, const std::vector<uin
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 2 (Claim): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 2 (Claim): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 2 (Claim): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 2 (Claim): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -229,7 +230,7 @@ void validate_claim(const std::string& rust_test_data_dir, const std::vector<uin
 void validate_fiat_shamir_init(const std::string& rust_test_data_dir, size_t claim_encoded_length) {
     std::ifstream file(rust_test_data_dir + "/03_fiat_shamir_init.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 03_fiat_shamir_init.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 03_fiat_shamir_init.json not found" << std::endl;
         return;
     }
 
@@ -255,9 +256,9 @@ void validate_fiat_shamir_init(const std::string& rust_test_data_dir, size_t cla
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 3 (Fiat-Shamir Init): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 3 (Fiat-Shamir Init): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 3 (Fiat-Shamir Init): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 3 (Fiat-Shamir Init): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -267,7 +268,7 @@ void validate_fiat_shamir_init(const std::string& rust_test_data_dir, size_t cla
 void validate_domain_setup(const std::string& rust_test_data_dir, size_t padded_height, size_t trace_domain_length, size_t quotient_domain_length, size_t fri_domain_length) {
     std::ifstream file(rust_test_data_dir + "/04_domain_setup.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 04_domain_setup.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 04_domain_setup.json not found" << std::endl;
         return;
     }
 
@@ -303,9 +304,9 @@ void validate_domain_setup(const std::string& rust_test_data_dir, size_t padded_
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 4 (Domain Setup): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 4 (Domain Setup): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 4 (Domain Setup): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 4 (Domain Setup): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -315,7 +316,7 @@ void validate_domain_setup(const std::string& rust_test_data_dir, size_t padded_
 void validate_main_table_create(const std::string& rust_test_data_dir, size_t padded_height) {
     std::ifstream file(rust_test_data_dir + "/05_main_table_create.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 05_main_table_create.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 05_main_table_create.json not found" << std::endl;
         return;
     }
 
@@ -341,9 +342,9 @@ void validate_main_table_create(const std::string& rust_test_data_dir, size_t pa
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 5 (Main Table Create): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 5 (Main Table Create): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 5 (Main Table Create): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 5 (Main Table Create): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -353,7 +354,7 @@ void validate_main_table_create(const std::string& rust_test_data_dir, size_t pa
 void validate_main_table_pad(const std::string& rust_test_data_dir, size_t padded_height) {
     std::ifstream file(rust_test_data_dir + "/06_main_table_pad.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Rust test data file 06_main_table_pad.json not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Rust test data file 06_main_table_pad.json not found" << std::endl;
         return;
     }
 
@@ -379,9 +380,9 @@ void validate_main_table_pad(const std::string& rust_test_data_dir, size_t padde
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 6 (Main Table Pad): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 6 (Main Table Pad): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 6 (Main Table Pad): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 6 (Main Table Pad): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -406,13 +407,15 @@ void validate_padded_main_table_data(const std::string& rust_test_data_dir, cons
     size_t rust_rows = rust_table.size();
     size_t rust_cols = (rust_rows > 0) ? rust_table[0].size() : 0;
 
-    std::cerr << "\n";
-    std::cerr << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cerr << "║  STEP: Main Table Pad Comparison                              ║" << std::endl;
-    std::cerr << "╠══════════════════════════════════════════════════════════════╣" << std::endl;
-    std::cerr << "[DBG] Dimensions:" << std::endl;
-    std::cerr << "  C++: " << padded_height << " x " << num_cols << std::endl;
-    std::cerr << "  Rust: " << rust_rows << " x " << rust_cols << std::endl;
+    TRITON_IF_DEBUG {
+        std::cerr << "\n";
+        std::cerr << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
+        std::cerr << "║  STEP: Main Table Pad Comparison                              ║" << std::endl;
+        std::cerr << "╠══════════════════════════════════════════════════════════════╣" << std::endl;
+        std::cerr << "[DBG] Dimensions:" << std::endl;
+        std::cerr << "  C++: " << padded_height << " x " << num_cols << std::endl;
+        std::cerr << "  Rust: " << rust_rows << " x " << rust_cols << std::endl;
+    }
 
     if (padded_height != rust_rows || num_cols != rust_cols) {
         std::cerr << "[DBG] ✗ Dimension mismatch!" << std::endl;
@@ -682,7 +685,7 @@ void validate_main_table_commitment(const std::string& rust_test_data_dir, const
     // Read Rust Merkle root from the comprehensive dump
     std::ifstream merkle_file(rust_test_data_dir + "/06_main_tables_merkle.json");
     if (!merkle_file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Step 7 (Main Table Commitment): Rust Merkle root not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Step 7 (Main Table Commitment): Rust Merkle root not found" << std::endl;
         return;
     }
 
@@ -713,9 +716,9 @@ void validate_main_table_commitment(const std::string& rust_test_data_dir, const
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 7 (Main Table Commitment): ✓ MATCH (Merkle root verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 7 (Main Table Commitment): ✓ MATCH (Merkle root verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 7 (Main Table Commitment): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 7 (Main Table Commitment): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -725,7 +728,7 @@ void validate_main_table_commitment(const std::string& rust_test_data_dir, const
 void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuStark& gpu_stark, size_t padded_height, size_t aux_width) {
     std::ifstream file(rust_test_data_dir + "/07_aux_tables_create.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Aux Table Create: Rust test data not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Aux Table Create: Rust test data not found" << std::endl;
         return;
     }
 
@@ -865,12 +868,12 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
         rust_last_row.push_back(parse_xfe_string(s));
     }
     
-    std::cout << "\n╔══════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  STEP: Aux Table Create Comparison                            ║" << std::endl;
-    std::cout << "╠══════════════════════════════════════════════════════════════╣" << std::endl;
-    std::cout << "[DBG] Dimensions:" << std::endl;
-    std::cout << "  C++: " << padded_height << " x " << aux_width << std::endl;
-    std::cout << "  Rust: " << rust_row_count << " x " << rust_column_count << std::endl;
+    std::cerr << "\n╔══════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cerr << "║  STEP: Aux Table Create Comparison                            ║" << std::endl;
+    std::cerr << "╠══════════════════════════════════════════════════════════════╣" << std::endl;
+    std::cerr << "[DBG] Dimensions:" << std::endl;
+    std::cerr << "  C++: " << padded_height << " x " << aux_width << std::endl;
+    std::cerr << "  Rust: " << rust_row_count << " x " << rust_column_count << std::endl;
     
     // Download aux table from GPU (before LDE, after creation)
     // The aux table is stored in d_aux_trace as row-major XFieldElements (3 uint64_t per XFE)
@@ -897,7 +900,7 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
     // Compare first row
     bool first_row_match = true;
     if (rust_first_row.size() == aux_width) {
-        std::cout << "[DBG] First row comparison:" << std::endl;
+        std::cerr << "[DBG] First row comparison:" << std::endl;
         for (size_t c = 0; c < aux_width; ++c) {
             auto [rust_c0, rust_c1, rust_c2] = rust_first_row[c];
             uint64_t cpp_c0 = cpp_first_row[c].coeff(0).value();
@@ -907,10 +910,10 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
             bool match = (rust_c0 == cpp_c0 && rust_c1 == cpp_c1 && rust_c2 == cpp_c2);
             if (!match) {
                 first_row_match = false;
-                std::cout << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
+                std::cerr << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
                           << ") | Rust: (" << rust_c2 << "·x² + " << rust_c1 << "·x + " << rust_c0 << ") ✗" << std::endl;
             } else if (c < 5) {
-                std::cout << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
+                std::cerr << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
                           << ") | Rust: (" << rust_c2 << "·x² + " << rust_c1 << "·x + " << rust_c0 << ") ✓" << std::endl;
             }
         }
@@ -919,7 +922,7 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
     // Compare last row
     bool last_row_match = true;
     if (rust_last_row.size() == aux_width) {
-        std::cout << "[DBG] Last row comparison:" << std::endl;
+        std::cerr << "[DBG] Last row comparison:" << std::endl;
         for (size_t c = 0; c < aux_width; ++c) {
             auto [rust_c0, rust_c1, rust_c2] = rust_last_row[c];
             uint64_t cpp_c0 = cpp_last_row[c].coeff(0).value();
@@ -929,17 +932,17 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
             bool match = (rust_c0 == cpp_c0 && rust_c1 == cpp_c1 && rust_c2 == cpp_c2);
             if (!match) {
                 last_row_match = false;
-                std::cout << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
+                std::cerr << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
                           << ") | Rust: (" << rust_c2 << "·x² + " << rust_c1 << "·x + " << rust_c0 << ") ✗" << std::endl;
             } else if (c < 5) {
-                std::cout << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
+                std::cerr << "  [" << c << "] C++: (" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
                           << ") | Rust: (" << rust_c2 << "·x² + " << rust_c1 << "·x + " << rust_c0 << ") ✓" << std::endl;
             }
         }
     }
     
     // Detailed comparison for columns 3 and 4 (Processor aux table - OpStackTablePermArg and RamTablePermArg)
-    std::cout << "[DBG] Detailed comparison for columns 3 and 4 (first 20 rows):" << std::endl;
+    std::cerr << "[DBG] Detailed comparison for columns 3 and 4 (first 20 rows):" << std::endl;
     constexpr size_t COL_OPSTACK_PERM = 3;
     constexpr size_t COL_RAM_PERM = 4;
     size_t col3_mismatches = 0, col4_mismatches = 0;
@@ -967,33 +970,33 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
             if (!col3_match) {
                 col3_mismatches++;
                 if (first_col3_mismatch_row == SIZE_MAX) first_col3_mismatch_row = r;
-                std::cout << "  Row[" << r << "] col[3]: C++=(" << cpp_c3_2 << "·x² + " << cpp_c3_1 << "·x + " << cpp_c3_0 
+                std::cerr << "  Row[" << r << "] col[3]: C++=(" << cpp_c3_2 << "·x² + " << cpp_c3_1 << "·x + " << cpp_c3_0 
                           << ") Rust=(" << rust_c3_2 << "·x² + " << rust_c3_1 << "·x + " << rust_c3_0 << ") ✗" << std::endl;
             }
             if (!col4_match) {
                 col4_mismatches++;
                 if (first_col4_mismatch_row == SIZE_MAX) first_col4_mismatch_row = r;
-                std::cout << "  Row[" << r << "] col[4]: C++=(" << cpp_c4_2 << "·x² + " << cpp_c4_1 << "·x + " << cpp_c4_0 
+                std::cerr << "  Row[" << r << "] col[4]: C++=(" << cpp_c4_2 << "·x² + " << cpp_c4_1 << "·x + " << cpp_c4_0 
                           << ") Rust=(" << rust_c4_2 << "·x² + " << rust_c4_1 << "·x + " << rust_c4_0 << ") ✗" << std::endl;
             }
             if (col3_match && col4_match && r < 5) {
-                std::cout << "  Row[" << r << "]: ✓" << std::endl;
+                std::cerr << "  Row[" << r << "]: ✓" << std::endl;
             }
         }
     }
     
     if (first_col3_mismatch_row != SIZE_MAX) {
-        std::cout << "[DBG] Column 3 first mismatch at row " << first_col3_mismatch_row << std::endl;
+        std::cerr << "[DBG] Column 3 first mismatch at row " << first_col3_mismatch_row << std::endl;
     }
     if (first_col4_mismatch_row != SIZE_MAX) {
-        std::cout << "[DBG] Column 4 first mismatch at row " << first_col4_mismatch_row << std::endl;
+        std::cerr << "[DBG] Column 4 first mismatch at row " << first_col4_mismatch_row << std::endl;
     }
     
     // Compare sampled rows
     size_t sample_mismatches = 0;
     const size_t MAX_SAMPLE_MISMATCHES = 10;
     if (!rust_sampled_rows_str.empty()) {
-        std::cout << "[DBG] Sampled rows comparison (checking first " << std::min(rust_sampled_rows_str.size(), size_t(10)) << " rows):" << std::endl;
+        std::cerr << "[DBG] Sampled rows comparison (checking first " << std::min(rust_sampled_rows_str.size(), size_t(10)) << " rows):" << std::endl;
         for (size_t s = 0; s < std::min(rust_sampled_rows_str.size(), size_t(10)); ++s) {
             const auto& rust_row_str = rust_sampled_rows_str[s];
             if (rust_row_str.size() == aux_width) {
@@ -1014,39 +1017,39 @@ void validate_aux_table_create(const std::string& rust_test_data_dir, gpu::GpuSt
                         row_match = false;
                         sample_mismatches++;
                         if (sample_mismatches <= MAX_SAMPLE_MISMATCHES) {
-                            std::cout << "  Row[" << row_idx << "] col[" << c << "]: C++=(" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
+                            std::cerr << "  Row[" << row_idx << "] col[" << c << "]: C++=(" << cpp_c2 << "·x² + " << cpp_c1 << "·x + " << cpp_c0 
                                       << ") Rust=(" << rust_c2 << "·x² + " << rust_c1 << "·x + " << rust_c0 << ") ✗" << std::endl;
                         }
                         break;
                     }
                 }
                 if (row_match && s < 5) {
-                    std::cout << "  Row[" << row_idx << "]: ✓" << std::endl;
+                    std::cerr << "  Row[" << row_idx << "]: ✓" << std::endl;
                 }
             }
         }
     }
     
-    std::cout << "[DBG] Summary:" << std::endl;
+    std::cerr << "[DBG] Summary:" << std::endl;
     if (first_row_match && last_row_match && sample_mismatches == 0) {
-        std::cout << "[DBG] ✓✓✓ Aux table create: FULL MATCH" << std::endl;
-        std::cout << "[DBG]    ✓ First row: all " << aux_width << " columns match" << std::endl;
-        std::cout << "[DBG]    ✓ Last row: all " << aux_width << " columns match" << std::endl;
-        std::cout << "[DBG]    ✓ Sampled rows: all checked rows match" << std::endl;
+        std::cerr << "[DBG] ✓✓✓ Aux table create: FULL MATCH" << std::endl;
+        std::cerr << "[DBG]    ✓ First row: all " << aux_width << " columns match" << std::endl;
+        std::cerr << "[DBG]    ✓ Last row: all " << aux_width << " columns match" << std::endl;
+        std::cerr << "[DBG]    ✓ Sampled rows: all checked rows match" << std::endl;
     } else {
-        std::cout << "[DBG] ✗✗✗ Aux table create: MISMATCH DETECTED" << std::endl;
-        if (!first_row_match) std::cout << "[DBG]    ✗ First row: mismatches detected" << std::endl;
-        if (!last_row_match) std::cout << "[DBG]    ✗ Last row: mismatches detected" << std::endl;
-        if (sample_mismatches > 0) std::cout << "[DBG]    ✗ Sampled rows: " << sample_mismatches << " mismatches" << std::endl;
+        std::cerr << "[DBG] ✗✗✗ Aux table create: MISMATCH DETECTED" << std::endl;
+        if (!first_row_match) std::cerr << "[DBG]    ✗ First row: mismatches detected" << std::endl;
+        if (!last_row_match) std::cerr << "[DBG]    ✗ Last row: mismatches detected" << std::endl;
+        if (sample_mismatches > 0) std::cerr << "[DBG]    ✗ Sampled rows: " << sample_mismatches << " mismatches" << std::endl;
     }
-    std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cerr << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
 }
 
 void validate_aux_table_commitment(const std::string& rust_test_data_dir, const std::string& cpp_merkle_root_hex) {
     // Read Rust Merkle root from the comprehensive dump
     std::ifstream merkle_file(rust_test_data_dir + "/09_aux_tables_merkle.json");
     if (!merkle_file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Step 8 (Aux Table Commitment): Rust Merkle root not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Step 8 (Aux Table Commitment): Rust Merkle root not found" << std::endl;
         return;
     }
 
@@ -1071,9 +1074,9 @@ void validate_aux_table_commitment(const std::string& rust_test_data_dir, const 
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 8 (Aux Table Commitment): ✓ MATCH (Merkle root verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 8 (Aux Table Commitment): ✓ MATCH (Merkle root verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 8 (Aux Table Commitment): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 8 (Aux Table Commitment): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1084,7 +1087,7 @@ void validate_quotient_computation(const std::string& rust_test_data_dir, const 
     // Read Rust quotient Merkle root from the comprehensive dump
     std::ifstream merkle_file(rust_test_data_dir + "/13_quotient_merkle.json");
     if (!merkle_file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Step 9 (Quotient Computation): Rust quotient Merkle root not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Step 9 (Quotient Computation): Rust quotient Merkle root not found" << std::endl;
         return;
     }
 
@@ -1109,9 +1112,9 @@ void validate_quotient_computation(const std::string& rust_test_data_dir, const 
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 9 (Quotient Computation): ✓ MATCH (Quotient Merkle root verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 9 (Quotient Computation): ✓ MATCH (Quotient Merkle root verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 9 (Quotient Computation): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 9 (Quotient Computation): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1126,13 +1129,13 @@ static void validate_main_trace_randomizers(
 ) {
     std::ifstream file(rust_test_data_dir + "/trace_randomizer_all_columns.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Trace randomizers: Rust reference not found (trace_randomizer_all_columns.json)" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Trace randomizers: Rust reference not found (trace_randomizer_all_columns.json)" << std::endl;
         return;
     }
 
     nlohmann::json data = nlohmann::json::parse(file);
     if (!data.contains("sampled_columns") || !data["sampled_columns"].is_array()) {
-        std::cout << "⚠️  [VALIDATION] Trace randomizers: malformed Rust reference" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Trace randomizers: malformed Rust reference" << std::endl;
         return;
     }
 
@@ -1174,9 +1177,9 @@ static void validate_main_trace_randomizers(
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Trace randomizers (main): ✓ MATCH (sampled columns)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Trace randomizers (main): ✓ MATCH (sampled columns)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Trace randomizers (main): ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
+        std::cerr << "❌ [VALIDATION] Trace randomizers (main): ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
         for (const auto& msg : mismatches) std::cout << "   " << msg << std::endl;
         if (mismatch_count > MAX_MISMATCHES_TO_SHOW) {
             std::cout << "   ... and " << (mismatch_count - MAX_MISMATCHES_TO_SHOW) << " more mismatches" << std::endl;
@@ -1264,7 +1267,7 @@ static bool load_aux_trace_randomizers_from_rust(
 void validate_main_lde_samples(const std::string& rust_test_data_dir, gpu::GpuStark& gpu_stark, size_t fri_length, size_t main_width) {
     std::ifstream file(rust_test_data_dir + "/05_main_tables_lde.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Main Table LDE: Rust reference not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Main Table LDE: Rust reference not found" << std::endl;
         return;
     }
 
@@ -1331,9 +1334,9 @@ void validate_main_lde_samples(const std::string& rust_test_data_dir, gpu::GpuSt
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Main Table LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Main Table LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Main Table LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
+        std::cerr << "❌ [VALIDATION] Main Table LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1346,7 +1349,7 @@ void validate_main_lde_samples(const std::string& rust_test_data_dir, gpu::GpuSt
 void validate_aux_lde_samples(const std::string& rust_test_data_dir, gpu::GpuStark& gpu_stark, size_t fri_length, size_t aux_width) {
     std::ifstream file(rust_test_data_dir + "/08_aux_tables_lde.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Aux Table LDE: Rust reference not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Aux Table LDE: Rust reference not found" << std::endl;
         return;
     }
 
@@ -1413,9 +1416,9 @@ void validate_aux_lde_samples(const std::string& rust_test_data_dir, gpu::GpuSta
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Aux Table LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Aux Table LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Aux Table LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
+        std::cerr << "❌ [VALIDATION] Aux Table LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1428,7 +1431,7 @@ void validate_aux_lde_samples(const std::string& rust_test_data_dir, gpu::GpuSta
 void validate_quotient_lde_samples(const std::string& rust_test_data_dir, gpu::GpuStark& gpu_stark, size_t fri_length) {
     std::ifstream file(rust_test_data_dir + "/11_quotient_lde.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Quotient LDE: Rust reference not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Quotient LDE: Rust reference not found" << std::endl;
         return;
     }
 
@@ -1496,9 +1499,9 @@ void validate_quotient_lde_samples(const std::string& rust_test_data_dir, gpu::G
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Quotient LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
+        std::cerr << "✅ [VALIDATION] Quotient LDE Samples: ✓ MATCH (first/middle/last rows verified)" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Quotient LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
+        std::cerr << "❌ [VALIDATION] Quotient LDE Samples: ✗ MISMATCH (" << mismatch_count << " differences)" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1570,95 +1573,101 @@ void debug_compare_aux_row_digests(const std::string& rust_test_data_dir, gpu::G
     std::sort(sample_indices.begin(), sample_indices.end());
     sample_indices.erase(std::unique(sample_indices.begin(), sample_indices.end()), sample_indices.end());
     
-    try {
-        auto cpp_digests = gpu_stark.sample_aux_row_digests(sample_indices);
-        
-        std::cout << "\n   C++ Aux Row Digests:" << std::endl;
-        for (size_t i = 0; i < sample_indices.size(); ++i) {
-            size_t row_idx = sample_indices[i];
-            const auto& digest = cpp_digests[i];
+    TRITON_IF_DEBUG {
+        try {
+            auto cpp_digests = gpu_stark.sample_aux_row_digests(sample_indices);
             
-            std::cout << "   Row " << row_idx << ": [";
-            for (size_t j = 0; j < digest.size(); ++j) {
-                std::cout << digest[j];
-                if (j < digest.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]";
-            
-            // Compare with Rust if available
-            if (have_rust_digests) {
-                auto it = std::find(rust_indices.begin(), rust_indices.end(), row_idx);
-                if (it != rust_indices.end()) {
-                    size_t rust_idx = std::distance(rust_indices.begin(), it);
-                    const auto& rust_digest = rust_digests[rust_idx];
-                    
-                    bool match = (digest.size() == rust_digest.size());
-                    if (match) {
-                        for (size_t j = 0; j < digest.size(); ++j) {
-                            if (digest[j] != rust_digest[j]) {
-                                match = false;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (match) {
-                        std::cout << " ✓";
-                    } else {
-                        std::cout << " ✗ Rust=[";
-                        for (size_t j = 0; j < rust_digest.size(); ++j) {
-                            std::cout << rust_digest[j];
-                            if (j < rust_digest.size() - 1) std::cout << ", ";
-                        }
-                        std::cout << "]";
-                    }
+            std::cout << "\n   C++ Aux Row Digests:" << std::endl;
+            for (size_t i = 0; i < sample_indices.size(); ++i) {
+                size_t row_idx = sample_indices[i];
+                const auto& digest = cpp_digests[i];
+                
+                std::cout << "   Row " << row_idx << ": [";
+                for (size_t j = 0; j < digest.size(); ++j) {
+                    std::cout << digest[j];
+                    if (j < digest.size() - 1) std::cout << ", ";
                 }
-            }
-            // If Rust digests are not available, cross-check GPU digest against CPU Tip5::hash_varlen
-            // computed from the actual aux LDE row values.
-            if (!have_rust_digests) {
-                const char* cpu_env = std::getenv("TVM_DEBUG_ROW_HASHES_CPU");
-                if (cpu_env && std::string(cpu_env) == "1") {
-                    try {
-                        // Download aux row BFEs: [col0.c0,c1,c2, col1.c0,c1,c2, ...]
-                        auto row_bfes_u64 = gpu_stark.sample_aux_lde_row_bfes(row_idx, 88 /* aux_width */);
-                        std::vector<BFieldElement> row_bfes;
-                        row_bfes.reserve(row_bfes_u64.size());
-                        for (uint64_t v : row_bfes_u64) {
-                            row_bfes.emplace_back(v);
-                        }
-
-                        Digest cpu_digest = Tip5::hash_varlen(row_bfes);
-                        bool match_cpu = true;
-                        for (size_t j = 0; j < 5; ++j) {
-                            if (digest[j] != cpu_digest[j].value()) {
-                                match_cpu = false;
-                                break;
+                std::cout << "]";
+                
+                // Compare with Rust if available
+                if (have_rust_digests) {
+                    auto it = std::find(rust_indices.begin(), rust_indices.end(), row_idx);
+                    if (it != rust_indices.end()) {
+                        size_t rust_idx = std::distance(rust_indices.begin(), it);
+                        const auto& rust_digest = rust_digests[rust_idx];
+                        
+                        bool match = (digest.size() == rust_digest.size());
+                        if (match) {
+                            for (size_t j = 0; j < digest.size(); ++j) {
+                                if (digest[j] != rust_digest[j]) {
+                                    match = false;
+                                    break;
+                                }
                             }
                         }
-                        if (match_cpu) {
-                            std::cout << "  (CPU Tip5 ✓)";
+                        
+                        if (match) {
+                            std::cout << " ✓";
                         } else {
-                            std::cout << "  (CPU Tip5 ✗ cpu=["
-                                      << cpu_digest[0].value() << ", "
-                                      << cpu_digest[1].value() << ", "
-                                      << cpu_digest[2].value() << ", "
-                                      << cpu_digest[3].value() << ", "
-                                      << cpu_digest[4].value() << "])";
+                            std::cout << " ✗ Rust=[";
+                            for (size_t j = 0; j < rust_digest.size(); ++j) {
+                                std::cout << rust_digest[j];
+                                if (j < rust_digest.size() - 1) std::cout << ", ";
+                            }
+                            std::cout << "]";
                         }
-                    } catch (const std::exception& e) {
-                        std::cout << "  (CPU Tip5 error: " << e.what() << ")";
                     }
                 }
-            }
-            std::cout << std::endl;
-        }
+                // If Rust digests are not available, cross-check GPU digest against CPU Tip5::hash_varlen
+                // computed from the actual aux LDE row values.
+                if (!have_rust_digests) {
+                    const char* cpu_env = std::getenv("TVM_DEBUG_ROW_HASHES_CPU");
+                    if (cpu_env && std::string(cpu_env) == "1") {
+                        try {
+                            // Download aux row BFEs: [col0.c0,c1,c2, col1.c0,c1,c2, ...]
+                            auto row_bfes_u64 = gpu_stark.sample_aux_lde_row_bfes(row_idx, 88 /* aux_width */);
+                            std::vector<BFieldElement> row_bfes;
+                            row_bfes.reserve(row_bfes_u64.size());
+                            for (uint64_t v : row_bfes_u64) {
+                                row_bfes.emplace_back(v);
+                            }
 
-        // Optional: verify Merkle parent computation on GPU matches CPU Tip5::hash_pair
-        // This isolates whether the mismatch is in row hashing (leaf digests) or in Merkle tree construction.
+                            Digest cpu_digest = Tip5::hash_varlen(row_bfes);
+                            bool match_cpu = true;
+                            for (size_t j = 0; j < 5; ++j) {
+                                if (digest[j] != cpu_digest[j].value()) {
+                                    match_cpu = false;
+                                    break;
+                                }
+                            }
+                            if (match_cpu) {
+                                std::cout << "  (CPU Tip5 ✓)";
+                            } else {
+                                std::cout << "  (CPU Tip5 ✗ cpu=["
+                                          << cpu_digest[0].value() << ", "
+                                          << cpu_digest[1].value() << ", "
+                                          << cpu_digest[2].value() << ", "
+                                          << cpu_digest[3].value() << ", "
+                                          << cpu_digest[4].value() << "])";
+                            }
+                        } catch (const std::exception& e) {
+                            std::cout << "  (CPU Tip5 error: " << e.what() << ")";
+                        }
+                    }
+                }
+                std::cout << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Error sampling aux row digests: " << e.what() << std::endl;
+        }
+    }
+
+    // Optional: verify Merkle parent computation on GPU matches CPU Tip5::hash_pair
+    // This isolates whether the mismatch is in row hashing (leaf digests) or in Merkle tree construction.
+    TRITON_IF_DEBUG {
         const char* merkle_env = std::getenv("TVM_DEBUG_MERKLE_INTERNAL");
         if (merkle_env && std::string(merkle_env) == "1") {
-            std::cout << "\n🔍 [DEBUG] Checking GPU Merkle parent nodes vs CPU Tip5::hash_pair (TVM_DEBUG_MERKLE_INTERNAL=1)..." << std::endl;
+            std::cerr << "\n🔍 [DEBUG] Checking GPU Merkle parent nodes vs CPU Tip5::hash_pair (TVM_DEBUG_MERKLE_INTERNAL=1)..." << std::endl;
 
             const size_t height = (size_t)std::log2((double)fri_length);
             auto level_size = [&](size_t level) -> size_t { return fri_length >> level; };
@@ -1741,7 +1750,7 @@ void debug_compare_aux_row_digests(const std::string& rust_test_data_dir, gpu::G
                 levels_to_check.end()
             );
 
-            std::cout << "\n🔍 [DEBUG] Verifying Merkle internal node consistency at multiple levels..." << std::endl;
+            std::cerr << "\n🔍 [DEBUG] Verifying Merkle internal node consistency at multiple levels..." << std::endl;
             for (size_t level : levels_to_check) {
                 const size_t sz = level_size(level);
                 const size_t off = level_offset(level);
@@ -1773,7 +1782,7 @@ void debug_compare_aux_row_digests(const std::string& rust_test_data_dir, gpu::G
                 auto gpu_nodes = gpu_stark.sample_aux_merkle_nodes(node_idxs);
                 auto gpu_children = gpu_stark.sample_aux_merkle_nodes(child_idxs);
 
-                std::cout << "   Level " << level << " (size=" << sz << ", offset=" << off << "):" << std::endl;
+                std::cerr << "   Level " << level << " (size=" << sz << ", offset=" << off << "):" << std::endl;
                 for (size_t k = 0; k < positions.size(); ++k) {
                     const size_t p = positions[k];
                     const auto& node = gpu_nodes[k];
@@ -1791,20 +1800,17 @@ void debug_compare_aux_row_digests(const std::string& rust_test_data_dir, gpu::G
                     for (size_t j = 0; j < 5; ++j) {
                         if (node[j] != cpu[j].value()) { match = false; break; }
                     }
-                    std::cout << "     Node p=" << p << " idx=" << (off + p) << " : " << (match ? "✓" : "✗") << std::endl;
-                    if (!match) {
-                        std::cout << "       GPU node: [" << node[0] << ", " << node[1] << ", " << node[2] << ", " << node[3] << ", " << node[4] << "]\n";
-                        std::cout << "       CPU node: [" << cpu[0].value() << ", " << cpu[1].value() << ", " << cpu[2].value() << ", " << cpu[3].value() << ", " << cpu[4].value() << "]\n";
+                    std::cerr << "     Node p=" << p << " idx=" << (off + p) << " : " << (match ? "✓" : "✗") << std::endl;
+                    TRITON_IF_DEBUG {
+                        if (!match) {
+                            std::cout << "       GPU node: [" << node[0] << ", " << node[1] << ", " << node[2] << ", " << node[3] << ", " << node[4] << "]\n";
+                            std::cout << "       CPU node: [" << cpu[0].value() << ", " << cpu[1].value() << ", " << cpu[2].value() << ", " << cpu[3].value() << ", " << cpu[4].value() << "]\n";
+                        }
                     }
                 }
             }
         }
-        
-    } catch (const std::exception& e) {
-        std::cout << "   Error sampling row digests: " << e.what() << std::endl;
     }
-    
-    std::cout << std::endl;
 }
 
 /**
@@ -1842,7 +1848,7 @@ void debug_dump_aux_lde_raw(const std::string& rust_test_data_dir, gpu::GpuStark
 void validate_out_of_domain_evaluation(const std::string& rust_test_data_dir) {
     std::ifstream file(rust_test_data_dir + "/10_out_of_domain_evaluation.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Step 10 (Out-of-Domain Evaluation): Rust reference not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Step 10 (Out-of-Domain Evaluation): Rust reference not found" << std::endl;
         return;
     }
 
@@ -1865,9 +1871,9 @@ void validate_out_of_domain_evaluation(const std::string& rust_test_data_dir) {
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 10 (Out-of-Domain Evaluation): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 10 (Out-of-Domain Evaluation): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 10 (Out-of-Domain Evaluation): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 10 (Out-of-Domain Evaluation): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -1877,7 +1883,7 @@ void validate_out_of_domain_evaluation(const std::string& rust_test_data_dir) {
 void validate_fri_protocol(const std::string& rust_test_data_dir) {
     std::ifstream file(rust_test_data_dir + "/11_fri_protocol.json");
     if (!file.is_open()) {
-        std::cout << "⚠️  [VALIDATION] Step 11 (FRI Protocol): Rust reference not found" << std::endl;
+        std::cerr << "⚠️  [VALIDATION] Step 11 (FRI Protocol): Rust reference not found" << std::endl;
         return;
     }
 
@@ -1900,9 +1906,9 @@ void validate_fri_protocol(const std::string& rust_test_data_dir) {
     }
 
     if (all_match) {
-        std::cout << "✅ [VALIDATION] Step 11 (FRI Protocol): ✓ MATCH" << std::endl;
+        std::cerr << "✅ [VALIDATION] Step 11 (FRI Protocol): ✓ MATCH" << std::endl;
     } else {
-        std::cout << "❌ [VALIDATION] Step 11 (FRI Protocol): ✗ MISMATCH" << std::endl;
+        std::cerr << "❌ [VALIDATION] Step 11 (FRI Protocol): ✗ MISMATCH" << std::endl;
         for (const auto& msg : mismatches) {
             std::cout << "   " << msg << std::endl;
         }
@@ -2019,24 +2025,26 @@ int main(int argc, char* argv[]) {
         total_gpu_mem += p.totalGlobalMem;
     }
     
-    std::cout << "\n╔══════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  Full GPU Zero-Copy Triton VM Prover              ║" << std::endl;
-    std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
-    std::cout << "║  GPU: " << prop.name << std::endl;
-    std::cout << "║  Memory: " << (prop.totalGlobalMem / (1024*1024)) << " MB";
-    if (effective_gpu_count > 1) {
-        std::cout << " (GPU 0 of " << effective_gpu_count;
-        if (effective_gpu_count < device_count) {
-            std::cout << "/" << device_count;
+    TRITON_IF_PROFILE {
+        std::cout << "\n╔══════════════════════════════════════════════════╗" << std::endl;
+        std::cout << "║  Full GPU Zero-Copy Triton VM Prover              ║" << std::endl;
+        std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
+        std::cout << "║  GPU: " << prop.name << std::endl;
+        std::cout << "║  Memory: " << (prop.totalGlobalMem / (1024*1024)) << " MB";
+        if (effective_gpu_count > 1) {
+            std::cout << " (GPU 0 of " << effective_gpu_count;
+            if (effective_gpu_count < device_count) {
+                std::cout << "/" << device_count;
+            }
+            std::cout << ", total: " << (total_gpu_mem / (1024*1024)) << " MB)";
         }
-        std::cout << ", total: " << (total_gpu_mem / (1024*1024)) << " MB)";
+        std::cout << std::endl;
+        std::cout << "║  Compute: " << prop.major << "." << prop.minor << std::endl;
+        if (triton_vm::gpu::use_unified_memory()) {
+            std::cout << "║  Mode: Multi-GPU Unified Memory (" << effective_gpu_count << " GPUs)" << std::endl;
+        }
+        std::cout << "╚══════════════════════════════════════════════════╝\n" << std::endl;
     }
-    std::cout << std::endl;
-    std::cout << "║  Compute: " << prop.major << "." << prop.minor << std::endl;
-    if (triton_vm::gpu::use_unified_memory()) {
-        std::cout << "║  Mode: Multi-GPU Unified Memory (" << effective_gpu_count << " GPUs)" << std::endl;
-    }
-    std::cout << "╚══════════════════════════════════════════════════╝\n" << std::endl;
     
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -2044,13 +2052,17 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         // PHASE 1: Pure C++ - Trace and Pad
         // =====================================================================
-        std::cout << "━━━ Phase 1: Pure C++ (Trace + Pad) ━━━" << std::endl;
+        TRITON_PROFILE_COUT("━━━ Phase 1: Pure C++ (Trace + Pad) ━━━" << std::endl);
         auto phase1_start = std::chrono::high_resolution_clock::now();
         auto step_start = phase1_start;
         
         // Step 1a: Load program from TASM file
         Program program = Program::from_file(program_path);
-        std::cout << "  [1a] Load program: " << elapsed_ms(step_start) << " ms" << std::endl;
+        double step_time = 0.0;
+        if (TRITON_PROFILE_ENABLED()) {
+            step_time = elapsed_ms(step_start);
+        }
+        TRITON_PROFILE_COUT("  [1a] Load program: " << step_time << " ms" << std::endl);
         step_start = std::chrono::high_resolution_clock::now();
         
         // Step 1b: Convert public input to BFieldElements
@@ -2070,7 +2082,7 @@ int main(int argc, char* argv[]) {
         // Always use Rust FFI - choose function based on whether we have NonDeterminism
         if (!nondet_json_path.empty() && !program_json_path.empty()) {
             // Use Rust FFI with NonDeterminism support
-            std::cout << "  [1c] Using Rust FFI trace execution with NonDeterminism..." << std::endl;
+            TRITON_PROFILE_COUT("  [1c] Using Rust FFI trace execution with NonDeterminism..." << std::endl);
             
             // Load NonDeterminism JSON
             std::string nondet_json;
@@ -2951,10 +2963,13 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            std::cout << "  [1c] Rust FFI trace execution: " << elapsed_ms(step_start) << " ms" << std::endl;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);
         } else {
             // Use Rust FFI trace execution (without NonDeterminism)
-            std::cout << "  [1c] Using Rust FFI trace execution..." << std::endl;
+            TRITON_PROFILE_COUT("  [1c] Using Rust FFI trace execution..." << std::endl);
             
             // Call Rust FFI with program path (TASM file)
             uint64_t* proc_trace_data = nullptr;
@@ -3053,11 +3068,14 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            std::cout << "  [1c] Rust FFI trace execution: " << elapsed_ms(step_start) << " ms" << std::endl;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);
         }
         
         const AlgebraicExecutionTrace& aet = trace_result.aet;
-        std::cout << "       Processor rows: " << aet.height_of_table(1) << std::endl;
+        TRITON_PROFILE_COUT("       Processor rows: " << aet.height_of_table(1) << std::endl);
 
         step_start = std::chrono::high_resolution_clock::now();
         
@@ -3075,7 +3093,10 @@ int main(int argc, char* argv[]) {
             fri_domain,
             stark.max_degree(padded_height)
         );
-        std::cout << "  [1d] Domain setup: " << elapsed_ms(step_start) << " ms" << std::endl;
+        if (TRITON_PROFILE_ENABLED()) {
+            step_time = elapsed_ms(step_start);
+        }
+        TRITON_PROFILE_COUT("  [1d] Domain setup: " << step_time << " ms" << std::endl);
         step_start = std::chrono::high_resolution_clock::now();
         
         // Step 1e: Generate randomizer seed
@@ -3141,7 +3162,11 @@ int main(int argc, char* argv[]) {
             // CPU main table creation (default)
             MasterMainTable main_table = MasterMainTable::from_aet(
                 aet, domains, stark.num_trace_randomizers(), randomness_seed);
-            std::cout << "  [1f] Create main table (incl. Bézout): " << elapsed_ms(step_start) << " ms" << std::endl;
+            double step_time = 0.0;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1f] Create main table (incl. Bézout): " << step_time << " ms" << std::endl);
             
             // Debug: Check rows 181-186 after from_aet (before padding)
             if (const char* debug_flag = std::getenv("TVM_DEBUG_U32_FILL")) {
@@ -3160,7 +3185,10 @@ int main(int argc, char* argv[]) {
             step_start = std::chrono::high_resolution_clock::now();
 
             main_table.pad(padded_height, table_lengths);
-            std::cout << "  [1g] Pad main table: " << elapsed_ms(step_start) << " ms" << std::endl;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1g] Pad main table: " << step_time << " ms" << std::endl);
             
             // Compare padded main table with Rust test data
             if (const char* test_data_dir = std::getenv("TVM_RUST_TEST_DATA_DIR")) {
@@ -3197,7 +3225,10 @@ int main(int argc, char* argv[]) {
                            row_bytes);
             }
             flat_table = flat_table_mem;
-            std::cout << "  [1h] Flatten table (aligned): " << elapsed_ms(step_start) << " ms" << std::endl;
+            if (TRITON_PROFILE_ENABLED()) {
+                step_time = elapsed_ms(step_start);
+            }
+            TRITON_PROFILE_COUT("  [1h] Flatten table (aligned): " << step_time << " ms" << std::endl);
 
             // Optional: Verify main table creation against Rust reference implementation
             const char* verify_main_table_env = std::getenv("TVM_VERIFY_MAIN_TABLE");
@@ -3246,10 +3277,10 @@ int main(int argc, char* argv[]) {
         };
         
         double phase1_time = elapsed_ms(phase1_start);
-        std::cout << "  ────────────────────────────────────" << std::endl;
-        std::cout << "  Trace dimensions: " << num_rows << " x " << num_cols << std::endl;
-        std::cout << "  FRI domain: " << fri_dom[0] << " points" << std::endl;
-        std::cout << "  Phase 1 Total: " << phase1_time << " ms" << std::endl;
+        TRITON_PROFILE_COUT("  ────────────────────────────────────" << std::endl);
+        TRITON_PROFILE_COUT("  Trace dimensions: " << num_rows << " x " << num_cols << std::endl);
+        TRITON_PROFILE_COUT("  FRI domain: " << fri_dom[0] << " points" << std::endl);
+        TRITON_PROFILE_COUT("  Phase 1 Total: " << phase1_time << " ms" << std::endl);
         
         // Build claim (pure C++)
         Claim claim;
@@ -3261,7 +3292,7 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         // PHASE 2: Full GPU Proof Generation
         // =====================================================================
-        std::cout << "\n━━━ Phase 2: GPU Proof Generation ━━━" << std::endl;
+        TRITON_PROFILE_COUT("\n━━━ Phase 2: GPU Proof Generation ━━━" << std::endl);
         auto phase2_start = std::chrono::high_resolution_clock::now();
         
         // Extract randomizer coefficients for main and aux tables
@@ -3961,12 +3992,12 @@ int main(int argc, char* argv[]) {
         }
         
         double phase2_time = elapsed_ms(phase2_start);
-        std::cout << "  GPU proof generation: " << phase2_time << " ms" << std::endl;
+        TRITON_PROFILE_COUT("  GPU proof generation: " << phase2_time << " ms" << std::endl);
 
         // =====================================================================
         // PHASE 3: Rust FFI - Proof Encoding
         // =====================================================================
-        std::cout << "\n━━━ Phase 3: Rust FFI (Encode) ━━━" << std::endl;
+        TRITON_PROFILE_COUT("\n━━━ Phase 3: Rust FFI (Encode) ━━━" << std::endl);
         auto phase3_start = std::chrono::high_resolution_clock::now();
         
         // Save claim (Rust verifier expects a separate claim file for `triton-cli verify`)
@@ -4277,7 +4308,7 @@ int main(int argc, char* argv[]) {
         ps.encode_and_save_to_file(output_proof);
         
         double phase3_time = elapsed_ms(phase3_start);
-        std::cout << "  Proof encoding (Rust FFI): " << phase3_time << " ms" << std::endl;
+        TRITON_PROFILE_COUT("  Proof encoding (Rust FFI): " << phase3_time << " ms" << std::endl);
         
         // =====================================================================
         // Validation against Rust test data (if TVM_RUST_TEST_DATA_DIR set)
@@ -4402,18 +4433,20 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         double total_time = elapsed_ms(total_start);
         
-        std::cout << "\n╔══════════════════════════════════════════════════╗" << std::endl;
-        std::cout << "║  Proof Generation Complete                        ║" << std::endl;
-        std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
-        std::cout << "║  Phase 1 (C++ trace+pad):   " << phase1_time << " ms" << std::endl;
-        std::cout << "║  Phase 2 (GPU compute):     " << phase2_time << " ms" << std::endl;
-        std::cout << "║  Phase 3 (Rust FFI encode): " << phase3_time << " ms" << std::endl;
-        std::cout << "║  ────────────────────────────────────────────────" << std::endl;
-        std::cout << "║  Total:                     " << total_time << " ms" << std::endl;
-        std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
-        std::cout << "║  Claim: " << output_claim << std::endl;
-        std::cout << "║  Proof: " << output_proof << std::endl;
-        std::cout << "╚══════════════════════════════════════════════════╝\n" << std::endl;
+        TRITON_IF_PROFILE {
+            std::cout << "\n╔══════════════════════════════════════════════════╗" << std::endl;
+            std::cout << "║  Proof Generation Complete                        ║" << std::endl;
+            std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
+            std::cout << "║  Phase 1 (C++ trace+pad):   " << phase1_time << " ms" << std::endl;
+            std::cout << "║  Phase 2 (GPU compute):     " << phase2_time << " ms" << std::endl;
+            std::cout << "║  Phase 3 (Rust FFI encode): " << phase3_time << " ms" << std::endl;
+            std::cout << "║  ────────────────────────────────────────────────" << std::endl;
+            std::cout << "║  Total:                     " << total_time << " ms" << std::endl;
+            std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
+            std::cout << "║  Claim: " << output_claim << std::endl;
+            std::cout << "║  Proof: " << output_proof << std::endl;
+            std::cout << "╚══════════════════════════════════════════════════╝\n" << std::endl;
+        }
         
         // Cleanup memory (CPU Phase1 path only)
         if (flat_table_mem) std::free(flat_table_mem);
