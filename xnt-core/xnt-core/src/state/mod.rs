@@ -2173,6 +2173,16 @@ impl GlobalState {
         proof: ProofCollection,
         upgrade_incentive: UpgradeIncentive,
     ) -> Result<ProofCollectionToSingleProof> {
+        // Merged transactions (merge_bit=true) cannot be upgraded through the
+        // ProofCollection→SingleProof path because ProofCollection verification
+        // explicitly requires merge_bit=false. Merged transactions already have
+        // valid SingleProofs generated through the MergeWitness path.
+        ensure!(
+            !kernel.merge_bit,
+            "Cannot upgrade merged transactions (merge_bit=true) through ProofCollection path. \
+             Merged transactions already have SingleProofs from the merge operation."
+        );
+
         let msa_lookup_result = self
             .chain
             .archival_state_mut()
