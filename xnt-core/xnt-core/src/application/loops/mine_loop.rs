@@ -463,7 +463,7 @@ pub(crate) enum TxMergeOrigin {
 }
 
 /// Merge transactions using binary tree approach for better parallelism.
-/// 
+///
 /// Strategy for 3+ transactions:
 /// - Level 1 (parallel): Split transactions into pairs and merge in parallel
 /// - Level 2+: Recursively merge results until final result
@@ -478,9 +478,9 @@ async fn binary_tree_merge(
     if transactions.is_empty() {
         return Ok(coinbase);
     }
-    
+
     let num_txs = transactions.len();
-    
+
     if num_txs < 3 {
         let mut current = coinbase;
         for tx in transactions {
@@ -497,18 +497,18 @@ async fn binary_tree_merge(
         }
         return Ok(current);
     }
-    
+
     if num_txs == 3 {
         let tx1 = transactions.remove(0);
         let tx2 = transactions.remove(0);
         let tx3 = transactions.remove(0);
-        
+
         info!("Binary tree merge: Level 1 - parallel merges (coinbase+tx1) and (tx2+tx3)");
-        
+
         let seed1: [u8; 32] = rng.random();
         let seed2: [u8; 32] = rng.random();
         let final_seed: [u8; 32] = rng.random();
-        
+
         let (coinbase_result, regular_result) = tokio::join!(
             BlockTransaction::merge(
                 coinbase,
@@ -527,12 +527,12 @@ async fn binary_tree_merge(
                 consensus_rule_set.clone(),
             ),
         );
-        
+
         let coinbase_result = coinbase_result?;
         let regular_result = regular_result?;
-        
+
         info!("Binary tree merge: Level 2 - merging intermediate results");
-        
+
         let final_result = BlockTransaction::merge(
             coinbase_result.into(),
             regular_result.into(),
@@ -540,23 +540,29 @@ async fn binary_tree_merge(
             vm_job_queue,
             job_options,
             consensus_rule_set,
-        ).await?;
-        
+        )
+        .await?;
+
         Ok(final_result.into())
     } else {
         let mid = num_txs / 2;
         let left_txs: Vec<Transaction> = transactions.drain(..mid).collect();
         let right_txs = transactions;
-        
-        info!("Binary tree merge: Splitting {} transactions (left: {}, right: {})", num_txs, mid, num_txs - mid);
-        
+
+        info!(
+            "Binary tree merge: Splitting {} transactions (left: {}, right: {})",
+            num_txs,
+            mid,
+            num_txs - mid
+        );
+
         let right_first = right_txs[0].clone();
         let right_rest: Vec<Transaction> = right_txs.into_iter().skip(1).collect();
-        
+
         let left_seed: [u8; 32] = rng.random();
         let right_seed: [u8; 32] = rng.random();
         let final_seed: [u8; 32] = rng.random();
-        
+
         let left_future = {
             let coinbase = coinbase.clone();
             let left_txs = left_txs;
@@ -572,10 +578,11 @@ async fn binary_tree_merge(
                     vm_job_queue,
                     job_options,
                     consensus_rule_set,
-                ).await
+                )
+                .await
             }
         };
-        
+
         let right_future = {
             let right_first = right_first.into();
             let right_rest = right_rest;
@@ -591,20 +598,19 @@ async fn binary_tree_merge(
                     vm_job_queue,
                     job_options,
                     consensus_rule_set,
-                ).await
+                )
+                .await
             }
         };
-        
-        let (left_result, right_result) = tokio::join!(
-            Box::pin(left_future),
-            Box::pin(right_future),
-        );
-        
+
+        let (left_result, right_result) =
+            tokio::join!(Box::pin(left_future), Box::pin(right_future),);
+
         let left_result = left_result?;
         let right_result = right_result?;
-        
+
         info!("Binary tree merge: Merging final results");
-        
+
         let final_result = BlockTransaction::merge(
             left_result.into(),
             right_result.into(),
@@ -612,8 +618,9 @@ async fn binary_tree_merge(
             vm_job_queue,
             job_options,
             consensus_rule_set,
-        ).await?;
-        
+        )
+        .await?;
+
         Ok(final_result.into())
     }
 }
@@ -668,13 +675,13 @@ pub(crate) async fn create_block_transaction_from(
     // A coinbase transaction implies mining. So you *must*
     // be able to create a SingleProof.
     let vm_job_queue = vm_job_queue();
-    
+
     // Prepare NOP transaction details and proof job options for parallel execution
     let proof_job_options = TritonVmProofJobOptionsBuilder::new()
         .template(&job_options)
         .proof_type(TransactionProofType::SingleProof)
         .build();
-    
+
     // Start NOP proof generation in parallel with coinbase to utilize both GPUs
     // This prevents the 30+ second delay when NOP proof is needed
     let nop_proof_future = {
@@ -682,15 +689,11 @@ pub(crate) async fn create_block_transaction_from(
         let vm_job_queue = vm_job_queue.clone();
         let proof_job_options = proof_job_options.clone();
         let network = global_state_lock.cli().network;
-        
+
         async move {
-            let nop = TransactionDetails::nop(
-                predecessor_block_ms,
-                timestamp,
-                network,
-            );
+            let nop = TransactionDetails::nop(predecessor_block_ms, timestamp, network);
             let nop = PrimitiveWitness::from_transaction_details(&nop);
-            
+
             TransactionProofBuilder::new()
                 .consensus_rule_set(consensus_rule_set)
                 .primitive_witness_ref(&nop)
@@ -707,7 +710,7 @@ pub(crate) async fn create_block_transaction_from(
                 })
         }
     };
-    
+
     // Run coinbase and NOP proof generation in parallel
     let (coinbase_result, nop_proof_result) = tokio::join!(
         make_coinbase_transaction_stateless(
@@ -719,7 +722,7 @@ pub(crate) async fn create_block_transaction_from(
         ),
         nop_proof_future
     );
-    
+
     let (coinbase_transaction, composer_txos) = coinbase_result?;
     let nop_transaction = nop_proof_result?;
 
@@ -828,17 +831,21 @@ pub(crate) async fn create_block_transaction_from(
                 "Processing {} small transaction(s) first (to increase TPS)",
                 num_small
             );
-            
+
             if num_small >= 3 {
-                info!("Using binary tree merge for {} small transactions", num_small);
+                info!(
+                    "Using binary tree merge for {} small transactions",
+                    num_small
+                );
                 block_transaction = binary_tree_merge(
                     block_transaction,
                     small_transactions,
-                    &mut rng,
+                    rng.clone(),
                     vm_job_queue.clone(),
                     job_options.clone(),
                     consensus_rule_set.clone(),
-                ).await?;
+                )
+                .await?;
             } else if num_small == 2 {
                 info!("Using sequential merge for 2 small transactions");
                 for (i, tx) in small_transactions.into_iter().enumerate() {
@@ -881,7 +888,7 @@ pub(crate) async fn create_block_transaction_from(
                 .into();
             }
         }
-        
+
         if !large_transactions.is_empty() {
             let num_large = large_transactions.len();
             info!(
