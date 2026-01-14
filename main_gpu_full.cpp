@@ -2963,7 +2963,6 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            double step_time = 0.0;
             if (TRITON_PROFILE_ENABLED()) {
                 step_time = elapsed_ms(step_start);
             }
@@ -3069,11 +3068,10 @@ int main(int argc, char* argv[]) {
                 cascade_data, cascade_len
             );
             
-            double step_time = 0.0;
             if (TRITON_PROFILE_ENABLED()) {
                 step_time = elapsed_ms(step_start);
             }
-            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);n
+            TRITON_PROFILE_COUT("  [1c] Rust FFI trace execution: " << step_time << " ms" << std::endl);
         }
         
         const AlgebraicExecutionTrace& aet = trace_result.aet;
@@ -3095,7 +3093,6 @@ int main(int argc, char* argv[]) {
             fri_domain,
             stark.max_degree(padded_height)
         );
-        double step_time = 0.0;
         if (TRITON_PROFILE_ENABLED()) {
             step_time = elapsed_ms(step_start);
         }
@@ -3188,7 +3185,6 @@ int main(int argc, char* argv[]) {
             step_start = std::chrono::high_resolution_clock::now();
 
             main_table.pad(padded_height, table_lengths);
-            double step_time = 0.0;
             if (TRITON_PROFILE_ENABLED()) {
                 step_time = elapsed_ms(step_start);
             }
@@ -3229,7 +3225,6 @@ int main(int argc, char* argv[]) {
                            row_bytes);
             }
             flat_table = flat_table_mem;
-            double step_time = 0.0;
             if (TRITON_PROFILE_ENABLED()) {
                 step_time = elapsed_ms(step_start);
             }
