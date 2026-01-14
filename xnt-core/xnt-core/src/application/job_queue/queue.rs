@@ -53,15 +53,17 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
     /// returns immediately.
     pub fn start() -> Self {
         // Determine max concurrent jobs based on GPU prover availability
-        // If TRITON_VM_PROVER_SOCKET is set, allow 2 concurrent jobs (for 2 GPUs)
-        // Otherwise, default to 1 (serial execution for CPU-only)
-        let max_concurrent_jobs = if std::env::var("TRITON_VM_PROVER_SOCKET").is_ok() {
+        // Check for explicit setting first, then GPU prover availability
+        let has_gpu_prover = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok() 
+            || std::env::var("TRITON_GPU_PROVER_PATH").is_ok();
+        
+        let max_concurrent_jobs = if let Ok(val) = std::env::var("TRITON_VM_MAX_CONCURRENT_JOBS") {
+            // Explicit setting takes precedence
+            val.parse().unwrap_or(if has_gpu_prover { 2 } else { 1 })
+        } else if has_gpu_prover {
             // GPU prover available - allow concurrent execution
-            // Default to 2 for dual-GPU setup, but can be overridden via env var
-            std::env::var("TRITON_VM_MAX_CONCURRENT_JOBS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(2)
+            // Default to 2 for dual-GPU setup
+            2
         } else {
             // CPU-only mode - serial execution
             1
@@ -70,7 +72,7 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
         tracing::info!(
             "JobQueue: starting with max_concurrent_jobs={} (GPU prover: {})",
             max_concurrent_jobs,
-            std::env::var("TRITON_VM_PROVER_SOCKET").is_ok()
+            has_gpu_prover
         );
         
         // create a SharedQueue that is shared between tokio tasks.
