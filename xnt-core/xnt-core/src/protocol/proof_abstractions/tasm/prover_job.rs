@@ -16,6 +16,8 @@ use tasm_lib::triton_vm::error::InstructionError;
 #[cfg(not(test))]
 use tokio::io::AsyncWriteExt;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::application::config::network::Network;
 use crate::application::config::triton_vm_env_vars::TritonVmEnvVars;
 use crate::application::job_queue::channels::JobCancelReceiver;
@@ -33,6 +35,9 @@ use crate::protocol::proof_abstractions::NonDeterminism;
 use crate::protocol::proof_abstractions::Program;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::triton_vm::vm::VMState;
+
+/// Atomic counter for round-robin GPU assignment when using direct GPU prover
+static GPU_DEVICE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Error code from the spawned prover process in the range 200-232 are reserved
 /// for communicating that the proof is too big. The error code returned is
@@ -387,6 +392,31 @@ impl ProverJob {
                     tracing::info!("[HYBRID] Using GPU execution (TRITON_VM_PROVER_SOCKET is set) - GPU is 2.3x faster for single proofs");
                 } else {
                     tracing::debug!("[HYBRID] Using CPU execution (TRITON_VM_PROVER_SOCKET not set)");
+                }
+            }
+            
+            // Assign GPU device for direct GPU prover mode (TRITON_GPU_PROVER_PATH)
+            // When using direct GPU prover with multiple GPUs, assign different devices
+            // to each concurrent process to avoid resource contention
+            if std::env::var("TRITON_GPU_PROVER_PATH").is_ok() && !self.job_settings.force_cpu {
+                if let Ok(cuda_visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
+                    // Parse CUDA_VISIBLE_DEVICES to get available GPU IDs
+                    let gpu_ids: Vec<&str> = cuda_visible.split(',').filter(|s| !s.trim().is_empty()).collect();
+                    if !gpu_ids.is_empty() {
+                        // Round-robin assignment: get next GPU device index
+                        // Use modulo to wrap around if we have fewer GPUs than jobs
+                        let device_index = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % gpu_ids.len();
+                        let assigned_gpu = gpu_ids[device_index];
+                        
+                        // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this process
+                        cmd.env("CUDA_VISIBLE_DEVICES", assigned_gpu);
+                        tracing::info!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
+                            assigned_gpu, cuda_visible, device_index, gpu_ids.len());
+                    } else {
+                        tracing::warn!("[GPU] CUDA_VISIBLE_DEVICES={} contains no valid GPU IDs", cuda_visible);
+                    }
+                } else {
+                    tracing::debug!("[GPU] CUDA_VISIBLE_DEVICES not set, cannot assign specific GPU device");
                 }
             }
             
