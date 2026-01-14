@@ -96,10 +96,7 @@ fi
 # Run xnt-core with GPU prover enabled
 # No separate prover server needed!
 exec "$XNT_CORE_PATH" \
-  --network main \
-  --peer 161.97.150.88:9898 \
-  --peer 154.38.160.61:9898 \
-  --peer 103.78.0.72:9898 \
-  --peer 5.21.91.33:9898 \
+  --network testnet \
   --compose \
+  --guess \
   "$@"
