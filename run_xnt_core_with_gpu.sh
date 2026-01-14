@@ -96,17 +96,13 @@ fi
 # Run xnt-core with GPU prover enabled
 # No separate prover server needed!
 exec "$XNT_CORE_PATH" \
-  --network main \
-  --peer 161.97.150.88:9898 \
-  --peer 154.38.160.61:9898 \
-  --peer 103.78.0.72:9898 \
-  --peer 5.21.91.33:9898 \
+  --network testnet \
   --compose \
-  --guesser-fraction 0.5 \
+  --guess \
+  --max-num-compose-mergers 3 \
   --tx-proof-upgrading \
   --tx-proving-capability=singleproof \
   --gobbling-fraction=0.6 \
   --min-gobbling-fee=0.0001 \
   --tx-upgrade-filter=1:0 \
-  --max-num-peers 20 \
   "$@"

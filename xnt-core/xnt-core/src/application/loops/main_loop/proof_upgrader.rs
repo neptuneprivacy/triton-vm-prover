@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::ensure;
 use itertools::Itertools;
 use num_traits::Zero;
 use rand::rngs::StdRng;
@@ -108,6 +109,15 @@ impl PrimitiveWitnessToSingleProof {
         proof_job_options: &TritonVmProofJobOptions,
         consensus_rule_set: ConsensusRuleSet,
     ) -> anyhow::Result<Transaction> {
+        // Merged transactions (merge_bit=true) cannot use the PrimitiveWitness path
+        // because it internally creates ProofCollection which requires merge_bit=false.
+        // Merged transactions must use MergeWitness instead.
+        ensure!(
+            !self.primitive_witness.kernel.merge_bit,
+            "Cannot upgrade merged transactions (merge_bit=true) from PrimitiveWitness. \
+             Merged transactions must be proven via MergeWitness during the merge operation."
+        );
+
         let options = TritonVmProofJobOptionsBuilder::new()
             .template(proof_job_options)
             .proof_type(TransactionProofType::SingleProof)
@@ -141,6 +151,15 @@ impl PrimitiveWitnessToProofCollection {
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
         proof_job_options: &TritonVmProofJobOptions,
     ) -> anyhow::Result<Transaction> {
+        // Merged transactions (merge_bit=true) cannot use ProofCollection
+        // because ProofCollection verification requires merge_bit=false.
+        // Merged transactions must use MergeWitness instead.
+        ensure!(
+            !self.primitive_witness.kernel.merge_bit,
+            "Cannot create ProofCollection for merged transactions (merge_bit=true). \
+             Merged transactions must be proven via MergeWitness during the merge operation."
+        );
+
         let options = TritonVmProofJobOptionsBuilder::new()
             .template(proof_job_options)
             .proof_type(TransactionProofType::ProofCollection)
@@ -220,7 +239,7 @@ impl UpdateMutatorSetDataJob {
         )
         .await?;
         info!("Proof-upgrader, update: Done");
-        
+
         // Log GPU-UPGRADER completion message
         let gpu_available = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok();
         if gpu_available {
@@ -460,14 +479,14 @@ impl UpgradeJob {
             // because TritonVmJobOptions::cancel_job_rx is None.
             // see how compose_task handles cancellation in mine_loop.
             let job_options = global_state_lock.cli().proof_job_options(priority);
-            
+
             // Note: GPU usage is automatically handled by ProverJob based on:
             // 1. TRITON_VM_PROVER_SOCKET environment variable (if set, GPU is used)
             // 2. force_cpu flag in job_settings (default: false, so GPU is used if available)
             // The proof upgrader doesn't need to explicitly set force_cpu=false because
             // the default already enables GPU usage. Proof collections automatically
             // set force_cpu=true in proof_collection.rs since CPU is faster for them.
-            
+
             // Log upgrade type and GPU usage
             match &upgrade_job {
                 UpgradeJob::ProofCollectionToSingleProof(_) => {
