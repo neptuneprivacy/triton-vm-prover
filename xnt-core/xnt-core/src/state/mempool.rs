@@ -622,7 +622,12 @@ impl Mempool {
 
         // Ensure we never throw away a primitive witness if we have one. This
         // must happen before conflicting transactions are removed.
-        let primitive_witness = if let TransactionProof::Witness(pw) = &new_tx.proof {
+        // However, merged transactions (merge_bit=true) should NEVER have
+        // primitive witnesses because PrimitiveWitness→ProofCollection requires
+        // merge_bit=false. Merged transactions get their proofs via MergeWitness.
+        let primitive_witness = if new_tx.kernel.merge_bit {
+            None
+        } else if let TransactionProof::Witness(pw) = &new_tx.proof {
             Some(pw.clone())
         } else {
             self.tx_dictionary
