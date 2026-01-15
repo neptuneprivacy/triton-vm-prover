@@ -368,13 +368,14 @@ impl ProverJob {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            // If force_cpu is set, remove TRITON_VM_PROVER_SOCKET from child environment
+            // If force_cpu is set, remove GPU-related env vars from child environment
             // This forces CPU execution (faster for small proofs with padded height < 2^15)
             if self.job_settings.force_cpu {
                 tracing::info!(
-                    "[HYBRID] Forcing CPU execution (unsetting TRITON_VM_PROVER_SOCKET)"
+                    "[HYBRID] Forcing CPU execution (unsetting TRITON_VM_PROVER_SOCKET and TRITON_GPU_PROVER_PATH)"
                 );
                 cmd.env_remove("TRITON_VM_PROVER_SOCKET");
+                cmd.env_remove("TRITON_GPU_PROVER_PATH");
             }
 
             let mut child = cmd.spawn()?;
