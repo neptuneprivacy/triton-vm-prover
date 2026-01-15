@@ -1498,6 +1498,19 @@ impl MainLoopHandler {
                 .proof_upgrader_task
                 .as_ref()
                 .is_some_and(|x| !x.is_finished());
+
+            // Don't run proof upgrader if binary merge is active - this prevents
+            // the upgrader from interfering with the parallel merge process
+            let binary_merge_active = global_state
+                .mining_state
+                .mining_status
+                .is_binary_merge_active();
+
+            if binary_merge_active {
+                debug!("Skipping proof upgrade: binary merge is active");
+                return false;
+            }
+
             global_state.cli().tx_proof_upgrading
                 && global_state.net.sync_anchor.is_none()
                 && global_state.proving_capability() == TxProvingCapability::SingleProof

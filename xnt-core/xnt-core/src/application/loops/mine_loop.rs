@@ -55,6 +55,7 @@ use crate::protocol::consensus::type_scripts::native_currency_amount::NativeCurr
 use crate::protocol::proof_abstractions::tasm::program::TritonVmProofJobOptions;
 use crate::protocol::proof_abstractions::timestamp::Timestamp;
 use crate::protocol::shared::SIZE_20MB_IN_BYTES;
+use crate::state::mining::mining_status::BinaryMergeStage;
 use crate::state::transaction::transaction_details::TransactionDetails;
 use crate::state::wallet::expected_utxo::ExpectedUtxo;
 use crate::state::wallet::transaction_output::TxOutputList;
@@ -478,6 +479,7 @@ async fn binary_tree_merge(
     vm_job_queue: Arc<TritonVmJobQueue>,
     job_options: TritonVmProofJobOptions,
     consensus_rule_set: ConsensusRuleSet,
+    global_state_lock: GlobalStateLock,
 ) -> Result<BlockOrRegularTransaction> {
     if transactions.is_empty() {
         return Ok(coinbase);
@@ -513,6 +515,13 @@ async fn binary_tree_merge(
 
         info!(">>> Binary tree merge (3 txs): Level 1 - PARALLEL merges (coinbase+tx1) AND (tx2+tx3) simultaneously <<<");
 
+        // Set Level 1 in progress - parallel merges starting
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::Level1InProgress {
+                num_transactions: num_txs,
+            })
+            .await;
+
         let seed1: [u8; 32] = rng.random();
         let seed2: [u8; 32] = rng.random();
         let final_seed: [u8; 32] = rng.random();
@@ -541,6 +550,14 @@ async fn binary_tree_merge(
 
         info!(">>> Binary tree merge (3 txs): Level 2 - merging two intermediate results into final <<<");
 
+        // Set Level 2 in progress - this is the critical stage where we should not cancel
+        // since Level 1 work would be wasted
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::Level2InProgress {
+                num_transactions: num_txs,
+            })
+            .await;
+
         let final_result = BlockTransaction::merge(
             coinbase_result.into(),
             regular_result.into(),
@@ -550,6 +567,11 @@ async fn binary_tree_merge(
             consensus_rule_set,
         )
         .await?;
+
+        // Clear the stage after successful completion
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::None)
+            .await;
 
         Ok(final_result.into())
     } else {
@@ -577,6 +599,7 @@ async fn binary_tree_merge(
             let vm_job_queue = vm_job_queue.clone();
             let job_options = job_options.clone();
             let consensus_rule_set = consensus_rule_set.clone();
+            let gsl = global_state_lock.clone();
             async move {
                 let left_rng = StdRng::from_seed(left_seed);
                 binary_tree_merge(
@@ -586,6 +609,7 @@ async fn binary_tree_merge(
                     vm_job_queue,
                     job_options,
                     consensus_rule_set,
+                    gsl,
                 )
                 .await
             }
@@ -597,6 +621,7 @@ async fn binary_tree_merge(
             let vm_job_queue = vm_job_queue.clone();
             let job_options = job_options.clone();
             let consensus_rule_set = consensus_rule_set.clone();
+            let gsl = global_state_lock.clone();
             async move {
                 let right_rng = StdRng::from_seed(right_seed);
                 binary_tree_merge(
@@ -606,6 +631,7 @@ async fn binary_tree_merge(
                     vm_job_queue,
                     job_options,
                     consensus_rule_set,
+                    gsl,
                 )
                 .await
             }
@@ -880,6 +906,7 @@ pub(crate) async fn create_block_transaction_from(
                     vm_job_queue.clone(),
                     job_options.clone(),
                     consensus_rule_set.clone(),
+                    global_state_lock.clone(),
                 )
                 .await?;
             } else if num_small == 2 {
@@ -1306,9 +1333,19 @@ pub(crate) async fn mine(
         if stop_composing {
             // Don't cancel if we've already received the result - this prevents
             // cancelling binary merge Level 2 when the result is about to be sent.
+            // Also don't cancel if binary merge Level 1 is complete - Level 2 is fast
+            // and worth completing to avoid wasting the Level 1 work.
+            let level1_complete = global_state_lock.is_binary_merge_level1_complete().await;
+
             if !composer_task.is_finished() && !composition_result_received {
-                cancel_compose_tx.send(())?;
-                debug!("Cancel signal sent to composer worker.");
+                if level1_complete {
+                    // Level 1 is done, Level 2 is typically fast - let it complete
+                    // to avoid wasting the parallel merge work from Level 1
+                    info!("Binary merge Level 1 complete - allowing Level 2 to finish (not cancelling)");
+                } else {
+                    cancel_compose_tx.send(())?;
+                    debug!("Cancel signal sent to composer worker.");
+                }
             }
             // avoid duplicate call if stop_guessing is also true.
             if !stop_guessing {
