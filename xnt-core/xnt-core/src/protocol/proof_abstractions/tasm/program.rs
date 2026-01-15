@@ -204,7 +204,6 @@ pub mod tests {
             let job_settings = ProverJobSettings {
                 tx_proving_capability: TxProvingCapability::SingleProof,
                 proof_type: TransactionProofType::SingleProof,
-                force_cpu: false,
                 ..Default::default()
             };
             Self {
@@ -219,7 +218,6 @@ pub mod tests {
         pub(crate) fn default_with_network(network: Network) -> Self {
             let job_settings = ProverJobSettings {
                 network,
-                force_cpu: false,
                 ..Default::default()
             };
             Self {
@@ -240,7 +238,6 @@ pub mod tests {
                     tx_proving_capability: TxProvingCapability::SingleProof,
                     proof_type: TransactionProofType::SingleProof,
                     triton_vm_env_vars: TritonVmEnvVars::default(),
-                    force_cpu: false,
                 },
                 cancel_job_rx: None,
             }

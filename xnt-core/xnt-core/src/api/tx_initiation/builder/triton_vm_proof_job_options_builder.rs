@@ -64,7 +64,6 @@ pub struct TritonVmProofJobOptionsBuilder {
     tx_proving_capability: Option<TxProvingCapability>,
     proof_type: Option<TransactionProofType>,
     triton_vm_env_vars: TritonVmEnvVars,
-    force_cpu: Option<bool>,
 }
 
 impl TritonVmProofJobOptionsBuilder {
@@ -105,7 +104,6 @@ impl TritonVmProofJobOptionsBuilder {
         self.tx_proving_capability = Some(js.tx_proving_capability);
         self.proof_type = Some(js.proof_type);
         self.triton_vm_env_vars = js.triton_vm_env_vars.clone();
-        self.force_cpu = Some(js.force_cpu);
         self
     }
 
@@ -181,17 +179,6 @@ impl TritonVmProofJobOptionsBuilder {
         self
     }
 
-    /// add force_cpu
-    ///
-    /// Force CPU execution (unset TRITON_VM_PROVER_SOCKET for this job).
-    /// Used for proof collections which are faster on CPU (4x faster).
-    ///
-    /// default: false (use GPU if available)
-    pub fn force_cpu(mut self, force_cpu: bool) -> Self {
-        self.force_cpu = Some(force_cpu);
-        self
-    }
-
     /// add network
     ///
     /// default: [Network::default()]
@@ -232,7 +219,6 @@ impl TritonVmProofJobOptionsBuilder {
             tx_proving_capability,
             proof_type,
             triton_vm_env_vars,
-            force_cpu,
         } = self;
 
         let job_priority = job_priority.unwrap_or_default();
@@ -246,7 +232,6 @@ impl TritonVmProofJobOptionsBuilder {
             tx_proving_capability,
             proof_type,
             triton_vm_env_vars,
-            force_cpu: force_cpu.unwrap_or(false), // Default: use GPU if available
         };
 
         TritonVmProofJobOptions {
