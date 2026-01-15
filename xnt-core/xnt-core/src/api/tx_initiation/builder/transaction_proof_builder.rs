@@ -291,6 +291,16 @@ impl<'a> TransactionProofBuilder<'a> {
             }
             // proof-collection --> single proof
             else if let Some(pc) = proof_collection {
+                // Validate proof collection before upgrading to prevent assertion failures
+                let txk_mast_hash = pc.kernel_mast_hash;
+                let network = proof_job_options.job_settings.network;
+                let is_valid = pc.verify(txk_mast_hash, network).await;
+                if !is_valid {
+                    return Err(CreateProofError::CannotProve(
+                        "Proof collection failed verification before upgrade. Cannot generate single proof from invalid proof collection.".to_string(),
+                    ));
+                }
+                
                 let spw = SingleProofWitness::from_collection(pc);
                 let c = spw.claim();
                 let nd = spw.nondeterminism();
