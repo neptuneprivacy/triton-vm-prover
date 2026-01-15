@@ -232,6 +232,7 @@ impl TritonVmProofJobOptionsBuilder {
             tx_proving_capability,
             proof_type,
             triton_vm_env_vars,
+            force_cpu: false, // Default: let hybrid logic decide based on padded height
         };
 
         TritonVmProofJobOptions {

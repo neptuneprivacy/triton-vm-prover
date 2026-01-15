@@ -132,6 +132,9 @@ pub struct ProverJobSettings {
     pub(crate) tx_proving_capability: TxProvingCapability,
     pub(crate) proof_type: TransactionProofType,
     pub triton_vm_env_vars: TritonVmEnvVars,
+    /// Force CPU execution (unset TRITON_VM_PROVER_SOCKET for this job)
+    /// Used for small proofs which are faster on CPU
+    pub(crate) force_cpu: bool,
 }
 
 #[cfg(test)]
@@ -143,6 +146,7 @@ impl Default for ProverJobSettings {
             tx_proving_capability: TxProvingCapability::SingleProof,
             proof_type: TxProvingCapability::SingleProof.into(),
             triton_vm_env_vars: TritonVmEnvVars::default(),
+            force_cpu: false,
         }
     }
 }
@@ -177,7 +181,9 @@ impl ProverJob {
     // then it is unlikely this hardware will be able to generate the
     // corresponding proof.  In this case a `ProofComplexityLimitExceeded`
     // error is returned.
-    async fn check_if_allowed(&self) -> Result<(), ProverJobError> {
+    //
+    // Returns the calculated padded height along with the result
+    async fn check_if_allowed(&self) -> Result<u32, ProverJobError> {
         tracing::debug!("job settings: {:?}", self.job_settings);
 
         let capability = self.job_settings.tx_proving_capability;
@@ -254,7 +260,7 @@ impl ProverJob {
                     limit: ph_limit,
                 })
             }
-            _ => Ok(()),
+            _ => Ok(padded_height_processor_table),
         }
     }
 
@@ -354,12 +360,24 @@ impl ProverJob {
                 serde_json::to_string(&self.job_settings.triton_vm_env_vars)?,
             ];
 
-            let mut child = tokio::process::Command::new(Self::path_to_triton_vm_prover()?)
-                .kill_on_drop(true) // extra insurance.
+            // Hybrid CPU/GPU routing: If force_cpu is true, remove TRITON_VM_PROVER_SOCKET
+            // to force CPU execution (faster for small proofs)
+            let mut cmd = tokio::process::Command::new(Self::path_to_triton_vm_prover()?);
+            cmd.kill_on_drop(true) // extra insurance.
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
+                .stderr(Stdio::piped());
+
+            // If force_cpu is set, remove TRITON_VM_PROVER_SOCKET from child environment
+            // This forces CPU execution (faster for small proofs with padded height < 2^15)
+            if self.job_settings.force_cpu {
+                tracing::info!(
+                    "[HYBRID] Forcing CPU execution (unsetting TRITON_VM_PROVER_SOCKET)"
+                );
+                cmd.env_remove("TRITON_VM_PROVER_SOCKET");
+            }
+
+            let mut child = cmd.spawn()?;
 
             let mut child_stdin = child.stdin.take().ok_or(VmProcessError::StdinUnavailable)?;
             child_stdin.write_all(inputs.join("\n").as_bytes()).await?;
@@ -492,10 +510,11 @@ impl Job for ProverJob {
     // The select!() and kill() occur in Self::prove_out_of_process().
     async fn run_async_cancellable(&self, mut rx: JobCancelReceiver) -> JobCompletion {
         // check if allowed, and listen for cancel messages.
-        tokio::select!(
+        let padded_height = tokio::select!(
             result = self.check_if_allowed() => {
-                if let Err(e) = result {
-                    return ProverJobResult::new(Err(e)).into()
+                match result {
+                    Ok(ph) => ph,
+                    Err(e) => return ProverJobResult::new(Err(e)).into()
                 }
             }
 
@@ -505,8 +524,34 @@ impl Job for ProverJob {
             }
         );
 
+        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
+        // GPU is faster for large proofs, CPU is faster for small proofs
+        const GPU_THRESHOLD: u32 = 32768; // 2^15
+
+        // Create a mutable copy of job_settings to conditionally override force_cpu
+        let mut job_settings = self.job_settings.clone();
+        if padded_height >= GPU_THRESHOLD {
+            // Use GPU for large proofs
+            job_settings.force_cpu = false;
+            tracing::info!(
+                "[HYBRID] Padded height {} >= 2^15, using GPU execution",
+                padded_height
+            );
+        } else {
+            // Use CPU for small proofs
+            job_settings.force_cpu = true;
+            tracing::info!(
+                "[HYBRID] Padded height {} < 2^15, using CPU execution",
+                padded_height
+            );
+        }
+
+        // Create a new ProverJob with updated settings
+        let mut prover_job = self.clone();
+        prover_job.job_settings = job_settings;
+
         // all is well, let's prove!
-        self.prove(rx).await // handles cancellation internally
+        prover_job.prove(rx).await // handles cancellation internally
     }
 }
 
