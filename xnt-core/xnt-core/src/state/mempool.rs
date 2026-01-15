@@ -809,6 +809,32 @@ impl Mempool {
         self.tx_dictionary.is_empty()
     }
 
+    /// Return the count of transactions backed by SingleProof.
+    /// This is useful for logging/debugging to understand how many
+    /// transactions are ready for block composition.
+    ///
+    /// Computes in O(n)
+    pub fn count_single_proof_transactions(&self) -> usize {
+        self.tx_dictionary
+            .values()
+            .filter(|tx| tx.transaction.proof.is_single_proof())
+            .count()
+    }
+
+    /// Return the count of transactions backed by SingleProof that are
+    /// also synced to the current tip. These are the transactions that
+    /// can actually be included in block composition.
+    ///
+    /// Computes in O(n)
+    pub fn count_synced_single_proof_transactions(&self) -> usize {
+        self.tx_dictionary
+            .values()
+            .filter(|tx| {
+                tx.transaction.proof.is_single_proof() && self.tx_is_synced(&tx.transaction.kernel)
+            })
+            .count()
+    }
+
     /// Return a vector with copies of the transactions, in descending order by
     /// fee density. Only returns transactions that are
     /// - backed by single proofs, and
