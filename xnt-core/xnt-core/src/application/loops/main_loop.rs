@@ -1052,6 +1052,43 @@ impl MainLoopHandler {
 
                 debug!("main loop received block proposal from peer loop");
 
+                let incoming_guesser_fee = block
+                    .body()
+                    .total_guesser_reward()
+                    .expect("block received by main loop must have guesser reward");
+
+                // Check for competitive bidding before normal acceptance flow
+                // This check happens even if we have our own proposal
+                let should_recompose = {
+                    let state = self.global_state_lock.lock_guard().await;
+                    // Verify the proposal is for the current tip
+                    let current_tip_digest = state.chain.light_state().hash();
+                    if block.header().prev_block_digest != current_tip_digest {
+                        None // Wrong parent, can't use for competitive bidding
+                    } else {
+                        state.check_competitive_bidding_recomposition(incoming_guesser_fee)
+                    }
+                };
+
+                if let Some(new_fraction) = should_recompose {
+                    // Update guesser fraction and trigger recomposition
+                    {
+                        let mut state = self.global_state_lock.lock_guard_mut().await;
+                        state.set_guesser_fraction(new_fraction);
+                    }
+
+                    info!(
+                        "Competitive bidding: adjusting guesser_fraction to {:.3} to beat peer proposal ({:.3} coins)",
+                        new_fraction, incoming_guesser_fee.to_coins_f64_lossy()
+                    );
+
+                    // Trigger recomposition by sending Continue (which restarts composer)
+                    self.main_to_miner_tx.send(MainToMiner::Continue);
+
+                    // Don't process as normal proposal - we're recomposing our own
+                    return Ok(());
+                }
+
                 // Due to race-conditions, we need to verify that this
                 // block proposal is still the immediate child of tip. If it is,
                 // and it has a higher guesser fee than what we're currently
@@ -1064,10 +1101,7 @@ impl MainLoopHandler {
                     let mut global_state_mut = self.global_state_lock.lock_guard_mut().await;
                     let verdict = global_state_mut.favor_incoming_block_proposal(
                         block.header().prev_block_digest,
-                        block
-                            .body()
-                            .total_guesser_reward()
-                            .expect("block received by main loop must have guesser reward"),
+                        incoming_guesser_fee,
                     );
                     if let Err(reject_reason) = verdict {
                         warn!("main loop got unfavorable block proposal. Reason: {reject_reason}");

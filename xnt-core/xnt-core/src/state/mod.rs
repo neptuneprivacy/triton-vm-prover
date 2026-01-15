@@ -796,8 +796,35 @@ impl GlobalState {
     /// # Panics
     ///
     ///  - If `next_block_height` is genesis.
-    pub(crate) fn composer_parameters(&self, next_block_height: BlockHeight) -> ComposerParameters {
+    pub(crate) fn composer_parameters(&mut self, next_block_height: BlockHeight) -> ComposerParameters {
         assert!(!next_block_height.is_genesis());
+
+        // Reset guesser_fraction to initial target for new block height (competitive bidding)
+        if self.cli.enable_competitive_bidding {
+            let is_new_height = self.mining_state.last_composition_height
+                .map(|h| h != next_block_height)
+                .unwrap_or(true);
+            
+            if is_new_height {
+                if let Some(target_reward) = self.cli.initial_guesser_reward_target {
+                    let subsidy = Block::block_subsidy(next_block_height);
+                    let subsidy_coins = subsidy.to_coins_f64_lossy();
+                    
+                    if subsidy_coins > 0.0 {
+                        let initial_fraction = (target_reward / subsidy_coins).min(self.cli.max_guesser_fraction);
+                        self.cli.guesser_fraction = initial_fraction;
+                        debug!(
+                            "Competitive bidding: reset guesser_fraction to {:.3} for new block height {}",
+                            initial_fraction, next_block_height
+                        );
+                    }
+                }
+                self.mining_state.last_composition_height = Some(next_block_height);
+            }
+        } else {
+            // Track height even if competitive bidding is disabled
+            self.mining_state.last_composition_height = Some(next_block_height);
+        }
 
         let coinbase_distribution = self.mining_state.overridden_coinbase_distribution();
 
@@ -934,6 +961,100 @@ impl GlobalState {
                 .is_ok_and(|x| x >= self.cli.minimum_guesser_fraction),
             BlockProposal::None => false,
         }
+    }
+
+    /// Check if we should recompose our block proposal due to competitive bidding.
+    /// Returns Some(new_guesser_fraction) if we should recompose, None otherwise.
+    ///
+    /// This is called when a peer sends a block proposal with a higher guesser reward.
+    /// If competitive bidding is enabled and we have our own proposal or are composing,
+    /// we calculate a new guesser fraction that beats the peer's proposal by the bid increment.
+    pub(crate) fn check_competitive_bidding_recomposition(
+        &self,
+        incoming_guesser_fee: NativeCurrencyAmount,
+    ) -> Option<f64> {
+        if !self.cli.enable_competitive_bidding {
+            return None;
+        }
+
+        // Check if we have our own proposal or are currently composing
+        let current_reward = match &self.mining_state.block_proposal {
+            BlockProposal::OwnComposition(_) => {
+                // Get our current guesser reward from existing proposal
+                self.mining_state
+                    .block_proposal
+                    .map(|bp| bp.body().total_guesser_reward().ok())
+                    .flatten()?
+            }
+            _ => {
+                // No own proposal yet, but check if we're composing
+                // If composing, calculate what our current reward would be
+                match self.mining_state.mining_status {
+                    MiningStatus::Composing(_) => {
+                        // Calculate current reward based on current guesser_fraction
+                        let height = self.chain.light_state().header().height.next();
+                        let subsidy = Block::block_subsidy(height);
+                        if subsidy.is_zero() {
+                            return None;
+                        }
+                        // Calculate current fee using fraction multiplication
+                        subsidy.lossy_f64_fraction_mul(self.cli.guesser_fraction)
+                    }
+                    _ => {
+                        debug!("Competitive bidding: no own proposal and not composing, skipping");
+                        return None;
+                    }
+                }
+            }
+        };
+
+        // Only if incoming is better
+        if incoming_guesser_fee <= current_reward {
+            return None;
+        }
+
+        // Calculate new target reward: incoming + increment
+        let incoming_coins = incoming_guesser_fee.to_coins_f64_lossy();
+        let new_target = incoming_coins + self.cli.competitive_bid_increment;
+
+        // Calculate fraction from block subsidy
+        let height = self.chain.light_state().header().height.next();
+        let subsidy = Block::block_subsidy(height);
+        let subsidy_coins = subsidy.to_coins_f64_lossy();
+
+        // Avoid division by zero
+        if subsidy_coins <= 0.0 {
+            return None;
+        }
+
+        let new_fraction = (new_target / subsidy_coins).min(self.cli.max_guesser_fraction);
+
+        // Only if change is significant to avoid thrashing
+        // Use a smaller threshold (0.1% = 0.001) when using small increments like 0.001
+        let threshold = if self.cli.competitive_bid_increment < 0.01 {
+            0.001  // 0.1% threshold for small increments
+        } else {
+            0.01   // 1% threshold for larger increments
+        };
+        
+        if (new_fraction - self.cli.guesser_fraction).abs() < threshold {
+            debug!(
+                "Competitive bidding: change too small ({:.4} < {:.4}), skipping recomposition",
+                (new_fraction - self.cli.guesser_fraction).abs(),
+                threshold
+            );
+            return None;
+        }
+
+        debug!(
+            "Competitive bidding: peer proposal {:.3} coins, current {:.3} coins, new target {:.3} coins, new fraction {:.3}",
+            incoming_coins,
+            current_reward.to_coins_f64_lossy(),
+            new_target,
+            new_fraction
+        );
+
+        Some(new_fraction)
     }
 
     /// Determine whether the incoming block is more canonical than the current
@@ -1895,6 +2016,27 @@ impl GlobalState {
             .handle_mempool_events(mempool_events)
             .await;
 
+        // Reset guesser_fraction to initial target for new block height (competitive bidding)
+        if self.cli.enable_competitive_bidding {
+            if let Some(target_reward) = self.cli.initial_guesser_reward_target {
+                let new_height = new_tip.header().height.next();
+                let subsidy = Block::block_subsidy(new_height);
+                let subsidy_coins = subsidy.to_coins_f64_lossy();
+                
+                if subsidy_coins > 0.0 {
+                    let initial_fraction = (target_reward / subsidy_coins).min(self.cli.max_guesser_fraction);
+                    self.cli.guesser_fraction = initial_fraction;
+                    debug!(
+                        "Competitive bidding: reset guesser_fraction to {:.3} for new block height {}",
+                        initial_fraction, new_height
+                    );
+                }
+            }
+        }
+
+        // Clear last composition height so next composition will reset guesser_fraction
+        self.mining_state.last_composition_height = None;
+
         // Reset block proposal, as that field pertains to the block that
         // was just set as new tip. Also reset set of exported block proposals.
         self.mining_state.block_proposal = BlockProposal::none();
@@ -2073,6 +2215,11 @@ impl GlobalState {
     #[inline]
     pub fn cli(&self) -> &cli_args::Args {
         &self.cli
+    }
+
+    /// Update the guesser fraction (for competitive bidding)
+    pub(crate) fn set_guesser_fraction(&mut self, fraction: f64) {
+        self.cli.guesser_fraction = fraction;
     }
 
     pub(crate) fn proving_capability(&self) -> TxProvingCapability {

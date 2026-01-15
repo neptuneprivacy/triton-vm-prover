@@ -134,6 +134,32 @@ pub async fn initialize(cli_args: cli_args::Args) -> Result<MainLoopHandler> {
     let mut global_state_lock =
         GlobalStateLock::from_global_state(global_state, rpc_server_to_main_tx.clone());
 
+    // Initialize guesser_fraction from initial_guesser_reward_target if competitive bidding is enabled
+    if let Some(target_reward) = global_state_lock.cli().initial_guesser_reward_target {
+        let height = global_state_lock
+            .lock_guard()
+            .await
+            .chain
+            .light_state()
+            .header()
+            .height
+            .next();
+        let subsidy = Block::block_subsidy(height);
+        let subsidy_coins = subsidy.to_coins_f64_lossy();
+
+        if subsidy_coins > 0.0 {
+            let fraction = (target_reward / subsidy_coins).min(global_state_lock.cli().max_guesser_fraction);
+            {
+                let mut state = global_state_lock.lock_guard_mut().await;
+                state.set_guesser_fraction(fraction);
+            }
+            info!(
+                "Competitive bidding: Initial guesser reward target {:.3} coins, using fraction {:.3}",
+                target_reward, fraction
+            );
+        }
+    }
+
     // Construct the broadcast channel to communicate from the main task to peer tasks
     let (main_to_peer_broadcast_tx, _main_to_peer_broadcast_rx) =
         broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);

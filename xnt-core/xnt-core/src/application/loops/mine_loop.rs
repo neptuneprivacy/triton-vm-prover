@@ -502,7 +502,7 @@ pub(crate) async fn create_block_transaction_from(
         SeedableRng::from_seed(global_state_lock.lock_guard().await.shuffle_seed());
 
     let composer_parameters = global_state_lock
-        .lock_guard()
+        .lock_guard_mut()
         .await
         .composer_parameters(predecessor_block.header().height.next());
     let block_height = predecessor_block.header().height.next();
@@ -1072,7 +1072,7 @@ pub(crate) mod tests {
         let vm_job_queue = vm_job_queue();
 
         let composer_parameters = global_state_lock
-            .lock_guard()
+            .lock_guard_mut()
             .await
             .composer_parameters(next_block_height);
         let (transaction, composer_outputs) = make_coinbase_transaction_stateless(

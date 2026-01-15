@@ -5,6 +5,7 @@ use tasm_lib::prelude::Digest;
 use tracing::info;
 
 use super::mining_status::MiningStatus;
+use crate::api::export::BlockHeight;
 use crate::application::loops::mine_loop::coinbase_distribution::CoinbaseDistribution;
 use crate::state::BlockProposal;
 use crate::Block;
@@ -42,6 +43,10 @@ pub struct MiningState {
     /// to set a new coinbase distribution for the next block proposal produced
     /// on this node.
     override_coinbase_settings: OverrideCoinbaseSettings,
+
+    /// The last block height we composed for. Used to detect when we start
+    /// composing for a new height and reset guesser_fraction for competitive bidding.
+    pub(crate) last_composition_height: Option<BlockHeight>,
 }
 
 impl MiningState {

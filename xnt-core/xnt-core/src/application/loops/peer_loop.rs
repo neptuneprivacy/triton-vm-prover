@@ -1645,13 +1645,50 @@ impl PeerLoopHandler {
                     return Ok(KEEP_CONNECTION_ALIVE);
                 }
 
+                let incoming_guesser_fee = new_proposal
+                    .body()
+                    .total_guesser_reward()
+                    .expect("Block was validated");
+                
+                // Check for competitive bidding BEFORE normal acceptance flow
+                // This allows us to recompose even when we have our own proposal
+                let current_tip_digest = state.chain.light_state().hash();
+                let should_recompose = if new_proposal.header().prev_block_digest == current_tip_digest {
+                    debug!(
+                        "Checking competitive bidding: incoming proposal has {:.3} coins guesser reward",
+                        incoming_guesser_fee.to_coins_f64_lossy()
+                    );
+                    state.check_competitive_bidding_recomposition(incoming_guesser_fee)
+                } else {
+                    debug!("Competitive bidding: skipping - wrong parent block");
+                    None
+                };
+                
+                if let Some(new_fraction) = should_recompose {
+                    // Update guesser fraction
+                    drop(state);
+                    {
+                        let mut state_mut = self.global_state_lock.lock_guard_mut().await;
+                        state_mut.set_guesser_fraction(new_fraction);
+                    }
+                    
+                    info!(
+                        "Competitive bidding: adjusting guesser_fraction to {:.3} to beat peer proposal ({:.3} coins)",
+                        new_fraction, incoming_guesser_fee.to_coins_f64_lossy()
+                    );
+                    
+                    // Send proposal to main loop anyway - it will trigger recomposition
+                    // We send it even though we have our own, because competitive bidding needs it
+                    self.send_to_main(PeerTaskToMain::BlockProposal(new_proposal), line!())
+                        .await?;
+                    
+                    return Ok(KEEP_CONNECTION_ALIVE);
+                }
+                
                 // Is block proposal favorable?
                 let is_favorable = state.favor_incoming_block_proposal(
                     new_proposal.header().prev_block_digest,
-                    new_proposal
-                        .body()
-                        .total_guesser_reward()
-                        .expect("Block was validated"),
+                    incoming_guesser_fee,
                 );
                 drop(state);
 

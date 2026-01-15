@@ -301,6 +301,31 @@ pub struct Args {
     #[clap(long, default_value = "0.17", value_parser = fraction_validator)]
     pub(crate) minimum_guesser_improvement_fraction: f64,
 
+    /// Enable competitive bidding mode - automatically adjust guesser fraction
+    /// when a peer sends a block proposal with a higher guesser reward.
+    /// When enabled, the composer will recompose with a higher guesser reward
+    /// (peer_reward + competitive_bid_increment) to stay competitive.
+    #[clap(long)]
+    pub(crate) enable_competitive_bidding: bool,
+
+    /// Initial guesser reward target in coins (e.g., 5.76).
+    /// Used to calculate the initial guesser_fraction when competitive bidding
+    /// is enabled. If not set, uses the value from --guesser-fraction.
+    #[clap(long)]
+    pub(crate) initial_guesser_reward_target: Option<f64>,
+
+    /// Bid increment in coins when outbid by a peer (default: 0.05).
+    /// When a peer sends a better proposal, the new guesser reward will be
+    /// calculated as: peer_reward + competitive_bid_increment
+    #[clap(long, default_value = "0.05")]
+    pub(crate) competitive_bid_increment: f64,
+
+    /// Maximum guesser fraction to prevent over-bidding (default: 0.95).
+    /// The guesser fraction will never exceed this value even if competitive
+    /// bidding would suggest a higher value.
+    #[clap(long, default_value = "0.95", value_parser = fraction_validator)]
+    pub(crate) max_guesser_fraction: f64,
+
     /// Whether to engage in guess-nonce-and-hash, which is the 3rd step in
     /// three-step mining. If this flag is set and the `compose` flag is not
     /// set, then the client will rely on block proposals from other nodes. In
