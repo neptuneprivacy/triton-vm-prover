@@ -843,6 +843,7 @@ impl From<&Args> for ProverJobSettings {
             tx_proving_capability: cli.proving_capability(),
             proof_type: cli.proving_capability().into(),
             triton_vm_env_vars,
+            force_cpu: false, // Default: let hybrid logic decide based on padded height
         }
     }
 }

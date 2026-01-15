@@ -238,6 +238,7 @@ pub mod tests {
                     tx_proving_capability: TxProvingCapability::SingleProof,
                     proof_type: TransactionProofType::SingleProof,
                     triton_vm_env_vars: TritonVmEnvVars::default(),
+                    force_cpu: false,
                 },
                 cancel_job_rx: None,
             }
