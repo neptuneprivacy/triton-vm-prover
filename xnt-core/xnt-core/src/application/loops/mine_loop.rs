@@ -381,7 +381,10 @@ pub(crate) async fn make_coinbase_transaction_stateless(
     let witness = PrimitiveWitness::from_transaction_details(&transaction_details);
 
     let proof_type: TransactionProofType = job_options.job_settings.tx_proving_capability.into();
-    info!("Start: generate {} proof for coinbase transaction", proof_type);
+    info!(
+        "Start: generate {} proof for coinbase transaction",
+        proof_type
+    );
 
     // note: we provide an owned witness to proof-builder and clone the kernel
     // because this fn accepts arbitrary proving power and generates proof to
@@ -481,6 +484,10 @@ async fn binary_tree_merge(
     }
 
     let num_txs = transactions.len();
+    info!(
+        ">>> BINARY_TREE_MERGE ENTRY: processing {} transactions in parallel merge tree <<<",
+        num_txs
+    );
 
     if num_txs < 3 {
         let mut current = coinbase;
@@ -504,7 +511,7 @@ async fn binary_tree_merge(
         let tx2 = transactions.remove(0);
         let tx3 = transactions.remove(0);
 
-        info!("Binary tree merge: Level 1 - parallel merges (coinbase+tx1) and (tx2+tx3)");
+        info!(">>> Binary tree merge (3 txs): Level 1 - PARALLEL merges (coinbase+tx1) AND (tx2+tx3) simultaneously <<<");
 
         let seed1: [u8; 32] = rng.random();
         let seed2: [u8; 32] = rng.random();
@@ -532,7 +539,7 @@ async fn binary_tree_merge(
         let coinbase_result = coinbase_result?;
         let regular_result = regular_result?;
 
-        info!("Binary tree merge: Level 2 - merging intermediate results");
+        info!(">>> Binary tree merge (3 txs): Level 2 - merging two intermediate results into final <<<");
 
         let final_result = BlockTransaction::merge(
             coinbase_result.into(),
@@ -551,7 +558,7 @@ async fn binary_tree_merge(
         let right_txs = transactions;
 
         info!(
-            "Binary tree merge: Splitting {} transactions (left: {}, right: {})",
+            ">>> Binary tree merge ({}+ txs): Splitting into left({}) and right({}) for PARALLEL recursive merge <<<",
             num_txs,
             mid,
             num_txs - mid
@@ -610,7 +617,7 @@ async fn binary_tree_merge(
         let left_result = left_result?;
         let right_result = right_result?;
 
-        info!("Binary tree merge: Merging final results");
+        info!(">>> Binary tree merge: Merging left and right branch results into FINAL result <<<");
 
         let final_result = BlockTransaction::merge(
             left_result.into(),
@@ -732,17 +739,43 @@ pub(crate) async fn create_block_transaction_from(
     // Get most valuable transactions from mempool.
     let max_num_mergers = global_state_lock.cli().max_num_compose_mergers.get();
     let mut transactions_to_merge = match &tx_merge_origin {
-        TxMergeOrigin::Mempool => global_state_lock
-            .lock_guard()
-            .await
-            .mempool
-            .get_transactions_for_block_composition(
-                block_capacity_for_transactions,
-                Some(max_num_mergers),
-            ),
+        TxMergeOrigin::Mempool => {
+            let mempool_guard = global_state_lock.lock_guard().await;
+            let mempool_size = mempool_guard.mempool.len();
+            let single_proof_count = mempool_guard.mempool.count_single_proof_transactions();
+            let synced_single_proof_count = mempool_guard
+                .mempool
+                .count_synced_single_proof_transactions();
+            info!(
+                "Mempool stats: {} total txs, {} with SingleProof, {} synced+SingleProof (ready for merge), max_mergers={}",
+                mempool_size, single_proof_count, synced_single_proof_count, max_num_mergers
+            );
+            if synced_single_proof_count >= 3 {
+                info!(
+                    "*** {} synced SingleProof txs available - BINARY TREE MERGE path possible! ***",
+                    synced_single_proof_count
+                );
+            } else if synced_single_proof_count > 0 {
+                info!(
+                    "Only {} synced SingleProof tx(s) - need 3+ for binary-tree merge",
+                    synced_single_proof_count
+                );
+            }
+            mempool_guard
+                .mempool
+                .get_transactions_for_block_composition(
+                    block_capacity_for_transactions,
+                    Some(max_num_mergers),
+                )
+        }
         #[cfg(test)]
         TxMergeOrigin::ExplicitList(transactions) => transactions.to_owned(),
     };
+
+    info!(
+        "Transactions selected for merge: {} (need 3+ for binary-tree merge)",
+        transactions_to_merge.len()
+    );
 
     // If no updated single-proof transaction were found in the mempool, try
     // to find one that's not updated, since updating this is faster than
@@ -837,7 +870,7 @@ pub(crate) async fn create_block_transaction_from(
 
             if num_small >= 3 {
                 info!(
-                    "Using binary tree merge for {} small transactions",
+                    "*** BINARY TREE MERGE ACTIVATED *** for {} small transactions (parallel merge path)",
                     num_small
                 );
                 block_transaction = binary_tree_merge(
@@ -850,7 +883,7 @@ pub(crate) async fn create_block_transaction_from(
                 )
                 .await?;
             } else if num_small == 2 {
-                info!("Using sequential merge for 2 small transactions");
+                info!("Using SEQUENTIAL merge for 2 small transactions (need 3+ for binary-tree)");
                 for (i, tx) in small_transactions.into_iter().enumerate() {
                     info!("Merging small transaction {} / {}", i + 1, 2);
                     info!(
@@ -872,7 +905,7 @@ pub(crate) async fn create_block_transaction_from(
                 }
             } else {
                 let tx = small_transactions.into_iter().next().unwrap();
-                info!("Merging 1 small transaction");
+                info!("Merging 1 small transaction (need 3+ for binary-tree merge)");
                 info!(
                     "Merging tx with {} inputs, {} outputs, fee {}",
                     tx.kernel.inputs.len(),
@@ -1133,7 +1166,7 @@ pub(crate) async fn mine(
                         stop_composing = true;
                         // Don't shutdown - just stop composing for this block and continue
                     }
-                    Some(CreateProofError::MissingRequirement(_)) 
+                    Some(CreateProofError::MissingRequirement(_))
                     | Some(CreateProofError::TooWeak { .. })
                     | Some(CreateProofError::NotVmProof(_)) => {
                         // These are fatal configuration/state errors that require shutdown
