@@ -1123,11 +1123,27 @@ pub(crate) async fn mine(
                     Some(CreateProofError::JobHandleError(JobHandleError::JobCancelled)) => {
                         debug!("composer job was cancelled. continuing normal operation");
                     }
-                    _ => {
-                        // Ensure graceful shutdown in case of error during composition.
+                    Some(CreateProofError::ProverJobError(_)) | Some(CreateProofError::AddJobError(_)) => {
+                        // External prover failures (GPU crashes, OOM, etc.) are recoverable.
+                        // Log as warning and continue - the node will retry on next block.
+                        warn!("Composition failed due to prover error (recoverable): {}. Will retry on next block.", e);
                         stop_composing = true;
-                        error!("Composition failed: {}", e);
+                        // Don't shutdown - just stop composing for this block and continue
+                    }
+                    Some(CreateProofError::MissingRequirement(_)) 
+                    | Some(CreateProofError::TooWeak { .. })
+                    | Some(CreateProofError::NotVmProof(_)) => {
+                        // These are fatal configuration/state errors that require shutdown
+                        stop_composing = true;
+                        error!("Composition failed with fatal error: {}. Shutting down.", e);
                         to_main.send(MinerToMain::Shutdown(COMPOSITION_FAILED_EXIT_CODE)).await?;
+                    }
+                    _ => {
+                        // For unknown errors, log as warning and continue rather than shutting down.
+                        // This makes the node more resilient to transient issues.
+                        warn!("Composition failed with unexpected error: {}. Will retry on next block.", e);
+                        stop_composing = true;
+                        // Don't shutdown - just stop composing for this block and continue
                     }
                 }
             },
