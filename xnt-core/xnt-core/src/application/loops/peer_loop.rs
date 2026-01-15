@@ -1654,7 +1654,7 @@ impl PeerLoopHandler {
                 // This allows us to recompose even when we have our own proposal
                 let current_tip_digest = state.chain.light_state().hash();
                 let should_recompose = if new_proposal.header().prev_block_digest == current_tip_digest {
-                    debug!(
+                    info!(
                         "Checking competitive bidding: incoming proposal has {:.3} coins guesser reward",
                         incoming_guesser_fee.to_coins_f64_lossy()
                     );

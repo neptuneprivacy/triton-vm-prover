@@ -813,7 +813,7 @@ impl GlobalState {
                     if subsidy_coins > 0.0 {
                         let initial_fraction = (target_reward / subsidy_coins).min(self.cli.max_guesser_fraction);
                         self.cli.guesser_fraction = initial_fraction;
-                        debug!(
+                        info!(
                             "Competitive bidding: reset guesser_fraction to {:.3} for new block height {}",
                             initial_fraction, next_block_height
                         );
@@ -1010,6 +1010,11 @@ impl GlobalState {
 
         // Only if incoming is better
         if incoming_guesser_fee <= current_reward {
+            info!(
+                "Competitive bidding: incoming proposal {:.3} coins not better than current {:.3} coins, skipping",
+                incoming_guesser_fee.to_coins_f64_lossy(),
+                current_reward.to_coins_f64_lossy()
+            );
             return None;
         }
 
@@ -1038,7 +1043,7 @@ impl GlobalState {
         };
         
         if (new_fraction - self.cli.guesser_fraction).abs() < threshold {
-            debug!(
+            info!(
                 "Competitive bidding: change too small ({:.4} < {:.4}), skipping recomposition",
                 (new_fraction - self.cli.guesser_fraction).abs(),
                 threshold
@@ -1046,7 +1051,7 @@ impl GlobalState {
             return None;
         }
 
-        debug!(
+        info!(
             "Competitive bidding: peer proposal {:.3} coins, current {:.3} coins, new target {:.3} coins, new fraction {:.3}",
             incoming_coins,
             current_reward.to_coins_f64_lossy(),
@@ -2026,7 +2031,7 @@ impl GlobalState {
                 if subsidy_coins > 0.0 {
                     let initial_fraction = (target_reward / subsidy_coins).min(self.cli.max_guesser_fraction);
                     self.cli.guesser_fraction = initial_fraction;
-                    debug!(
+                    info!(
                         "Competitive bidding: reset guesser_fraction to {:.3} for new block height {}",
                         initial_fraction, new_height
                     );
