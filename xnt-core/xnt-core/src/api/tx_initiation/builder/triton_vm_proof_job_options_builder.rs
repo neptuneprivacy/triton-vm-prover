@@ -233,6 +233,7 @@ impl TritonVmProofJobOptionsBuilder {
             proof_type,
             triton_vm_env_vars,
             force_cpu: false, // Default: let hybrid logic decide based on padded height
+            assigned_gpu: None, // Will be assigned at runtime by hybrid logic
         };
 
         TritonVmProofJobOptions {
