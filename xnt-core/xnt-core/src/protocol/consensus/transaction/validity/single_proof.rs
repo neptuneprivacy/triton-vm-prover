@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 use crate::api::tx_initiation::builder::proof_builder::ProofBuilder;
 use crate::api::tx_initiation::error::CreateProofError;
@@ -45,6 +46,15 @@ use super::tasm::single_proof::update_branch::UpdateWitness;
 pub(crate) const DISCRIMINANT_FOR_PROOF_COLLECTION: u64 = 0;
 pub(crate) const DISCRIMINANT_FOR_UPDATE: u64 = 1;
 pub(crate) const DISCRIMINANT_FOR_MERGE: u64 = 2;
+
+/// Mutex to serialize proof collection upgrades.
+/// This ensures only one proof collection → single proof upgrade runs at a time,
+/// preventing conflicts when multiple upgrades happen in parallel (e.g., during block composition).
+static PROOF_COLLECTION_UPGRADE_MUTEX: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+
+fn get_upgrade_mutex() -> Arc<Mutex<()>> {
+    PROOF_COLLECTION_UPGRADE_MUTEX.get_or_init(|| Arc::new(Mutex::new(()))).clone()
+}
 
 const INVALID_WITNESS_DISCRIMINANT_ERROR: i128 = 1_000_050;
 const NO_BRANCH_TAKEN_ERROR: i128 = 1_000_051;
@@ -253,6 +263,18 @@ impl SingleProof {
         let nondeterminism = single_proof_witness.nondeterminism();
         info!("Start: generate single proof from proof collection");
 
+        // Serialize only CPU executions to prevent conflicts when multiple
+        // upgrades run in parallel (e.g., during block composition).
+        // GPU executions can run in parallel safely.
+        let upgrade_mutex = get_upgrade_mutex();
+        let _guard = if proof_job_options.job_settings.force_cpu {
+            // CPU execution: acquire mutex to serialize
+            Some(upgrade_mutex.lock().await)
+        } else {
+            // GPU execution: allow parallel execution, no mutex needed
+            None
+        };
+        
         let proof = ProofBuilder::new()
             .program(SingleProof.program())
             .claim(claim)
