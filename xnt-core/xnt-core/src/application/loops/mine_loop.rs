@@ -380,7 +380,8 @@ pub(crate) async fn make_coinbase_transaction_stateless(
 
     let witness = PrimitiveWitness::from_transaction_details(&transaction_details);
 
-    info!("Start: generate single proof for coinbase transaction");
+    let proof_type: TransactionProofType = job_options.job_settings.tx_proving_capability.into();
+    info!("Start: generate {} proof for coinbase transaction", proof_type);
 
     // note: we provide an owned witness to proof-builder and clone the kernel
     // because this fn accepts arbitrary proving power and generates proof to
@@ -400,7 +401,7 @@ pub(crate) async fn make_coinbase_transaction_stateless(
         .build()
         .await?;
 
-    info!("Done: generating single proof for coinbase transaction");
+    info!("Done: generating proof for coinbase transaction");
 
     let transaction = TransactionBuilder::new()
         .transaction_kernel(kernel)
@@ -672,14 +673,16 @@ pub(crate) async fn create_block_transaction_from(
     let network = global_state_lock.cli().network;
     let consensus_rule_set = ConsensusRuleSet::infer_from(network, block_height);
 
-    // A coinbase transaction implies mining. So you *must*
-    // be able to create a SingleProof.
+    // Use the capability from job_options to determine proof type
+    // This ensures we don't try to generate proofs beyond the system's capability
     let vm_job_queue = vm_job_queue();
+    let capability = job_options.job_settings.tx_proving_capability;
+    let proof_type: TransactionProofType = capability.into();
 
     // Prepare NOP transaction details and proof job options for parallel execution
     let proof_job_options = TritonVmProofJobOptionsBuilder::new()
         .template(&job_options)
-        .proof_type(TransactionProofType::SingleProof)
+        .proof_type(proof_type)
         .build();
 
     // Start NOP proof generation in parallel with coinbase to utilize both GPUs

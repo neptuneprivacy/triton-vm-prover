@@ -183,7 +183,6 @@ impl MergeWitness {
                 );
                 TransactionKernelModifier::default()
                     .inputs(inputs)
-                    .merge_bit(transaction_kernel.merge_bit)
                     .modify(transaction_kernel)
             }
         };
@@ -193,7 +192,6 @@ impl MergeWitness {
         let inputs = RemovalRecordList::pack(new_kernel.inputs.clone());
         new_kernel = TransactionKernelModifier::default()
             .inputs(inputs)
-            .merge_bit(true)
             .modify(new_kernel);
 
         BlockTransactionKernel::try_from(new_kernel).expect("merge bit should be set")
