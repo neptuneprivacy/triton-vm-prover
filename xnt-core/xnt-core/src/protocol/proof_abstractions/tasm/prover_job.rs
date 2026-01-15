@@ -16,8 +16,6 @@ use tasm_lib::triton_vm::error::InstructionError;
 #[cfg(not(test))]
 use tokio::io::AsyncWriteExt;
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use crate::application::config::network::Network;
 use crate::application::config::triton_vm_env_vars::TritonVmEnvVars;
 use crate::application::job_queue::channels::JobCancelReceiver;
@@ -35,9 +33,6 @@ use crate::protocol::proof_abstractions::NonDeterminism;
 use crate::protocol::proof_abstractions::Program;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::triton_vm::vm::VMState;
-
-/// Atomic counter for round-robin GPU assignment when using direct GPU prover
-static GPU_DEVICE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Error code from the spawned prover process in the range 200-232 are reserved
 /// for communicating that the proof is too big. The error code returned is
@@ -137,9 +132,6 @@ pub struct ProverJobSettings {
     pub(crate) tx_proving_capability: TxProvingCapability,
     pub(crate) proof_type: TransactionProofType,
     pub triton_vm_env_vars: TritonVmEnvVars,
-    /// Force CPU execution (unset TRITON_VM_PROVER_SOCKET for this job)
-    /// Used for proof collections which are faster on CPU
-    pub(crate) force_cpu: bool,
 }
 
 #[cfg(test)]
@@ -151,7 +143,6 @@ impl Default for ProverJobSettings {
             tx_proving_capability: TxProvingCapability::SingleProof,
             proof_type: TxProvingCapability::SingleProof.into(),
             triton_vm_env_vars: TritonVmEnvVars::default(),
-            force_cpu: false,
         }
     }
 }
@@ -186,9 +177,7 @@ impl ProverJob {
     // then it is unlikely this hardware will be able to generate the
     // corresponding proof.  In this case a `ProofComplexityLimitExceeded`
     // error is returned.
-    //
-    // Returns the calculated padded height along with the result
-    async fn check_if_allowed(&self) -> Result<u32, ProverJobError> {
+    async fn check_if_allowed(&self) -> Result<(), ProverJobError> {
         tracing::debug!("job settings: {:?}", self.job_settings);
 
         let capability = self.job_settings.tx_proving_capability;
@@ -265,7 +254,7 @@ impl ProverJob {
                     limit: ph_limit,
                 })
             }
-            _ => Ok(padded_height_processor_table),
+            _ => Ok(()),
         }
     }
 
@@ -365,69 +354,15 @@ impl ProverJob {
                 serde_json::to_string(&self.job_settings.triton_vm_env_vars)?,
             ];
 
-            tracing::debug!("[NEPTUNE] =========================================");
-            tracing::debug!("[NEPTUNE] Spawning triton-vm-prover process...");
-            tracing::debug!("[NEPTUNE] Sending proving request:");
-            tracing::debug!("[NEPTUNE]   Claim JSON: {} bytes", inputs[0].len());
-            tracing::debug!("[NEPTUNE]   Program JSON: {} bytes", inputs[1].len());
-            tracing::debug!("[NEPTUNE]   NonDet JSON: {} bytes", inputs[2].len());
-            tracing::debug!("[NEPTUNE]   MaxLog2: {}", inputs[3]);
-            tracing::debug!("[NEPTUNE]   EnvVars JSON: {} bytes", inputs[4].len());
-            
-            // Hybrid CPU/GPU routing: If force_cpu is true, remove TRITON_VM_PROVER_SOCKET
-            // to force CPU execution (faster for proof collections)
-            let mut cmd = tokio::process::Command::new(Self::path_to_triton_vm_prover()?);
-            cmd.kill_on_drop(true) // extra insurance.
+            let mut child = tokio::process::Command::new(Self::path_to_triton_vm_prover()?)
+                .kill_on_drop(true) // extra insurance.
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            
-            // If force_cpu is set, remove TRITON_VM_PROVER_SOCKET from child environment
-            // This forces CPU execution (faster for proof collections)
-            if self.job_settings.force_cpu {
-                tracing::info!("[HYBRID] Forcing CPU execution (unsetting TRITON_VM_PROVER_SOCKET) - CPU is 4x faster for proof collections");
-                cmd.env_remove("TRITON_VM_PROVER_SOCKET");
-            } else {
-                // Inherit environment (including TRITON_VM_PROVER_SOCKET if set)
-                // This allows GPU execution for single proofs and merge operations
-                if std::env::var("TRITON_VM_PROVER_SOCKET").is_ok() {
-                    tracing::info!("[HYBRID] Using GPU execution (TRITON_VM_PROVER_SOCKET is set) - GPU is 2.3x faster for single proofs");
-                } else {
-                    tracing::debug!("[HYBRID] Using CPU execution (TRITON_VM_PROVER_SOCKET not set)");
-                }
-            }
-            
-            // Assign GPU device for direct GPU prover mode (TRITON_GPU_PROVER_PATH)
-            // When using direct GPU prover with multiple GPUs, assign different devices
-            // to each concurrent process to avoid resource contention
-            if std::env::var("TRITON_GPU_PROVER_PATH").is_ok() && !self.job_settings.force_cpu {
-                if let Ok(cuda_visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
-                    // Parse CUDA_VISIBLE_DEVICES to get available GPU IDs
-                    let gpu_ids: Vec<&str> = cuda_visible.split(',').filter(|s| !s.trim().is_empty()).collect();
-                    if !gpu_ids.is_empty() {
-                        // Round-robin assignment: get next GPU device index
-                        // Use modulo to wrap around if we have fewer GPUs than jobs
-                        let device_index = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % gpu_ids.len();
-                        let assigned_gpu = gpu_ids[device_index];
-                        
-                        // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this process
-                        cmd.env("CUDA_VISIBLE_DEVICES", assigned_gpu);
-                        tracing::debug!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
-                            assigned_gpu, cuda_visible, device_index, gpu_ids.len());
-                    } else {
-                        tracing::warn!("[GPU] CUDA_VISIBLE_DEVICES={} contains no valid GPU IDs", cuda_visible);
-                    }
-                } else {
-                    tracing::debug!("[GPU] CUDA_VISIBLE_DEVICES not set, cannot assign specific GPU device");
-                }
-            }
-            
-            let mut child = cmd.spawn()?;
+                .stderr(Stdio::piped())
+                .spawn()?;
 
             let mut child_stdin = child.stdin.take().ok_or(VmProcessError::StdinUnavailable)?;
-            tracing::debug!("[NEPTUNE] Writing request to triton-vm-prover stdin...");
             child_stdin.write_all(inputs.join("\n").as_bytes()).await?;
-            tracing::debug!("[NEPTUNE] Request sent to triton-vm-prover");
 
             child
         };
@@ -444,46 +379,24 @@ impl ProverJob {
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    // Show proxy messages at info level, others at debug
-                    if line.contains("[proxy]") || line.contains("[PROVER]") || line.contains("[SERVER]") {
-                        tracing::info!("[triton-vm-prover stderr]: {line}");
-                    } else {
                     tracing::debug!("[triton-vm prover]: {line}");
-                    }
                 }
             });
         }
 
         // see <https://github.com/tokio-rs/tokio/discussions/7132>
-        tracing::debug!("[NEPTUNE] Waiting for triton-vm-prover to complete...");
         tokio::select! {
             result = process_util::wait_with_output(&mut child) => {
                 let output = result?;
                 match output.status.code() {
                     Some(0) => {
-                        tracing::debug!("[NEPTUNE] =========================================");
-                        tracing::debug!("[NEPTUNE] triton-vm-prover completed successfully");
-                        tracing::debug!("[NEPTUNE] Received {} bytes from stdout", output.stdout.len());
-                        tracing::debug!("[NEPTUNE] Deserializing proof...");
-                        
                         let proof: Proof = bincode::deserialize(&output.stdout)?;
-                        
-                        let padded_height_str = proof.padded_height()
+                        tracing::debug!(
+                            "Generated proof, with padded height: {}",
+                            proof.padded_height()
                                 .map(|x| x.to_string())
-                            .unwrap_or_else(|e| format!("could not get padded height from proof.\nGot: {e}"));
-                        
-                        tracing::debug!(
-                            "[NEPTUNE] Proof deserialized successfully"
+                                .unwrap_or_else(|e| format!("could not get padded height from proof.\nGot: {e}"))
                         );
-                        tracing::debug!(
-                            "[NEPTUNE] Proof padded height: {}",
-                            padded_height_str
-                        );
-                        
-                        // Verification skipped - proof will be verified when actually used
-                        // (e.g., when submitting transaction or validating block)
-                        tracing::info!("[NEPTUNE] Proof ACCEPTED - continuing with block composition");
-                        tracing::info!("[NEPTUNE] =========================================");
                         Ok(ProverProcessCompletion::Finished(proof))
                     }
                     Some(code) => {
@@ -535,8 +448,17 @@ impl ProverJob {
     ///
     /// note: we do not verify that the path exists. That will occur anyway
     /// when triton-vm-prover is executed.
+    ///
+    /// If TRITON_VM_PROVER_PATH env var is set, uses that path instead.
+    /// This is useful for SDK/FFI usage where the executable is not xnt-core.
     #[cfg(not(test))]
     fn path_to_triton_vm_prover() -> Result<std::path::PathBuf, std::io::Error> {
+        // Check env var first (useful for SDK/FFI/NAPI usage)
+        if let Ok(path) = std::env::var("TRITON_VM_PROVER_PATH") {
+            return Ok(std::path::PathBuf::from(path));
+        }
+
+        // Fall back to same directory as current executable
         let mut exe_path = std::env::current_exe()?;
         exe_path.set_file_name("triton-vm-prover");
         Ok(exe_path)
@@ -570,11 +492,10 @@ impl Job for ProverJob {
     // The select!() and kill() occur in Self::prove_out_of_process().
     async fn run_async_cancellable(&self, mut rx: JobCancelReceiver) -> JobCompletion {
         // check if allowed, and listen for cancel messages.
-        let padded_height = tokio::select!(
+        tokio::select!(
             result = self.check_if_allowed() => {
-                match result {
-                    Ok(ph) => ph,
-                    Err(e) => return ProverJobResult::new(Err(e)).into()
+                if let Err(e) = result {
+                    return ProverJobResult::new(Err(e)).into()
                 }
             }
 
@@ -584,33 +505,8 @@ impl Job for ProverJob {
             }
         );
 
-        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
-        const GPU_THRESHOLD: u32 = 32768; // 2^15
-        
-        // Create a mutable copy of job_settings to conditionally override force_cpu
-        let mut job_settings = self.job_settings.clone();
-        if padded_height >= GPU_THRESHOLD {
-            // Override force_cpu to use GPU for proofs >= 2^15
-            job_settings.force_cpu = false;
-            tracing::info!(
-                "[HYBRID] Padded height {} >= 2^15, using GPU execution",
-                padded_height
-            );
-        } else {
-            // Use CPU for smaller proofs
-            job_settings.force_cpu = true;
-            tracing::info!(
-                "[HYBRID] Padded height {} < 2^15, using CPU execution",
-                padded_height
-            );
-        }
-        
-        // Create a new ProverJob with updated settings
-        let mut prover_job = self.clone();
-        prover_job.job_settings = job_settings;
-
         // all is well, let's prove!
-        prover_job.prove(rx).await // handles cancellation internally
+        self.prove(rx).await // handles cancellation internally
     }
 }
 

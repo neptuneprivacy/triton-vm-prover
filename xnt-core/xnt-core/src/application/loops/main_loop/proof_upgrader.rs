@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::ensure;
 use itertools::Itertools;
 use num_traits::Zero;
 use rand::rngs::StdRng;
@@ -109,15 +108,6 @@ impl PrimitiveWitnessToSingleProof {
         proof_job_options: &TritonVmProofJobOptions,
         consensus_rule_set: ConsensusRuleSet,
     ) -> anyhow::Result<Transaction> {
-        // Merged transactions (merge_bit=true) cannot use the PrimitiveWitness path
-        // because it internally creates ProofCollection which requires merge_bit=false.
-        // Merged transactions must use MergeWitness instead.
-        ensure!(
-            !self.primitive_witness.kernel.merge_bit,
-            "Cannot upgrade merged transactions (merge_bit=true) from PrimitiveWitness. \
-             Merged transactions must be proven via MergeWitness during the merge operation."
-        );
-
         let options = TritonVmProofJobOptionsBuilder::new()
             .template(proof_job_options)
             .proof_type(TransactionProofType::SingleProof)
@@ -151,15 +141,6 @@ impl PrimitiveWitnessToProofCollection {
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
         proof_job_options: &TritonVmProofJobOptions,
     ) -> anyhow::Result<Transaction> {
-        // Merged transactions (merge_bit=true) cannot use ProofCollection
-        // because ProofCollection verification requires merge_bit=false.
-        // Merged transactions must use MergeWitness instead.
-        ensure!(
-            !self.primitive_witness.kernel.merge_bit,
-            "Cannot create ProofCollection for merged transactions (merge_bit=true). \
-             Merged transactions must be proven via MergeWitness during the merge operation."
-        );
-
         let options = TritonVmProofJobOptionsBuilder::new()
             .template(proof_job_options)
             .proof_type(TransactionProofType::ProofCollection)
@@ -239,14 +220,6 @@ impl UpdateMutatorSetDataJob {
         )
         .await?;
         info!("Proof-upgrader, update: Done");
-
-        // Log GPU-UPGRADER completion message
-        let gpu_available = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok();
-        if gpu_available {
-            info!("[GPU-UPGRADER] MutatorSet update completed (GPU-accelerated)");
-        } else {
-            info!("[GPU-UPGRADER] MutatorSet update completed (CPU-only)");
-        }
 
         Ok(ret)
     }
@@ -437,11 +410,6 @@ impl UpgradeJob {
 
     /// Upgrade transaction proofs, inserts upgraded tx into the mempool and
     /// informs peers of this new transaction.
-    ///
-    /// GPU Acceleration:
-    /// - Automatically uses GPU if `TRITON_VM_PROVER_SOCKET` is set
-    /// - GPU provides ~2.3x speedup for single proof generation and merges
-    /// - Proof collections use CPU (faster on CPU, ~4x speedup)
     pub(crate) async fn handle_upgrade(
         self,
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
@@ -456,18 +424,6 @@ impl UpgradeJob {
             _ => TritonVmJobPriority::Low,
         };
 
-        // Check GPU availability for logging
-        let gpu_available = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok();
-        if gpu_available {
-            info!(
-                "[GPU-UPGRADER] GPU acceleration available - upgrades will use GPU for single proofs and merges"
-            );
-        } else {
-            info!(
-                "[GPU-UPGRADER] CPU-only mode - set TRITON_VM_PROVER_SOCKET to enable GPU acceleration"
-            );
-        }
-
         // process in a loop.  in case a new block comes in while processing
         // the current tx, then we can move on to the next, and so on.
         loop {
@@ -479,49 +435,6 @@ impl UpgradeJob {
             // because TritonVmJobOptions::cancel_job_rx is None.
             // see how compose_task handles cancellation in mine_loop.
             let job_options = global_state_lock.cli().proof_job_options(priority);
-
-            // Note: GPU usage is automatically handled by ProverJob based on:
-            // 1. TRITON_VM_PROVER_SOCKET environment variable (if set, GPU is used)
-            // 2. force_cpu flag in job_settings (default: false, so GPU is used if available)
-            // The proof upgrader doesn't need to explicitly set force_cpu=false because
-            // the default already enables GPU usage. Proof collections automatically
-            // set force_cpu=true in proof_collection.rs since CPU is faster for them.
-
-            // Log upgrade type and GPU usage
-            match &upgrade_job {
-                UpgradeJob::ProofCollectionToSingleProof(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting ProofCollection→SingleProof upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting ProofCollection→SingleProof upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::Merge { .. } => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting Merge upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting Merge upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::UpdateMutatorSetData(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting MutatorSet update (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting MutatorSet update (CPU-only)");
-                    }
-                }
-                UpgradeJob::PrimitiveWitnessToSingleProof(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting PrimitiveWitness→SingleProof upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting PrimitiveWitness→SingleProof upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::PrimitiveWitnessToProofCollection(_) => {
-                    // Proof collections are faster on CPU, so we don't use GPU
-                    info!("[GPU-UPGRADER] Starting PrimitiveWitness→ProofCollection upgrade (CPU-optimized)");
-                }
-            };
 
             // It's a important to *not* hold any locks when proving happens.
             // Otherwise, entire application freezes!!
@@ -548,17 +461,10 @@ impl UpgradeJob {
                 .await
             {
                 Ok((upgraded_tx, expected_utxos)) => {
-                    if gpu_available {
-                        info!(
-                            "[GPU-UPGRADER] Successfully upgraded transaction {} (GPU-accelerated)",
-                            upgraded_tx.kernel.txid()
-                        );
-                    } else {
-                        info!(
-                            "[GPU-UPGRADER] Successfully upgraded transaction {} (CPU-only)",
-                            upgraded_tx.kernel.txid()
-                        );
-                    }
+                    info!(
+                        "Successfully upgraded transaction {}",
+                        upgraded_tx.kernel.txid()
+                    );
                     (upgraded_tx, expected_utxos)
                 }
                 Err(e) => {

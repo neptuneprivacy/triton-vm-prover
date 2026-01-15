@@ -291,16 +291,6 @@ impl<'a> TransactionProofBuilder<'a> {
             }
             // proof-collection --> single proof
             else if let Some(pc) = proof_collection {
-                // Validate proof collection before upgrading to prevent assertion failures
-                let txk_mast_hash = pc.kernel_mast_hash;
-                let network = proof_job_options.job_settings.network;
-                let is_valid = pc.verify(txk_mast_hash, network).await;
-                if !is_valid {
-                    return Err(CreateProofError::CannotProve(
-                        "Proof collection failed verification before upgrade. Cannot generate single proof from invalid proof collection.".to_string(),
-                    ));
-                }
-                
                 let spw = SingleProofWitness::from_collection(pc);
                 let c = spw.claim();
                 let nd = spw.nondeterminism();
@@ -398,17 +388,6 @@ async fn proof_collection_from_witness(
     let proof_type = TransactionProofType::ProofCollection;
     assert_eq!(proof_type, proof_job_options.job_settings.proof_type);
 
-    // Merged transactions (merge_bit=true) cannot use ProofCollection because
-    // ProofCollection verification requires merge_bit=false. Merged transactions
-    // must use MergeWitness instead of PrimitiveWitness.
-    if witness_cow.kernel.merge_bit {
-        return Err(CreateProofError::CannotProve(
-            "Cannot create ProofCollection for merged transactions (merge_bit=true). \
-             Merged transactions must be proven via MergeWitness during the merge operation."
-                .to_string(),
-        ));
-    }
-
     // generate mock proof, if network uses mock proofs.
     if proof_job_options.job_settings.network.use_mock_proof() {
         let pc = ProofCollection::produce_mock(witness_cow.borrow(), valid_mock);
@@ -446,17 +425,6 @@ async fn single_proof_from_witness(
 ) -> Result<NeptuneProof, CreateProofError> {
     let single_proof_type = TransactionProofType::SingleProof;
     assert_eq!(single_proof_type, proof_job_options.job_settings.proof_type);
-
-    // Merged transactions (merge_bit=true) cannot use the PrimitiveWitness path
-    // because it internally creates ProofCollection which requires merge_bit=false.
-    // Merged transactions must use MergeWitness instead.
-    if witness_cow.kernel.merge_bit {
-        return Err(CreateProofError::CannotProve(
-            "Cannot create SingleProof from PrimitiveWitness for merged transactions (merge_bit=true). \
-             Merged transactions must be proven via MergeWitness during the merge operation."
-                .to_string(),
-        ));
-    }
 
     // generate mock proof, if network uses mock proofs.
     if proof_job_options.job_settings.network.use_mock_proof() {
