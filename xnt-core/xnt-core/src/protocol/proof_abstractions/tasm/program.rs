@@ -239,6 +239,7 @@ pub mod tests {
                     proof_type: TransactionProofType::SingleProof,
                     triton_vm_env_vars: TritonVmEnvVars::default(),
                     force_cpu: false,
+                    assigned_gpu: None,
                 },
                 cancel_job_rx: None,
             }
