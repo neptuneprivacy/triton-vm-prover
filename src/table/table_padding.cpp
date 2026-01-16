@@ -3,6 +3,7 @@
 #include "hash/tip5.hpp"
 #include "vm/processor_columns.hpp"
 #include "parallel/thread_coordination.h"
+#include "common/debug_control.hpp"
 #include <algorithm>
 #include <cassert>
 #include <array>
@@ -510,7 +511,7 @@ void pad_all_tables(
     const std::array<size_t, 9>& table_lengths,
     size_t padded_height
 ) {
-    const bool profile = (std::getenv("TVM_PROFILE_PAD") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t0 = std::chrono::high_resolution_clock::now();
     
     // Table lengths: [Program, Processor, OpStack, Ram, JumpStack, Hash, Cascade, Lookup, U32]

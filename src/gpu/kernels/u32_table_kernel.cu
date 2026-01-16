@@ -12,6 +12,7 @@
 #include "gpu/kernels/u32_table_kernel.cuh"
 #include "gpu/kernels/bfield_kernel.cuh"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include <cuda_runtime.h>
 #include <vector>
 #include <iostream>
@@ -252,7 +253,7 @@ size_t gpu_fill_u32_table(
     const size_t n_entries = entries.size();
     if (n_entries == 0) return 0;
     
-    const bool profile = (std::getenv("TVM_PROFILE_GPU_U32") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t_start = std::chrono::high_resolution_clock::now();
     auto log_time = [&](const char* msg) {
         if (profile) {

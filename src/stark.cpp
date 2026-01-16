@@ -5,6 +5,7 @@
 #include "quotient/quotient.hpp"
 #include "ntt/ntt.hpp"
 #include "bincode_ffi.hpp"
+#include "common/debug_control.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>  // For printf as workaround
@@ -15,9 +16,9 @@
 #include <random>
 #include <chrono>  // For std::chrono
 
-// Debug output control - set to false for production
-#define TVM_DEBUG_OUTPUT false
-#define TVM_DEBUG(x) do { if (TVM_DEBUG_OUTPUT) { x; } } while(0)
+// Debug output control - now controlled by TRITON_VM_DEBUG environment variable
+#define TVM_DEBUG_OUTPUT TRITON_DEBUG_ENABLED()
+#define TVM_DEBUG(x) TRITON_IF_DEBUG { x; }
 
 #include <sstream>
 #include <iomanip>

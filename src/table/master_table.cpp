@@ -10,6 +10,7 @@
 #include "vm/processor_columns.hpp"
 #include "hash/tip5.hpp"
 #include "chacha12_rng.hpp"
+#include "common/debug_control.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <random>
@@ -116,7 +117,7 @@ void compute_degree_lowering_main_columns(std::vector<std::vector<BFieldElement>
         return;  // Skip CPU degree lowering - will be done on GPU
     }
     
-    const bool profile = (std::getenv("TVM_PROFILE_PAD") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     const bool use_rust_ffi = (std::getenv("TVM_USE_RUST_DEGREE_LOWERING") != nullptr);
     
     // Always use Rust FFI for degree lowering to ensure exact match with Rust implementation
@@ -554,7 +555,7 @@ void MasterMainTable::enable_flat_buffer(bool use_pinned_memory) {
         return; // Already enabled
     }
     
-    const bool profile = (std::getenv("TVM_PROFILE_TABLE_CREATE") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t0 = std::chrono::high_resolution_clock::now();
     
     size_t total_elements = num_rows_ * num_columns_;
@@ -660,7 +661,7 @@ MasterMainTable MasterMainTable::from_aet(
 ) {
     using namespace TableColumnOffsets;
     
-    const bool profile = (std::getenv("TVM_PROFILE_TABLE_CREATE") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto profile_start = std::chrono::high_resolution_clock::now();
     auto section_start = profile_start;
     
@@ -2044,7 +2045,7 @@ void MasterMainTable::pad(size_t padded_height, const std::array<size_t, 9>& tab
         throw std::invalid_argument("Padded height must be a power of 2");
     }
 
-    const bool profile = (std::getenv("TVM_PROFILE_PAD") != nullptr);
+    const bool profile = TRITON_PROFILE_ENABLED();
     auto t0 = std::chrono::high_resolution_clock::now();
 
     // ---------------------------------------------------------------------

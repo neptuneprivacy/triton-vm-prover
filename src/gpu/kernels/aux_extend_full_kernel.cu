@@ -16,6 +16,7 @@
 #include "gpu/kernels/xfield_kernel.cuh"
 #include "gpu/kernels/degree_lowering_generated.cuh"
 #include "gpu/cuda_common.cuh"
+#include "common/debug_control.hpp"
 #include <cub/device/device_scan.cuh>
 #include <cuda_runtime.h>
 #include <cstdint>
