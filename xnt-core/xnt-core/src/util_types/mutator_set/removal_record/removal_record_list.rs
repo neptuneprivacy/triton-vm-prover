@@ -142,11 +142,22 @@ impl RemovalRecordList {
                     chunk_mmr_mp.authentication_path.len() as u32;
                 let (_, peak_index) =
                     leaf_index_to_mt_index_and_peak_index(*chunk_index, num_leafs_swbfi);
-                let tree_height_according_to_num_leafs = all_tree_heights[peak_index as usize];
+                let tree_height_according_to_num_leafs = all_tree_heights
+                    .get(peak_index as usize)
+                    .copied()
+                    .unwrap_or(0);
                 assert_eq!(
                     tree_height_according_to_num_leafs,
                     tree_height_according_to_authentication_path,
-                    "removal records are inconsistent: authentication path length disagrees with tree heights according to num leafs"
+                    "removal records are inconsistent: authentication path length disagrees with tree heights according to num leafs. \
+                     chunk_index={}, num_leafs_swbfi={}, num_leafs_aocl={}, peak_index={}, \
+                     tree_heights={:?}, auth_path_len={}",
+                    chunk_index,
+                    num_leafs_swbfi,
+                    num_leafs_aocl,
+                    peak_index,
+                    all_tree_heights,
+                    tree_height_according_to_authentication_path
                 );
                 mmr_leaf_indices
                     .insert((tree_height_according_to_authentication_path, *chunk_index));
@@ -284,9 +295,15 @@ impl RemovalRecordList {
         observed_chunk_indices: &[u64],
         observed_authentication_path_lengths: &[usize],
     ) -> u64 {
-        let largest_observed_chunk_index =
-            observed_chunk_indices.iter().copied().max().unwrap_or(0);
-        let mut swbfi_leaf_count_estimate = largest_observed_chunk_index;
+        // The minimum required to include all chunk indices (chunk N requires at least N+1 leaves)
+        // If there are no chunk indices, we don't need any leaves for chunks
+        let min_required_for_chunks = observed_chunk_indices
+            .iter()
+            .copied()
+            .max()
+            .map(|max_idx| max_idx.saturating_add(1))
+            .unwrap_or(0);
+        let mut swbfi_leaf_count_estimate = min_required_for_chunks;
 
         assert!(
             observed_authentication_path_lengths
@@ -307,8 +324,12 @@ impl RemovalRecordList {
                 // set the bit in question
                 swbfi_leaf_count_estimate |= tree_width;
 
-                // zero all subsequent bits
-                swbfi_leaf_count_estimate &= u64::MAX - (tree_width - 1);
+                // zero all subsequent bits, but ensure we don't go below minimum required
+                let masked = swbfi_leaf_count_estimate & (u64::MAX - (tree_width - 1));
+                swbfi_leaf_count_estimate = masked.max(min_required_for_chunks);
+
+                // After enforcing minimum, we might have lost the tree height bit, so set it again
+                swbfi_leaf_count_estimate |= tree_width;
             }
         }
 
