@@ -2008,6 +2008,11 @@ impl MainLoopHandler {
 
                 // note: this Tx must already have been added to the mempool by
                 // sender.  This occurs in GlobalStateLock::record_transaction().
+                //
+                // Since this code path bypasses the mempool insert handlers in main_loop,
+                // we must still notify the miner that the mempool changed so it can cancel
+                // composing when `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 // Is this a transaction we can share with peers? If so, share
                 // it immediately.

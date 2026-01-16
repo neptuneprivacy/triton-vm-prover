@@ -1284,12 +1284,19 @@ pub(crate) async fn mine(
                             let should_stop_for_upgrades =
                                 single_proof_count >= 2 || upgrades_needed > 0;
 
-                            if should_stop_for_upgrades && composer_task.is_some() {
-                                info!(
-                                    "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (prioritize_upgrades enabled)",
-                                    single_proof_count, upgrades_needed
-                                );
-                                stop_composing = true;
+                            if should_stop_for_upgrades {
+                                if composer_task.is_some() {
+                                    info!(
+                                        "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (prioritize_upgrades enabled)",
+                                        single_proof_count, upgrades_needed
+                                    );
+                                    stop_composing = true;
+                                }
+
+                                // If we are currently guessing on a proposal, stop guessing too.
+                                // The high-priority work is now upgrading/merging, and any new
+                                // proposal should be composed after that work is done.
+                                stop_guessing = true;
                             }
                         }
                     }
