@@ -2,6 +2,7 @@ pub mod proof_upgrader;
 pub(crate) mod upgrade_incentive;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::process::Stdio;
@@ -153,13 +154,14 @@ struct MutableMainLoopState {
     /// A list of join-handles to spawned tasks.
     task_handles: Vec<JoinHandle<()>>,
 
-    /// Join-handles to tasks performing transaction-proof upgrades.
+    /// Join-handles to tasks performing transaction-proof upgrades, paired with their affected txids.
     /// Supports parallel processing of multiple upgrade jobs.
-    proof_upgrader_tasks: Vec<JoinHandle<()>>,
+    /// When a task finishes, we remove its txids from in_progress tracking.
+    proof_upgrader_tasks: Vec<(JoinHandle<()>, Vec<TransactionKernelId>)>,
 
     /// Track which transactions are currently being upgraded to prevent duplicate work.
     /// Maps transaction IDs to the number of tasks working on them.
-    in_progress_txids: std::collections::HashMap<TransactionKernelId, usize>,
+    in_progress_txids: std::collections::HashSet<TransactionKernelId>,
 
     /// A join-handle to a task running the update of the mempool transactions.
     update_mempool_txs_handle: Option<JoinHandle<()>>,
@@ -178,7 +180,7 @@ impl MutableMainLoopState {
             potential_peers: PotentialPeersState::default(),
             task_handles,
             proof_upgrader_tasks: Vec::new(),
-            in_progress_txids: HashMap::new(),
+            in_progress_txids: HashSet::new(),
             update_mempool_txs_handle: None,
             update_mempool_receiver: dummy_receiver,
         }
@@ -1520,13 +1522,27 @@ impl MainLoopHandler {
 
         trace!("Running proof upgrader scheduled task");
 
-        // Clean up finished tasks
-        // Note: We retain tasks that are still running, but we can't easily
-        // clean up in_progress_txids here without tracking which txids belong to which task.
-        // The mempool will naturally filter out already-upgraded transactions.
+        // Clean up finished tasks and their associated txids
+        let mut txids_to_remove = Vec::new();
         main_loop_state
             .proof_upgrader_tasks
-            .retain(|task| !task.is_finished());
+            .retain(|(task, txids)| {
+                if task.is_finished() {
+                    // Task finished - mark its txids for removal from in_progress tracking
+                    txids_to_remove.extend(txids.iter().cloned());
+                    false // Remove this task
+                } else {
+                    true // Keep this task
+                }
+            });
+        
+        // Remove finished task txids from in_progress tracking
+        if !txids_to_remove.is_empty() {
+            debug!("Cleaning up {} txid(s) from finished tasks", txids_to_remove.len());
+            for txid in txids_to_remove {
+                main_loop_state.in_progress_txids.remove(&txid);
+            }
+        }
 
         // Check if we can attempt upgrades
         let max_parallel = {
@@ -1576,7 +1592,7 @@ impl MainLoopHandler {
                 let affected_txids = upgrade_candidate.affected_txids();
                 let already_in_progress = affected_txids
                     .iter()
-                    .any(|txid| main_loop_state.in_progress_txids.contains_key(txid));
+                    .any(|txid| main_loop_state.in_progress_txids.contains(txid));
 
                 if already_in_progress {
                     debug!(
@@ -1587,7 +1603,7 @@ impl MainLoopHandler {
                 } else {
                     // Mark transactions as in-progress
                     for txid in &affected_txids {
-                        *main_loop_state.in_progress_txids.entry(*txid).or_insert(0) += 1;
+                        main_loop_state.in_progress_txids.insert(*txid);
                     }
                     Some((upgrade_candidate, affected_txids))
                 }
@@ -1620,36 +1636,13 @@ impl MainLoopHandler {
                         main_to_peer_broadcast_tx_clone,
                     )
                     .await;
-
-                // Note: In-progress tracking cleanup happens when task finishes
-                // We'll clean this up in the next iteration when we check finished tasks
             });
 
+            // Store both the task handle and its affected txids for cleanup tracking
             main_loop_state
                 .proof_upgrader_tasks
-                .push(proof_upgrader_task);
+                .push((proof_upgrader_task, affected_txids));
             spawned_count += 1;
-        }
-
-        // Clean up in-progress tracking periodically
-        // Remove txids that are no longer in the mempool (already upgraded/mined)
-        // This is a simple cleanup - a more complete solution would track txids per-task
-        if !main_loop_state.in_progress_txids.is_empty() {
-            let global_state = self.global_state_lock.lock_guard().await;
-            let before_count = main_loop_state.in_progress_txids.len();
-            main_loop_state.in_progress_txids.retain(|txid, _| {
-                // Keep if transaction is still in mempool (might still be upgrading)
-                global_state.mempool.contains(*txid)
-            });
-            let after_count = main_loop_state.in_progress_txids.len();
-            if before_count != after_count {
-                debug!(
-                    "Cleaned up {} in-progress txid(s) ({} -> {})",
-                    before_count - after_count,
-                    before_count,
-                    after_count
-                );
-            }
         }
 
         if spawned_count > 0 {
@@ -2765,7 +2758,7 @@ mod tests {
                 !mutable_main_loop_state.proof_upgrader_tasks.is_empty(),
                 "At least one upgrade task should be spawned"
             );
-            for handle in mutable_main_loop_state.proof_upgrader_tasks {
+            for (handle, _txids) in mutable_main_loop_state.proof_upgrader_tasks {
                 assert!(
                     handle.await.is_ok(),
                     "Proof-upgrade task must finish successfully."
