@@ -1578,7 +1578,7 @@ impl MainLoopHandler {
 
         // Try to spawn multiple upgrade tasks
         for _ in 0..tasks_to_spawn {
-            let upgrade_result = {
+            let (upgrade_candidate, affected_txids) = {
                 let mut global_state = self.global_state_lock.lock_guard_mut().await;
 
                 // Re-check conditions in case something changed
@@ -1588,40 +1588,21 @@ impl MainLoopHandler {
 
                 debug!("Attempting to run transaction-proof-upgrade");
 
-                // Find a candidate for proof upgrade
+                // Find a candidate for proof upgrade, excluding transactions already in progress
+                // This allows finding different candidates in each iteration
                 let Some(upgrade_candidate) =
-                    get_upgrade_task_from_mempool(&mut global_state).await
+                    get_upgrade_task_from_mempool(&mut global_state, &main_loop_state.in_progress_txids).await
                 else {
                     debug!("Found no transaction-proof to upgrade");
                     break;
                 };
 
-                // Check if any of the affected transactions are already in progress
+                // Get affected txids and mark them as in-progress
                 let affected_txids = upgrade_candidate.affected_txids();
-                let already_in_progress = affected_txids
-                    .iter()
-                    .any(|txid| main_loop_state.in_progress_txids.contains(txid));
-
-                if already_in_progress {
-                    debug!(
-                        "Skipping upgrade candidate - transactions already in progress: {}",
-                        affected_txids.iter().join("; ")
-                    );
-                    None
-                } else {
-                    // Mark transactions as in-progress
-                    for txid in &affected_txids {
-                        main_loop_state.in_progress_txids.insert(*txid);
-                    }
-                    Some((upgrade_candidate, affected_txids))
+                for txid in &affected_txids {
+                    main_loop_state.in_progress_txids.insert(*txid);
                 }
-            };
-
-            let Some((upgrade_candidate, affected_txids)) = upgrade_result else {
-                // Break instead of continue: if the best candidate is already in progress,
-                // calling get_upgrade_task_from_mempool again will return the same candidate.
-                // We should wait for the current tasks to finish before trying again.
-                break;
+                (upgrade_candidate, affected_txids)
             };
 
             info!(

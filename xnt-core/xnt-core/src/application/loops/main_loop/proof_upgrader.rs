@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -975,8 +976,12 @@ impl UpgradeJob {
 /// proof-quality of a transaction found in mempool. Also reports the value
 /// of this job to the wallet of this node. The value reported will be zero for
 /// all 3rd party transactions.
+///
+/// `exclude_txids` allows skipping transactions that are already being processed
+/// by other upgrade tasks, enabling parallel upgrade spawning.
 pub(super) async fn get_upgrade_task_from_mempool(
     global_state: &mut GlobalState,
+    exclude_txids: &HashSet<TransactionKernelId>,
 ) -> Option<UpgradeJob> {
     let tip_mutator_set = global_state
         .chain
@@ -992,7 +997,7 @@ pub(super) async fn get_upgrade_task_from_mempool(
     // Do we have any `ProofCollection`s?
     let proof_collection_job = if let Some((kernel, proof, upgrade_priority)) = global_state
         .mempool
-        .preferred_proof_collection(num_proofs_threshold, upgrade_filter)
+        .preferred_proof_collection(num_proofs_threshold, upgrade_filter, exclude_txids)
     {
         if kernel.mutator_set_hash != tip_mutator_set.hash() {
             error!("Deprecated transaction found in mempool. Has ProofCollection in need of updating. Consider clearing mempool.");
@@ -1042,7 +1047,7 @@ pub(super) async fn get_upgrade_task_from_mempool(
     let binary_tree_merge_job = if max_merge_count >= 3 {
         if let Some((transactions, upgrade_priority)) = global_state
             .mempool
-            .preferred_single_proof_batch(max_merge_count, upgrade_filter)
+            .preferred_single_proof_batch(max_merge_count, upgrade_filter, exclude_txids)
         {
             // Sanity check: all transactions must have matching mutator set hashes
             let first_hash = transactions[0].0.mutator_set_hash;
@@ -1093,7 +1098,7 @@ pub(super) async fn get_upgrade_task_from_mempool(
             upgrade_priority,
         )) = global_state
             .mempool
-            .preferred_single_proof_pair(upgrade_filter)
+            .preferred_single_proof_pair(upgrade_filter, exclude_txids)
         {
             // Sanity check
             assert_eq!(
@@ -1269,11 +1274,12 @@ mod tests {
             rando
                 .mempool_insert(pc_tx_low_fee.clone().into(), upgrade_priority)
                 .await;
+            let no_exclusions = HashSet::new();
             assert!(
                 !upgrade_priority.is_irrelevant()
-                    && get_upgrade_task_from_mempool(&mut rando).await.is_some()
+                    && get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.is_some()
                     || upgrade_priority.is_irrelevant()
-                        && get_upgrade_task_from_mempool(&mut rando).await.is_none()
+                        && get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.is_none()
             );
 
             // A high-fee paying transaction must be returned for upgrading
@@ -1288,7 +1294,7 @@ mod tests {
             rando
                 .mempool_insert(pc_tx_high_fee.clone().into(), UpgradePriority::Irrelevant)
                 .await;
-            let job = get_upgrade_task_from_mempool(&mut rando).await.unwrap();
+            let job = get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.unwrap();
             let UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
                 kernel,
                 ..
@@ -1549,7 +1555,8 @@ mod tests {
 
         let merge_upgrade_job = {
             let mut alice = alice.lock_guard_mut().await;
-            get_upgrade_task_from_mempool(&mut alice).await.unwrap()
+            let no_exclusions = HashSet::new();
+            get_upgrade_task_from_mempool(&mut alice, &no_exclusions).await.unwrap()
         };
         assert!(
             matches!(merge_upgrade_job, UpgradeJob::Merge { .. }),

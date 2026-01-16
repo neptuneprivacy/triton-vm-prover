@@ -352,16 +352,24 @@ impl Mempool {
     ///
     /// Also returns the upgrade priority of this transactions, for the node
     /// operator.
+    ///
+    /// `exclude_txids` allows skipping transactions that are already being processed.
     pub(crate) fn preferred_proof_collection(
         &self,
         num_proofs_threshold: usize,
         tx_upgrade_filter: TxUpgradeFilter,
+        exclude_txids: &HashSet<TransactionKernelId>,
     ) -> Option<(&TransactionKernel, &ProofCollection, UpgradePriority)> {
         for candidate_txid in self
             .upgrade_priority_iter()
             .map(|(txid, _)| txid)
             .chain(self.fee_density_iter().map(|(txid, _)| txid))
         {
+            // Skip transactions that are already being processed
+            if exclude_txids.contains(&candidate_txid) {
+                continue;
+            }
+
             let candidate = self.tx_dictionary.get(&candidate_txid).unwrap();
             if !self.tx_is_synced(&candidate.transaction.kernel) {
                 continue;
@@ -402,9 +410,12 @@ impl Mempool {
     /// Will only return transactions that are synced to the latest tip.
     ///
     /// Returns the pair of transaction along with their sum of priorities.
+    ///
+    /// `exclude_txids` allows skipping transactions that are already being processed.
     pub(crate) fn preferred_single_proof_pair(
         &self,
         tx_upgrade_filter: TxUpgradeFilter,
+        exclude_txids: &HashSet<TransactionKernelId>,
     ) -> Option<([(TransactionKernel, Proof); 2], UpgradePriority)> {
         let mut ret = vec![];
         let mut filter_mismatches = vec![];
@@ -414,6 +425,11 @@ impl Mempool {
             .map(|(txid, _)| txid)
             .chain(self.fee_density_iter().map(|(txid, _)| txid))
         {
+            // Skip transactions that are already being processed
+            if exclude_txids.contains(&candidate_txid) {
+                continue;
+            }
+
             let candidate = self.tx_dictionary.get(&candidate_txid).unwrap();
 
             if !self.tx_is_synced(&candidate.transaction.kernel) {
@@ -483,10 +499,13 @@ impl Mempool {
     /// Returns a batch of single proof transactions for binary tree merging.
     /// Collects up to `max_count` transactions that are synced and have SingleProof.
     /// Returns the transactions along with their sum of priorities.
+    ///
+    /// `exclude_txids` allows skipping transactions that are already being processed.
     pub(crate) fn preferred_single_proof_batch(
         &self,
         max_count: usize,
         tx_upgrade_filter: TxUpgradeFilter,
+        exclude_txids: &HashSet<TransactionKernelId>,
     ) -> Option<(Vec<(TransactionKernel, Proof)>, UpgradePriority)> {
         if max_count < 2 {
             // For batches smaller than 2, use the pair method
@@ -500,6 +519,11 @@ impl Mempool {
             .map(|(txid, _)| txid)
             .chain(self.fee_density_iter().map(|(txid, _)| txid))
         {
+            // Skip transactions that are already being processed
+            if exclude_txids.contains(&candidate_txid) {
+                continue;
+            }
+
             let candidate = self.tx_dictionary.get(&candidate_txid).unwrap();
 
             if !self.tx_is_synced(&candidate.transaction.kernel) {
@@ -1789,9 +1813,10 @@ mod tests {
             .transaction;
 
         // No candidate when mempool is empty
+        let no_exclusions = HashSet::new();
         assert!(
             mempool
-                .preferred_proof_collection(bob.cli.max_num_proofs, TxUpgradeFilter::match_all())
+                .preferred_proof_collection(bob.cli.max_num_proofs, TxUpgradeFilter::match_all(), &no_exclusions)
                 .is_none(),
             "No proof collection when mempool is empty"
         );
@@ -1800,7 +1825,7 @@ mod tests {
         mempool.insert(tx_by_bob.into(), UpgradePriority::Irrelevant);
         assert_eq!(
             mempool
-                .preferred_proof_collection(bob.cli.max_num_proofs, TxUpgradeFilter::match_all())
+                .preferred_proof_collection(bob.cli.max_num_proofs, TxUpgradeFilter::match_all(), &no_exclusions)
                 .unwrap()
                 .0
                 .txid(),
@@ -2058,10 +2083,11 @@ mod tests {
             // Verify that `most_dense_single_proof_pair` returns expected value
             // now that two single proofs are in the mempool.
             let densest_txs = mempool.fee_density_iter().map(|x| x.0).collect_vec();
+            let no_exclusions = HashSet::new();
             assert_eq!(
                 densest_txs,
                 mempool
-                    .preferred_single_proof_pair(TxUpgradeFilter::match_all())
+                    .preferred_single_proof_pair(TxUpgradeFilter::match_all(), &no_exclusions)
                     .unwrap()
                     .0
                     .map(|x| x.0.txid())
@@ -2206,10 +2232,11 @@ mod tests {
         // Verify that `most_dense_single_proof_pair` returns expected value
         // now that two single proofs are in the mempool.
         let densest_txs = mempool.fee_density_iter().map(|x| x.0).collect_vec();
+        let no_exclusions = HashSet::new();
         assert_eq!(
             densest_txs,
             mempool
-                .preferred_single_proof_pair(TxUpgradeFilter::match_all())
+                .preferred_single_proof_pair(TxUpgradeFilter::match_all(), &no_exclusions)
                 .unwrap()
                 .0
                 .map(|x| x.0.txid())
@@ -2221,7 +2248,7 @@ mod tests {
         assert_eq!(&merged, mempool.get(merged.kernel.txid()).unwrap());
 
         assert!(mempool
-            .preferred_single_proof_pair(TxUpgradeFilter::match_all())
+            .preferred_single_proof_pair(TxUpgradeFilter::match_all(), &no_exclusions)
             .is_none());
 
         assert_eq!(
@@ -3189,22 +3216,23 @@ mod tests {
             let accept_first_third = TxUpgradeFilter::from_str("3:0").unwrap();
             let accept_second_third = TxUpgradeFilter::from_str("3:1").unwrap();
             let accept_third_third = TxUpgradeFilter::from_str("3:2").unwrap();
+            let no_exclusions = HashSet::new();
 
             let num_proofs_threshold = 20;
             prop_assert!(mempool
-                .preferred_proof_collection(num_proofs_threshold, accept_all)
+                .preferred_proof_collection(num_proofs_threshold, accept_all, &no_exclusions)
                 .is_some());
             let num_matches = u8::from(
                 mempool
-                    .preferred_proof_collection(num_proofs_threshold, accept_first_third)
+                    .preferred_proof_collection(num_proofs_threshold, accept_first_third, &no_exclusions)
                     .is_some(),
             ) + u8::from(
                 mempool
-                    .preferred_proof_collection(num_proofs_threshold, accept_second_third)
+                    .preferred_proof_collection(num_proofs_threshold, accept_second_third, &no_exclusions)
                     .is_some(),
             ) + u8::from(
                 mempool
-                    .preferred_proof_collection(num_proofs_threshold, accept_third_third)
+                    .preferred_proof_collection(num_proofs_threshold, accept_third_third, &no_exclusions)
                     .is_some(),
             );
             assert_eq!(

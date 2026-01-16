@@ -17,10 +17,10 @@ GPU_PROVER_PATH="${TRITON_GPU_PROVER_PATH:-$SCRIPT_DIR/build/triton_vm_prove_gpu
 XNT_CORE_PATH="${XNT_CORE_PATH:-$SCRIPT_DIR/xnt-core/target/release/xnt-core}"
 
 # GPU/OpenMP settings (adjust to match your hardware)
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"  # Use GPU 0 and 1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"  # Use all 8 GPUs
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-64}"
 export TRITON_OMP_INIT="${TRITON_OMP_INIT:-0}"
-export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-4}"  # Max parallel CPU proof jobs
+export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-8}"  # Max parallel CPU proof jobs (increased for 8 GPUs)
 
 # GPU optimization settings - Performance tuning for GPU prover
 export TRITON_AUX_CPU="${TRITON_AUX_CPU:-1}"                     # Use CPU for auxiliary tables
@@ -30,8 +30,8 @@ export TRITON_GPU_DEGREE_LOWERING="${TRITON_GPU_DEGREE_LOWERING:-1}"  # GPU degr
 export TRITON_GPU_U32="${TRITON_GPU_U32:-1}"                    # Use 32-bit operations on GPU
 export TVM_USE_RUST_TRACE="${TVM_USE_RUST_TRACE:-1}"            # Use Rust trace execution
 export TRITON_GPU_USE_RAM_OVERFLOW="${TRITON_GPU_USE_RAM_OVERFLOW:-1}"  # Use system RAM as VRAM buffer
-export TRITON_MULTI_GPU="${TRITON_MULTI_GPU:-0}"                # Disable multi-GPU (use single GPU)
-export TRITON_GPU_COUNT="${TRITON_GPU_COUNT:-1}"                # Number of GPUs to use
+export TRITON_MULTI_GPU="${TRITON_MULTI_GPU:-0}"                # Disable multi-GPU (each GPU works independently)
+export TRITON_GPU_COUNT="${TRITON_GPU_COUNT:-8}"                # Number of GPUs to use
 export TRITON_NTT_REG6STAGE="${TRITON_NTT_REG6STAGE:-1}"        # NTT register optimization (6-stage)
 export TRITON_NTT_FUSED12="${TRITON_NTT_FUSED12:-1}"            # NTT fused kernel optimization
 export TRITON_NTT_COALESCED="${TRITON_NTT_COALESCED:-1}"        # NTT coalesced memory access
@@ -104,10 +104,10 @@ fi
 #   Composer handles only 1 transaction (no binary merging at composer).
 #   This separates responsibilities: proof-upgrader does merging, composer does composition.
 #
-# --max-parallel-upgrades 4
-#   Allow up to 4 parallel proof upgrade jobs in the proof-upgrader.
-#   Increase this for higher TPS (requires more CPU/GPU resources).
-#   Recommended: 2-4 for standard hardware, 4-8 for high-end systems.
+# --max-parallel-upgrades 8
+#   Allow up to 8 parallel proof upgrade jobs in the proof-upgrader.
+#   With 8 GPUs, we can run 8 parallel upgrades (single proof generation).
+#   During merge phase: 8→4→2→1, utilizing multiple GPUs in parallel.
 #
 # --max-upgrade-merge-count 8
 #   Maximum transactions to merge in a single binary tree merge operation.
@@ -127,7 +127,7 @@ exec "$XNT_CORE_PATH" \
   --guess \
   --prioritize-upgrades \
   --max-num-compose-mergers 1 \
-  --max-parallel-upgrades 4 \
+  --max-parallel-upgrades 8 \
   --max-upgrade-merge-count 8 \
   --tx-proof-upgrading \
   --tx-proving-capability=singleproof \
