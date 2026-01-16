@@ -1581,10 +1581,8 @@ impl MainLoopHandler {
                 debug!("Attempting to run transaction-proof-upgrade");
 
                 // Find a candidate for proof upgrade
-                // Pass the count of in-progress upgrades to help decide on binary tree merge
-                let in_progress_count = main_loop_state.in_progress_txids.len();
                 let Some(upgrade_candidate) =
-                    get_upgrade_task_from_mempool(&mut global_state, in_progress_count).await
+                    get_upgrade_task_from_mempool(&mut global_state).await
                 else {
                     debug!("Found no transaction-proof to upgrade");
                     break;

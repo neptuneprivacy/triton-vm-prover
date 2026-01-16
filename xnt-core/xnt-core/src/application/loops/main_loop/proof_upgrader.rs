@@ -957,12 +957,8 @@ impl UpgradeJob {
 /// proof-quality of a transaction found in mempool. Also reports the value
 /// of this job to the wallet of this node. The value reported will be zero for
 /// all 3rd party transactions.
-///
-/// `in_progress_upgrade_count` is the number of upgrade tasks currently running.
-/// This is used to decide whether to wait for more SingleProofs before merging.
 pub(super) async fn get_upgrade_task_from_mempool(
     global_state: &mut GlobalState,
-    in_progress_upgrade_count: usize,
 ) -> Option<UpgradeJob> {
     let tip_mutator_set = global_state
         .chain
@@ -1073,39 +1069,8 @@ pub(super) async fn get_upgrade_task_from_mempool(
     };
 
     // Can we merge two single proofs?
-    // Skip pair merge if we expect 4+ total transactions (wait for binary tree merge)
-    let synced_single_proof_count = global_state
-        .mempool
-        .count_synced_single_proof_transactions();
-    // Use in_progress_upgrade_count to know how many more SingleProofs are coming
-    let total_expected = synced_single_proof_count + in_progress_upgrade_count;
-    
-    info!(
-        "Pair merge check: single_proofs={}, in_progress={}, total_expected={}, max_merge={}",
-        synced_single_proof_count,
-        in_progress_upgrade_count,
-        total_expected,
-        max_merge_count
-    );
-    
-    // If we expect 4+ total transactions and binary tree merge is enabled,
-    // skip pair merge to allow transactions to accumulate for binary tree merge
-    let skip_pair_for_binary_tree = max_merge_count >= 4 
-        && total_expected >= 4 
-        && synced_single_proof_count >= 2
-        && in_progress_upgrade_count > 0;
-    
-    if skip_pair_for_binary_tree {
-        info!(
-            "WAITING for binary tree merge: {} SingleProofs ready, {} upgrades in progress → expect {} total",
-            synced_single_proof_count,
-            in_progress_upgrade_count,
-            total_expected
-        );
-    }
-    
-    let merge_job = if !skip_pair_for_binary_tree {
-        if let Some((
+    // Always try to merge if 2+ SingleProofs are available - keep GPUs busy
+    let merge_job = if let Some((
             [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
             upgrade_priority,
         )) = global_state
@@ -1145,10 +1110,7 @@ pub(super) async fn get_upgrade_task_from_mempool(
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // pick the most profitable option
     let mut jobs = [
@@ -1291,9 +1253,9 @@ mod tests {
                 .await;
             assert!(
                 !upgrade_priority.is_irrelevant()
-                    && get_upgrade_task_from_mempool(&mut rando, 0).await.is_some()
+                    && get_upgrade_task_from_mempool(&mut rando).await.is_some()
                     || upgrade_priority.is_irrelevant()
-                        && get_upgrade_task_from_mempool(&mut rando, 0).await.is_none()
+                        && get_upgrade_task_from_mempool(&mut rando).await.is_none()
             );
 
             // A high-fee paying transaction must be returned for upgrading
@@ -1308,7 +1270,7 @@ mod tests {
             rando
                 .mempool_insert(pc_tx_high_fee.clone().into(), UpgradePriority::Irrelevant)
                 .await;
-            let job = get_upgrade_task_from_mempool(&mut rando, 0).await.unwrap();
+            let job = get_upgrade_task_from_mempool(&mut rando).await.unwrap();
             let UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
                 kernel,
                 ..
@@ -1567,7 +1529,7 @@ mod tests {
 
         let merge_upgrade_job = {
             let mut alice = alice.lock_guard_mut().await;
-            get_upgrade_task_from_mempool(&mut alice, 0).await.unwrap()
+            get_upgrade_task_from_mempool(&mut alice).await.unwrap()
         };
         assert!(
             matches!(merge_upgrade_job, UpgradeJob::Merge { .. }),
