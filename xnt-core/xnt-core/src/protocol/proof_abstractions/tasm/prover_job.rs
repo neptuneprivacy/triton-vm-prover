@@ -10,13 +10,15 @@
 //! program can execute at a time.
 #[cfg(not(test))]
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use tasm_lib::maybe_write_debuggable_vm_state_to_disk;
 use tasm_lib::triton_vm::error::InstructionError;
 #[cfg(not(test))]
 use tokio::io::AsyncWriteExt;
-
-use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::sync::Mutex;
 
 use crate::application::config::network::Network;
 use crate::application::config::triton_vm_env_vars::TritonVmEnvVars;
@@ -36,8 +38,48 @@ use crate::protocol::proof_abstractions::Program;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::triton_vm::vm::VMState;
 
-/// Atomic counter for round-robin GPU assignment when using direct GPU prover
-static GPU_DEVICE_COUNTER: AtomicU32 = AtomicU32::new(0);
+/// Per-GPU mutexes to serialize GPU-bound proofs.
+/// Each GPU can only handle one job at a time, so we need per-GPU mutexes.
+/// Jobs are distributed across GPUs using round-robin assignment.
+static GPU_MUTEXES: OnceLock<Vec<Arc<Mutex<()>>>> = OnceLock::new();
+
+/// Counter for round-robin GPU assignment
+static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Get the list of available GPU IDs from CUDA_VISIBLE_DEVICES
+fn get_gpu_ids() -> Vec<String> {
+    std::env::var("CUDA_VISIBLE_DEVICES")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .collect()
+}
+
+/// Get the number of available GPUs
+fn get_gpu_count() -> usize {
+    let gpu_ids = get_gpu_ids();
+    if gpu_ids.is_empty() {
+        1 // Default to 1 GPU if CUDA_VISIBLE_DEVICES not set
+    } else {
+        gpu_ids.len()
+    }
+}
+
+/// Initialize per-GPU mutexes
+fn get_gpu_mutexes() -> &'static Vec<Arc<Mutex<()>>> {
+    GPU_MUTEXES.get_or_init(|| {
+        let count = get_gpu_count();
+        tracing::info!("[GPU] Initializing {} GPU mutex(es)", count);
+        (0..count).map(|_| Arc::new(Mutex::new(()))).collect()
+    })
+}
+
+/// Get the next GPU index using round-robin assignment
+fn get_next_gpu_index() -> usize {
+    let count = get_gpu_count();
+    GPU_COUNTER.fetch_add(1, Ordering::Relaxed) % count
+}
 
 /// Error code from the spawned prover process in the range 200-232 are reserved
 /// for communicating that the proof is too big. The error code returned is
@@ -140,6 +182,8 @@ pub struct ProverJobSettings {
     /// Force CPU execution (unset TRITON_VM_PROVER_SOCKET for this job)
     /// Used for proof collections which are faster on CPU
     pub(crate) force_cpu: bool,
+    /// Assigned GPU device ID for this job (used when force_cpu is false)
+    pub(crate) assigned_gpu: Option<String>,
 }
 
 #[cfg(test)]
@@ -152,6 +196,7 @@ impl Default for ProverJobSettings {
             proof_type: TxProvingCapability::SingleProof.into(),
             triton_vm_env_vars: TritonVmEnvVars::default(),
             force_cpu: false,
+            assigned_gpu: None,
         }
     }
 }
@@ -397,29 +442,15 @@ impl ProverJob {
                 }
             }
             
-            // Assign GPU device for direct GPU prover mode (TRITON_GPU_PROVER_PATH)
-            // When using direct GPU prover with multiple GPUs, assign different devices
-            // to each concurrent process to avoid resource contention
-            if std::env::var("TRITON_GPU_PROVER_PATH").is_ok() && !self.job_settings.force_cpu {
-                if let Ok(cuda_visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
-                    // Parse CUDA_VISIBLE_DEVICES to get available GPU IDs
-                    let gpu_ids: Vec<&str> = cuda_visible.split(',').filter(|s| !s.trim().is_empty()).collect();
-                    if !gpu_ids.is_empty() {
-                        // Round-robin assignment: get next GPU device index
-                        // Use modulo to wrap around if we have fewer GPUs than jobs
-                        let device_index = GPU_DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % gpu_ids.len();
-                        let assigned_gpu = gpu_ids[device_index];
-                        
-                        // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this process
-                        cmd.env("CUDA_VISIBLE_DEVICES", assigned_gpu);
-                        tracing::debug!("[GPU] Assigned GPU device {} (from CUDA_VISIBLE_DEVICES={}, index={}/{}) to this process", 
-                            assigned_gpu, cuda_visible, device_index, gpu_ids.len());
-                    } else {
-                        tracing::warn!("[GPU] CUDA_VISIBLE_DEVICES={} contains no valid GPU IDs", cuda_visible);
-                    }
-                } else {
-                    tracing::debug!("[GPU] CUDA_VISIBLE_DEVICES not set, cannot assign specific GPU device");
-                }
+            // If force_cpu is set, remove TRITON_VM_PROVER_SOCKET from child environment
+            // This forces CPU execution (faster for proof collections)
+            if self.job_settings.force_cpu {
+                cmd.env_remove("TRITON_VM_PROVER_SOCKET");
+                cmd.env_remove("TRITON_GPU_PROVER_PATH");
+            } else if let Some(gpu_id) = &self.job_settings.assigned_gpu {
+                // Set CUDA_VISIBLE_DEVICES to only the assigned GPU for this job
+                cmd.env("CUDA_VISIBLE_DEVICES", gpu_id);
+                tracing::info!("[GPU] Using assigned GPU device: {}", gpu_id);
             }
             
             let mut child = cmd.spawn()?;
@@ -609,8 +640,40 @@ impl Job for ProverJob {
         let mut prover_job = self.clone();
         prover_job.job_settings = job_settings;
 
-        // all is well, let's prove!
-        prover_job.prove(rx).await // handles cancellation internally
+        // For GPU jobs, assign a GPU and acquire its mutex to ensure only one job per GPU.
+        // CPU jobs can run in parallel without any mutex.
+        if !prover_job.job_settings.force_cpu {
+            // Round-robin GPU assignment
+            let gpu_index = get_next_gpu_index();
+            let gpu_ids = get_gpu_ids();
+            let assigned_gpu = if !gpu_ids.is_empty() {
+                gpu_ids[gpu_index].clone()
+            } else {
+                "0".to_string() // Default GPU
+            };
+            prover_job.job_settings.assigned_gpu = Some(assigned_gpu.clone());
+
+            // Get per-GPU mutex
+            let gpu_mutexes = get_gpu_mutexes();
+            let gpu_mutex = gpu_mutexes[gpu_index].clone();
+
+            // Acquire mutex for this specific GPU
+            let _gpu_guard = gpu_mutex.lock().await;
+            tracing::info!(
+                "[HYBRID] Acquired GPU {} mutex (index {}), starting GPU proof",
+                assigned_gpu,
+                gpu_index
+            );
+            let result = prover_job.prove(rx).await;
+            tracing::info!(
+                "[HYBRID] GPU {} proof complete, releasing mutex",
+                assigned_gpu
+            );
+            result
+        } else {
+            // CPU jobs run without mutex - can be parallel
+            prover_job.prove(rx).await
+        }
     }
 }
 

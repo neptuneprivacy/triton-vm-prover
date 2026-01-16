@@ -1008,10 +1008,11 @@ impl GlobalState {
             }
         };
 
-        // Only if incoming is better
-        if incoming_guesser_fee <= current_reward {
+        // Only skip if incoming is strictly worse (less than current)
+        // If incoming is equal or better, we'll add competitive bid increment to beat them
+        if incoming_guesser_fee < current_reward {
             info!(
-                "Competitive bidding: incoming proposal {:.3} coins not better than current {:.3} coins, skipping",
+                "Competitive bidding: incoming proposal {:.3} coins worse than current {:.3} coins, skipping",
                 incoming_guesser_fee.to_coins_f64_lossy(),
                 current_reward.to_coins_f64_lossy()
             );
@@ -1034,6 +1035,17 @@ impl GlobalState {
 
         let new_fraction = (new_target / subsidy_coins).min(self.cli.max_guesser_fraction);
 
+        // Calculate the fraction that corresponds to the current reward
+        // This is needed because self.cli.guesser_fraction may have already been
+        // updated by peer_loop, so we need to compare against the fraction that
+        // would produce the current_reward
+        let current_reward_coins = current_reward.to_coins_f64_lossy();
+        let current_fraction = if subsidy_coins > 0.0 {
+            (current_reward_coins / subsidy_coins).min(self.cli.max_guesser_fraction)
+        } else {
+            self.cli.guesser_fraction
+        };
+
         // Only if change is significant to avoid thrashing
         // Use a smaller threshold (0.1% = 0.001) when using small increments like 0.001
         let threshold = if self.cli.competitive_bid_increment < 0.01 {
@@ -1042,10 +1054,10 @@ impl GlobalState {
             0.01   // 1% threshold for larger increments
         };
         
-        if (new_fraction - self.cli.guesser_fraction).abs() < threshold {
+        if (new_fraction - current_fraction).abs() < threshold {
             info!(
                 "Competitive bidding: change too small ({:.4} < {:.4}), skipping recomposition",
-                (new_fraction - self.cli.guesser_fraction).abs(),
+                (new_fraction - current_fraction).abs(),
                 threshold
             );
             return None;

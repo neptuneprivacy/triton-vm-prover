@@ -247,6 +247,7 @@ impl TritonVmProofJobOptionsBuilder {
             proof_type,
             triton_vm_env_vars,
             force_cpu: force_cpu.unwrap_or(false), // Default: use GPU if available
+            assigned_gpu: None, // Will be assigned at runtime by hybrid logic
         };
 
         TritonVmProofJobOptions {

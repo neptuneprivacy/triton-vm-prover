@@ -869,6 +869,7 @@ impl From<&Args> for ProverJobSettings {
             proof_type: cli.proving_capability().into(),
             triton_vm_env_vars,
             force_cpu: false, // Default: use GPU if available
+            assigned_gpu: None, // Will be assigned at runtime by hybrid logic
         }
     }
 }
