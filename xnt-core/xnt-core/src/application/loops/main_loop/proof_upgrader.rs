@@ -1078,11 +1078,12 @@ pub(super) async fn get_upgrade_task_from_mempool(
         .count_proof_collection_transactions();
     let total_expected = synced_single_proof_count + pending_proof_collection_count;
     
-    debug!(
-        "Checking for pair merge: synced_single_proof_count={}, pending_proof_collection={}, total_expected={}",
+    info!(
+        "Pair merge check: single_proofs={}, pending_upgrades={}, total={}, max_merge={}",
         synced_single_proof_count,
         pending_proof_collection_count,
-        total_expected
+        total_expected,
+        max_merge_count
     );
     
     // If we expect 4+ total transactions and binary tree merge is enabled,
@@ -1093,8 +1094,10 @@ pub(super) async fn get_upgrade_task_from_mempool(
         && pending_proof_collection_count > 0;
     
     if skip_pair_for_binary_tree {
-        debug!(
-            "Skipping pair merge to wait for binary tree merge (expected {} txs)",
+        info!(
+            "WAITING for binary tree merge: {} SingleProofs ready, {} upgrades pending → expect {} total",
+            synced_single_proof_count,
+            pending_proof_collection_count,
             total_expected
         );
     }
