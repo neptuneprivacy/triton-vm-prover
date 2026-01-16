@@ -64,6 +64,11 @@ pub enum UpgradeJob {
         mutator_set: MutatorSetAccumulator,
         upgrade_incentive: UpgradeIncentive,
     },
+    BinaryTreeMerge {
+        transactions: Vec<(TransactionKernel, Proof)>,
+        mutator_set: MutatorSetAccumulator,
+        upgrade_incentive: UpgradeIncentive,
+    },
     UpdateMutatorSetData(UpdateMutatorSetDataJob),
 }
 
@@ -281,6 +286,10 @@ impl UpgradeJob {
                 upgrade_incentive: UpgradeIncentive::Gobble(amount),
                 ..
             } => *amount,
+            UpgradeJob::BinaryTreeMerge {
+                upgrade_incentive: UpgradeIncentive::Gobble(amount),
+                ..
+            } => *amount,
             _ => NativeCurrencyAmount::zero(),
         }
     }
@@ -302,6 +311,13 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => Timestamp::max(left_kernel.timestamp, right_kernel.timestamp),
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
+                transactions
+                    .iter()
+                    .map(|(kernel, _)| kernel.timestamp)
+                    .max()
+                    .unwrap_or(Timestamp::zero())
+            }
             UpgradeJob::UpdateMutatorSetData(update_mutator_set_data_job) => {
                 update_mutator_set_data_job.old_kernel.timestamp
             }
@@ -327,6 +343,9 @@ impl UpgradeJob {
             UpgradeJob::Merge {
                 upgrade_incentive, ..
             } => *upgrade_incentive,
+            UpgradeJob::BinaryTreeMerge {
+                upgrade_incentive, ..
+            } => *upgrade_incentive,
             UpgradeJob::UpdateMutatorSetData(UpdateMutatorSetDataJob {
                 upgrade_incentive, ..
             }) => *upgrade_incentive,
@@ -337,7 +356,7 @@ impl UpgradeJob {
     /// upgraded with this decision.
     ///
     /// Will return a list of length two in the case of merge, otherwise a list
-    /// of length one.
+    /// of length one. For binary tree merge, returns all transaction IDs.
     pub(super) fn affected_txids(&self) -> Vec<TransactionKernelId> {
         match self {
             UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
@@ -349,6 +368,9 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => vec![left_kernel.txid(), right_kernel.txid()],
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
+                transactions.iter().map(|(kernel, _)| kernel.txid()).collect()
+            }
             UpgradeJob::PrimitiveWitnessToProofCollection(pw_to_pc) => {
                 vec![pw_to_pc.primitive_witness.kernel.txid()]
             }
@@ -374,6 +396,7 @@ impl UpgradeJob {
                 ..
             }) => mutator_set.clone(),
             UpgradeJob::Merge { mutator_set, .. } => mutator_set.clone(),
+            UpgradeJob::BinaryTreeMerge { mutator_set, .. } => mutator_set.clone(),
             UpgradeJob::UpdateMutatorSetData(update_mutator_set_data_job) => {
                 let mut new_msa = update_mutator_set_data_job.old_mutator_set.clone();
                 update_mutator_set_data_job
@@ -393,6 +416,9 @@ impl UpgradeJob {
     fn double_spend_warn_msg(&self) -> &str {
         match self {
             UpgradeJob::Merge { .. } => "Maybe an input to the merge got mined already?",
+            UpgradeJob::BinaryTreeMerge { .. } => {
+                "Maybe an input to the binary tree merge got mined already?"
+            }
             UpgradeJob::PrimitiveWitnessToProofCollection { .. } => {
                 "Your own transaction already got mined?"
             }
@@ -587,6 +613,7 @@ impl UpgradeJob {
                         UpgradeJob::PrimitiveWitnessToSingleProof { .. } => unreachable!(),
                         UpgradeJob::ProofCollectionToSingleProof { .. } => unreachable!(),
                         UpgradeJob::Merge { .. } => unreachable!(),
+                        UpgradeJob::BinaryTreeMerge { .. } => unreachable!(),
                         UpgradeJob::UpdateMutatorSetData(_) => unreachable!(),
                     }
                 }
@@ -839,6 +866,82 @@ impl UpgradeJob {
                     .await?,
                 expected_utxos,
             )),
+            UpgradeJob::BinaryTreeMerge {
+                transactions,
+                ..
+            } => {
+                info!(
+                    "Proof-upgrader: Start binary tree merge of {} transactions",
+                    transactions.len()
+                );
+                
+                // Convert to Transaction objects
+                let mut txs: Vec<Transaction> = transactions
+                    .into_iter()
+                    .map(|(kernel, proof)| Transaction {
+                        kernel,
+                        proof: TransactionProof::SingleProof(proof),
+                    })
+                    .collect();
+
+                // Perform binary tree merge
+                let mut rng: StdRng =
+                    SeedableRng::from_seed(own_wallet_entropy.shuffle_seed(current_block_height.next()));
+                
+                // Binary tree merge: recursively merge pairs
+                while txs.len() > 1 {
+                    let mut next_level = Vec::new();
+                    let mut i = 0;
+                    
+                    while i < txs.len() {
+                        if i + 1 < txs.len() {
+                            // Merge pair
+                            let left = txs[i].clone();
+                            let right = txs[i + 1].clone();
+                            let shuffle_seed: [u8; 32] = rng.random();
+                            
+                            let merged = Transaction::merge_with(
+                                left,
+                                right,
+                                shuffle_seed,
+                                triton_vm_job_queue.clone(),
+                                proof_job_options.clone(),
+                                consensus_rule_set,
+                            )
+                            .await?;
+                            
+                            next_level.push(merged);
+                            i += 2;
+                        } else {
+                            // Odd one out, carry forward
+                            next_level.push(txs[i].clone());
+                            i += 1;
+                        }
+                    }
+                    
+                    txs = next_level;
+                }
+                
+                let mut ret = txs.into_iter().next().expect("Should have at least one transaction");
+                info!("Proof-upgrader, binary tree merge: Done");
+
+                // Merge with gobbler if present
+                if let Some(gobbler) = maybe_gobbler {
+                    info!("Proof-upgrader: Start merging with gobbler");
+                    ret = gobbler
+                        .merge_with(
+                            ret,
+                            gobble_shuffle_seed,
+                            triton_vm_job_queue,
+                            proof_job_options,
+                            consensus_rule_set,
+                        )
+                        .await?;
+                    info!("Proof-upgrader merging with gobbler: Done");
+                }
+
+                Ok((ret, expected_utxos))
+            }
             UpgradeJob::UpdateMutatorSetData(update_job) => {
                 let ret = update_job
                     .upgrade(triton_vm_job_queue, proof_job_options)
@@ -908,6 +1011,54 @@ pub(super) async fn get_upgrade_task_from_mempool(
         .await;
     let update_job = update_job.map(UpgradeJob::UpdateMutatorSetData);
 
+    // Can we do a binary tree merge of multiple single proofs?
+    let max_merge_count = global_state.cli().max_upgrade_merge_count.get();
+    let binary_tree_merge_job = if max_merge_count >= 3 {
+        if let Some((transactions, upgrade_priority)) = global_state
+            .mempool
+            .preferred_single_proof_batch(max_merge_count, upgrade_filter)
+        {
+            // Sanity check: all transactions must have matching mutator set hashes
+            let first_hash = transactions[0].0.mutator_set_hash;
+            if !transactions.iter().all(|(kernel, _)| kernel.mutator_set_hash == first_hash) {
+                error!(
+                    "Mempool returned transactions with mismatched mutator set hashes for binary tree merge."
+                );
+                return None;
+            }
+            if first_hash != tip_mutator_set.hash() {
+                error!(
+                    "Deprecated transactions returned by mempool for binary tree merge. This shouldn't happen."
+                );
+                return None;
+            }
+
+            let total_fee: NativeCurrencyAmount = transactions
+                .iter()
+                .map(|(kernel, _)| kernel.fee)
+                .sum();
+            let gobbling_potential = total_fee.lossy_f64_fraction_mul(gobbling_fraction);
+            let upgrade_incentive =
+                upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
+            if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+                Some(UpgradeJob::BinaryTreeMerge {
+                    transactions: transactions
+                        .into_iter()
+                        .map(|(kernel, proof)| (kernel.to_owned(), proof.to_owned()))
+                        .collect(),
+                    mutator_set: tip_mutator_set.clone(),
+                    upgrade_incentive,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Can we merge two single proofs?
     let merge_job = if let Some((
         [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
@@ -952,10 +1103,15 @@ pub(super) async fn get_upgrade_task_from_mempool(
     };
 
     // pick the most profitable option
-    let mut jobs = [proof_collection_job, merge_job, update_job]
-        .into_iter()
-        .flatten()
-        .collect_vec();
+    let mut jobs = [
+        proof_collection_job,
+        binary_tree_merge_job,
+        merge_job,
+        update_job,
+    ]
+    .into_iter()
+    .flatten()
+    .collect_vec();
     jobs.sort_by_key(|job| job.upgrade_incentive());
 
     jobs.first().cloned()

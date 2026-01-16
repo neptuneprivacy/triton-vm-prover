@@ -250,6 +250,21 @@ pub struct Args {
     #[clap(long, default_value = "1")]
     pub(crate) max_num_compose_mergers: NonZero<usize>,
 
+    /// Maximum number of parallel proof upgrade jobs that can run simultaneously.
+    ///
+    /// This allows the proof-upgrader to process multiple upgrade jobs in parallel,
+    /// increasing throughput. Default is 1 (sequential processing).
+    #[clap(long, default_value = "1")]
+    pub(crate) max_parallel_upgrades: NonZero<usize>,
+
+    /// Maximum number of single proofs to merge in a binary tree merge operation.
+    ///
+    /// When merging multiple single proofs, this sets the maximum batch size.
+    /// Higher values allow merging more transactions at once but require more
+    /// computational resources. Default is 2 (pair merge only).
+    #[clap(long, default_value = "2")]
+    pub(crate) max_upgrade_merge_count: NonZero<usize>,
+
     /// By default, a composer will share block proposals with all peers. If
     /// this flag is set, the composer will *not* share their block proposals.
     #[clap(long)]

@@ -480,6 +480,84 @@ impl Mempool {
         Some((candidates, priority))
     }
 
+    /// Returns a batch of single proof transactions for binary tree merging.
+    /// Collects up to `max_count` transactions that are synced and have SingleProof.
+    /// Returns the transactions along with their sum of priorities.
+    pub(crate) fn preferred_single_proof_batch(
+        &self,
+        max_count: usize,
+        tx_upgrade_filter: TxUpgradeFilter,
+    ) -> Option<(Vec<(TransactionKernel, Proof)>, UpgradePriority)> {
+        if max_count < 2 {
+            // For batches smaller than 2, use the pair method
+            return None;
+        }
+
+        let mut ret = vec![];
+        let mut priority = UpgradePriority::Irrelevant;
+        for candidate_txid in self
+            .upgrade_priority_iter()
+            .map(|(txid, _)| txid)
+            .chain(self.fee_density_iter().map(|(txid, _)| txid))
+        {
+            let candidate = self.tx_dictionary.get(&candidate_txid).unwrap();
+
+            if !self.tx_is_synced(&candidate.transaction.kernel) {
+                continue;
+            }
+
+            let TransactionProof::SingleProof(_) = &candidate.transaction.proof else {
+                continue;
+            };
+
+            // Do not attempt to merge transactions that neither have a value to
+            // us nor pay a fee.
+            if candidate.upgrade_priority.is_irrelevant()
+                && candidate.transaction.kernel.fee.is_zero()
+            {
+                continue;
+            }
+
+            // Avoid selecting same transaction twice.
+            if ret.contains(&candidate_txid) {
+                continue;
+            }
+
+            if candidate.upgrade_priority.is_irrelevant()
+                && !tx_upgrade_filter.matches(candidate_txid)
+            {
+                continue;
+            }
+
+            priority = priority + candidate.upgrade_priority;
+
+            ret.push(candidate_txid);
+
+            if ret.len() >= max_count {
+                break;
+            }
+        }
+
+        // Need at least 2 transactions for a merge
+        if ret.len() < 2 {
+            return None;
+        }
+
+        // Convert transaction IDs to (TransactionKernel, Proof) tuples
+        let candidates: Vec<_> = ret
+            .iter()
+            .map(|txid| {
+                let tx = &self.tx_dictionary.get(txid).unwrap().transaction;
+                (
+                    tx.kernel.to_owned(),
+                    tx.proof.to_owned().into_single_proof(),
+                )
+            })
+            .collect();
+
+        Some((candidates, priority))
+    }
+
     /// check if transaction exists in mempool
     ///
     /// Computes in O(1) from HashMap
