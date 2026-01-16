@@ -1139,9 +1139,9 @@ pub(super) async fn get_upgrade_task_from_mempool(
 
     jobs.sort_by_key(|job| job.upgrade_incentive());
 
-    if let Some(selected) = jobs.first() {
+    if let Some(selected) = jobs.last() {
         info!(
-            "Selected upgrade job type: {}",
+            "Selected upgrade job type: {} (highest priority from {} candidates)",
             match selected {
                 UpgradeJob::ProofCollectionToSingleProof(_) => "ProofCollectionToSingleProof",
                 UpgradeJob::PrimitiveWitnessToSingleProof(_) => "PrimitiveWitnessToSingleProof",
@@ -1150,13 +1150,14 @@ pub(super) async fn get_upgrade_task_from_mempool(
                 UpgradeJob::Merge { .. } => "Merge (pair)",
                 UpgradeJob::BinaryTreeMerge { .. } => "BinaryTreeMerge",
                 UpgradeJob::UpdateMutatorSetData(_) => "UpdateMutatorSetData",
-            }
+            },
+            jobs.len()
         );
     } else {
         debug!("No upgrade job candidates found");
     }
 
-    jobs.first().cloned()
+    jobs.last().cloned()
 }
 
 #[cfg(test)]

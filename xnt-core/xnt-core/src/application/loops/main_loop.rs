@@ -1636,10 +1636,20 @@ impl MainLoopHandler {
         // This is a simple cleanup - a more complete solution would track txids per-task
         if !main_loop_state.in_progress_txids.is_empty() {
             let global_state = self.global_state_lock.lock_guard().await;
+            let before_count = main_loop_state.in_progress_txids.len();
             main_loop_state.in_progress_txids.retain(|txid, _| {
                 // Keep if transaction is still in mempool (might still be upgrading)
                 global_state.mempool.contains(*txid)
             });
+            let after_count = main_loop_state.in_progress_txids.len();
+            if before_count != after_count {
+                debug!(
+                    "Cleaned up {} in-progress txid(s) ({} -> {})",
+                    before_count - after_count,
+                    before_count,
+                    after_count
+                );
+            }
         }
 
         if spawned_count > 0 {
