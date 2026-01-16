@@ -1022,6 +1022,12 @@ pub(crate) async fn mine(
     let guess_restart_timer = time::sleep(infinite);
     tokio::pin!(guess_restart_timer);
 
+    // Periodic check timer to re-evaluate conditions when neither guessing nor composing
+    // This ensures the loop doesn't get stuck when --prioritize-upgrades skips composing
+    const RECHECK_INTERVAL_SECS: u64 = 5;
+    let recheck_timer = time::sleep(Duration::from_secs(RECHECK_INTERVAL_SECS));
+    tokio::pin!(recheck_timer);
+
     let mut pause_mine = false;
     let mut wait_for_confirmation = false;
     loop {
@@ -1141,13 +1147,18 @@ pub(crate) async fn mine(
         }
 
         let compose = cli_args.compose && !should_skip_for_upgrades;
-        let mut composer_task = if !wait_for_confirmation
+        let should_compose = !wait_for_confirmation
             && compose
             && guesser_task.is_none()
             && !is_syncing
             && !pause_mine
-            && is_connected
-        {
+            && is_connected;
+
+        let mut composer_task: Option<JoinHandle<Result<()>>> = if should_compose {
+            info!(
+                "Starting compose: {} SingleProof tx(s), {} tx(s) needing upgrade",
+                single_proof_count, upgrades_needed
+            );
             global_state_lock.set_mining_status_to_composing().await;
 
             let latest_block = global_state_lock
@@ -1161,10 +1172,17 @@ pub(crate) async fn mine(
                 Timestamp::now(),
             );
 
-            tokio::task::spawn(compose_task)
+            Some(tokio::task::spawn(compose_task))
         } else {
-            tokio::spawn(async { Ok(()) })
+            None
         };
+
+        // Reset recheck timer - this ensures the loop re-evaluates conditions
+        // periodically even when neither guessing nor composing (e.g., when
+        // --prioritize-upgrades is waiting for upgrades/merges to complete)
+        recheck_timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + Duration::from_secs(RECHECK_INTERVAL_SECS));
 
         let mut restart_guessing = false;
         let mut stop_guessing = false;
@@ -1173,12 +1191,23 @@ pub(crate) async fn mine(
         let mut composition_result_received = false;
 
         // Await a message from either the worker task or from the main loop,
-        // or the restart of the guesser-task.
+        // or the restart of the guesser-task, or the periodic recheck timer.
         select! {
             _ = &mut guess_restart_timer => {
                 restart_guessing = true;
             }
-            Ok(Err(e)) = &mut composer_task => {
+            _ = &mut recheck_timer => {
+                // Periodic recheck - just continue to re-evaluate conditions at top of loop
+                // This is especially important when --prioritize-upgrades is waiting for
+                // upgrades/merges to complete before starting composing
+                trace!("Recheck timer triggered - re-evaluating mine loop conditions");
+            }
+            Ok(Err(e)) = async { 
+                match &mut composer_task {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
 
                 match e.root_cause().downcast_ref::<CreateProofError>() {
                     // address issue 579.
@@ -1356,14 +1385,16 @@ pub(crate) async fn mine(
             // and worth completing to avoid wasting the Level 1 work.
             let level1_complete = global_state_lock.is_binary_merge_level1_complete().await;
 
-            if !composer_task.is_finished() && !composition_result_received {
-                if level1_complete {
-                    // Level 1 is done, Level 2 is typically fast - let it complete
-                    // to avoid wasting the parallel merge work from Level 1
-                    info!("Binary merge Level 1 complete - allowing Level 2 to finish (not cancelling)");
-                } else {
-                    cancel_compose_tx.send(())?;
-                    debug!("Cancel signal sent to composer worker.");
+            if let Some(ref task) = composer_task {
+                if !task.is_finished() && !composition_result_received {
+                    if level1_complete {
+                        // Level 1 is done, Level 2 is typically fast - let it complete
+                        // to avoid wasting the parallel merge work from Level 1
+                        info!("Binary merge Level 1 complete - allowing Level 2 to finish (not cancelling)");
+                    } else {
+                        cancel_compose_tx.send(())?;
+                        debug!("Cancel signal sent to composer worker.");
+                    }
                 }
             }
             // avoid duplicate call if stop_guessing is also true.
