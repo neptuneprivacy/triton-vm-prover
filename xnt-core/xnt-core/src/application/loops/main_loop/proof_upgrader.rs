@@ -10,11 +10,13 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+use tokio::sync::mpsc;
 
 use crate::api::tx_initiation::builder::transaction_proof_builder::TransactionProofBuilder;
 use crate::api::tx_initiation::builder::triton_vm_proof_job_options_builder::TritonVmProofJobOptionsBuilder;
 use crate::application::config::fee_notification_policy::FeeNotificationPolicy;
 use crate::application::config::network::Network;
+use crate::application::loops::channel::MainToMiner;
 use crate::application::loops::main_loop::upgrade_incentive::UpgradeIncentive;
 use crate::application::triton_vm_job_queue::TritonVmJobPriority;
 use crate::application::triton_vm_job_queue::TritonVmJobQueue;
@@ -441,6 +443,7 @@ impl UpgradeJob {
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
         mut global_state_lock: GlobalStateLock,
         main_to_peer_channel: tokio::sync::broadcast::Sender<MainToPeerTask>,
+        main_to_miner_channel: Option<mpsc::Sender<MainToMiner>>,
     ) {
         let mut upgrade_job = self;
 
@@ -529,6 +532,13 @@ impl UpgradeJob {
                         let verbose_log_msg = upgrade_job.double_spend_warn_msg();
                         warn!("Upgraded transaction is no longer confirmable. {verbose_log_msg}");
                         global_state.mempool_remove(upgraded.kernel.txid()).await;
+
+                        // Mempool changed (tx removed). Notify miner so it can re-evaluate composing.
+                        if let Some(channel) = &main_to_miner_channel {
+                            if let Err(e) = channel.try_send(MainToMiner::MempoolChanged) {
+                                debug!("Failed to notify miner about mempool change: {e}");
+                            }
+                        }
                         return;
                     }
 
@@ -538,6 +548,14 @@ impl UpgradeJob {
                     global_state
                         .mempool_insert(upgraded.clone(), upgrade_incentive.into())
                         .await;
+
+                    // Mempool changed (tx inserted/upgraded/merged). Notify miner so it can
+                    // cancel composing if `--prioritize-upgrades` conditions become true.
+                    if let Some(channel) = &main_to_miner_channel {
+                        if let Err(e) = channel.try_send(MainToMiner::MempoolChanged) {
+                            debug!("Failed to notify miner about mempool change: {e}");
+                        }
+                    }
 
                     global_state
                         .wallet_state
@@ -1326,6 +1344,7 @@ mod tests {
                     TritonVmJobQueue::get_instance(),
                     alice.clone(),
                     main_to_peer_tx,
+                    None,
                 )
                 .await;
 
@@ -1433,6 +1452,7 @@ mod tests {
                     TritonVmJobQueue::get_instance(),
                     alice.clone(),
                     main_to_peer_tx,
+                    None,
                 )
                 .await;
 
@@ -1565,6 +1585,7 @@ mod tests {
                 TritonVmJobQueue::get_instance(),
                 alice.clone(),
                 main_to_peer_tx.clone(),
+                None,
             )
             .await;
 

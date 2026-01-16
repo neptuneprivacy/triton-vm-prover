@@ -5015,7 +5015,7 @@ pub(crate) mod tests {
             let (channel_to_nowhere_one, nowhere_one) =
                 broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
             upgrade_job_one
-                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_one)
+                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_one, None)
                 .await;
             drop(nowhere_one); // drop must occur after message is sent
 
@@ -5074,7 +5074,7 @@ pub(crate) mod tests {
             let (channel_to_nowhere_two, nowhere_two) =
                 broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
             upgrade_job_two
-                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_two)
+                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_two, None)
                 .await;
             drop(nowhere_two); // drop must occur after message is sent
 

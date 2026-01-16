@@ -636,6 +636,10 @@ impl MainLoopHandler {
             }
         }
 
+        // Mempool was updated (tx removed/updated/inserted). Notify miner so it can
+        // re-evaluate whether to keep composing or prioritize upgrades/merges.
+        self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
+
         // Tell miner that it can now continue either composing or guessing.
         self.main_to_miner_tx.send(MainToMiner::Continue);
     }
@@ -1043,6 +1047,10 @@ impl MainLoopHandler {
                         )
                         .await;
                 }
+
+                // Transaction was added to mempool. Notify miner so it can cancel composing
+                // if `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 let is_nop = pt2m_transaction.transaction.kernel.inputs.is_empty()
                     && pt2m_transaction.transaction.kernel.outputs.is_empty()
@@ -1628,12 +1636,14 @@ impl MainLoopHandler {
             let vm_job_queue_clone = vm_job_queue.clone();
             let global_state_lock_clone = self.global_state_lock.clone();
             let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+            let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
             let proof_upgrader_task = tokio::task::spawn(async move {
                 upgrade_candidate
                     .handle_upgrade(
                         vm_job_queue_clone,
                         global_state_lock_clone,
                         main_to_peer_broadcast_tx_clone,
+                        main_to_miner_tx_clone,
                     )
                     .await;
             });
@@ -2025,12 +2035,14 @@ impl MainLoopHandler {
 
                     let global_state_lock_clone = self.global_state_lock.clone();
                     let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+                    let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
                     let _proof_upgrader_task = tokio::task::spawn(async move {
                         upgrade_job
                             .handle_upgrade(
                                 vm_job_queue.clone(),
                                 global_state_lock_clone,
                                 main_to_peer_broadcast_tx_clone,
+                                main_to_miner_tx_clone,
                             )
                             .await
                     });
@@ -2047,6 +2059,7 @@ impl MainLoopHandler {
                 let vm_job_queue = vm_job_queue();
                 let global_state_lock_clone = self.global_state_lock.clone();
                 let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+                let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
                 info!(
                     "Attempting to upgrade transactions: {}",
                     upgrade_job.affected_txids().iter().join(", ")
@@ -2057,6 +2070,7 @@ impl MainLoopHandler {
                             vm_job_queue,
                             global_state_lock_clone,
                             main_to_peer_broadcast_tx_clone,
+                            main_to_miner_tx_clone,
                         )
                         .await
                 });
@@ -2177,6 +2191,10 @@ impl MainLoopHandler {
                         .mempool_insert(*transaction, UpgradePriority::Critical)
                         .await;
                 }
+
+                // Transaction was added to mempool via RPC. Notify miner so it can cancel composing
+                // if `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 // If transaction can be sent thru P2P, submit instantly.
                 // This might be mempools responsibility but for now...

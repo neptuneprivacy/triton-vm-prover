@@ -1177,16 +1177,12 @@ pub(crate) async fn mine(
             None
         };
 
-        // Reset recheck timer - when idle, check frequently (5s) for upgrade completion.
-        // When composing with --prioritize-upgrades, check periodically (10s) for new
-        // transactions that may need upgrading, so we can cancel compose if needed.
-        // When guessing, disable the timer (guessing has its own restart mechanism).
-        let recheck_interval = if guesser_task.is_some() {
-            infinite // Guessing has its own timer
-        } else if composer_task.is_some() && cli_args.prioritize_upgrades {
-            Duration::from_secs(10) // Check for new txs needing upgrade while composing
-        } else if composer_task.is_some() {
-            infinite // Composing without prioritize_upgrades - don't interrupt
+        // Reset recheck timer - only active when idle (neither composing nor guessing).
+        // This checks for upgrade completion so we can start composing.
+        // When composing or guessing, disable the timer to avoid interrupting the work.
+        // NOTE: New transactions arriving will still interrupt via main_loop messages.
+        let recheck_interval = if guesser_task.is_some() || composer_task.is_some() {
+            infinite // Working - don't interrupt with timer
         } else {
             Duration::from_secs(RECHECK_INTERVAL_SECS) // Idle - check for upgrade completion
         };
@@ -1207,31 +1203,9 @@ pub(crate) async fn mine(
                 restart_guessing = true;
             }
             _ = &mut recheck_timer => {
-                // Periodic recheck - check if we should stop composing for upgrades
-                // or if upgrade work completed and we can start composing
-                if cli_args.prioritize_upgrades && composer_task.is_some() {
-                    // Check if new transactions arrived that need upgrading
-                    let (new_single_proof_count, new_upgrades_needed) = global_state_lock
-                        .lock(|s| {
-                            (
-                                s.mempool.count_synced_single_proof_transactions(),
-                                s.mempool.count_transactions_needing_upgrade(),
-                            )
-                        })
-                        .await;
-                    
-                    if new_single_proof_count >= 2 || new_upgrades_needed > 0 {
-                        info!(
-                            "Stopping compose to prioritize upgrades: {} SingleProof tx(s), {} tx(s) needing upgrade",
-                            new_single_proof_count, new_upgrades_needed
-                        );
-                        stop_composing = true;
-                    } else {
-                        trace!("Recheck: still composing, no new upgrades needed");
-                    }
-                } else {
-                    trace!("Recheck timer triggered - re-evaluating mine loop conditions");
-                }
+                // Periodic recheck - only fires when idle (not composing/guessing).
+                // Re-evaluate conditions at top of loop to see if we can start composing.
+                trace!("Recheck timer triggered - re-evaluating mine loop conditions");
             }
             Ok(Err(e)) = async { 
                 match &mut composer_task {
@@ -1294,6 +1268,31 @@ pub(crate) async fn mine(
                 debug!("Miner received message type: {}", main_message.get_type());
 
                 match main_message {
+                    MainToMiner::MempoolChanged => {
+                        // Re-evaluate whether composing should be stopped to prioritize upgrades/merges.
+                        // This allows immediate reaction to new tx arrivals or proof upgrades while composing.
+                        if cli_args.prioritize_upgrades {
+                            let (single_proof_count, upgrades_needed) = global_state_lock
+                                .lock(|s| {
+                                    (
+                                        s.mempool.count_synced_single_proof_transactions(),
+                                        s.mempool.count_transactions_needing_upgrade(),
+                                    )
+                                })
+                                .await;
+
+                            let should_stop_for_upgrades =
+                                single_proof_count >= 2 || upgrades_needed > 0;
+
+                            if should_stop_for_upgrades && composer_task.is_some() {
+                                info!(
+                                    "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (prioritize_upgrades enabled)",
+                                    single_proof_count, upgrades_needed
+                                );
+                                stop_composing = true;
+                            }
+                        }
+                    }
                     MainToMiner::Shutdown => {
                         debug!("Miner shutting down.");
 
