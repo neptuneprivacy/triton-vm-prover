@@ -76,7 +76,7 @@ const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(2 * 60);
 const SYNC_REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 const MEMPOOL_PRUNE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MP_RESYNC_INTERVAL: Duration = Duration::from_secs(59);
-const PROOF_UPGRADE_INTERVAL: Duration = Duration::from_secs(10);
+const PROOF_UPGRADE_INTERVAL: Duration = Duration::from_secs(2);
 const EXPECTED_UTXOS_PRUNE_INTERVAL: Duration = Duration::from_secs(19 * 60);
 
 const SANCTION_PEER_TIMEOUT_FACTOR: u64 = 40;
