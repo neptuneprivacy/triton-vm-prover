@@ -114,10 +114,17 @@ fi
 #   When >=3, enables binary tree merging for efficient multi-tx processing.
 #   Set to 2 for pair-only merging, or higher (4, 8) for batch merging.
 #
+# --prioritize-upgrades
+#   When set, skip composing if there are 2+ SingleProof transactions in mempool.
+#   This prioritizes proof upgrading and merging over composing, allowing more
+#   transactions to be consolidated before creating a block.
+#   Only compose when there's 0-1 SingleProof transactions left.
+#
 exec "$XNT_CORE_PATH" \
   --network testnet \
   --compose \
   --guess \
+  --prioritize-upgrades \
   --max-num-compose-mergers 1 \
   --max-parallel-upgrades 4 \
   --max-upgrade-merge-count 8 \

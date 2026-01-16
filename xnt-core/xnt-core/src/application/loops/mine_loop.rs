@@ -1110,7 +1110,19 @@ pub(crate) async fn mine(
 
         let (cancel_compose_tx, cancel_compose_rx) = tokio::sync::watch::channel(());
 
-        let compose = cli_args.compose;
+        // Check if we should skip composing to prioritize upgrades/merges
+        let single_proof_count = global_state_lock
+            .lock(|s| s.mempool.count_synced_single_proof_transactions())
+            .await;
+        let should_skip_for_upgrades = cli_args.prioritize_upgrades && single_proof_count >= 2;
+        if should_skip_for_upgrades {
+            tracing::info!(
+                "Skipping compose: {} SingleProof txs in mempool (prioritize_upgrades enabled)",
+                single_proof_count
+            );
+        }
+
+        let compose = cli_args.compose && !should_skip_for_upgrades;
         let mut composer_task = if !wait_for_confirmation
             && compose
             && guesser_task.is_none()
