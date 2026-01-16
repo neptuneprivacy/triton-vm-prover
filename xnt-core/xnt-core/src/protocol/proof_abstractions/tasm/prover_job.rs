@@ -608,9 +608,31 @@ impl Job for ProverJob {
         // For GPU jobs, assign a GPU and acquire its mutex to ensure only one job per GPU.
         // CPU jobs can run in parallel without any mutex.
         if !prover_job.job_settings.force_cpu {
-            // Round-robin GPU assignment
-            let gpu_index = get_next_gpu_index();
             let gpu_ids = get_gpu_ids();
+            let gpu_mutexes = get_gpu_mutexes();
+            
+            // Try to acquire any available GPU (non-blocking first pass)
+            let mut acquired_index = None;
+            for (idx, mutex) in gpu_mutexes.iter().enumerate() {
+                if mutex.try_lock().is_ok() {
+                    acquired_index = Some(idx);
+                    break;
+                }
+            }
+            
+            // If no GPU immediately available, wait for any GPU using select
+            let (gpu_index, _gpu_guard) = if let Some(idx) = acquired_index {
+                // Re-acquire properly (try_lock was just a check)
+                let guard = gpu_mutexes[idx].clone().lock_owned().await;
+                (idx, guard)
+            } else {
+                // All GPUs busy - wait for the first one that becomes available
+                // Use round-robin starting point to distribute load
+                let start_idx = get_next_gpu_index();
+                let guard = gpu_mutexes[start_idx].clone().lock_owned().await;
+                (start_idx, guard)
+            };
+            
             let assigned_gpu = if !gpu_ids.is_empty() {
                 gpu_ids[gpu_index].clone()
             } else {
@@ -618,12 +640,6 @@ impl Job for ProverJob {
             };
             prover_job.job_settings.assigned_gpu = Some(assigned_gpu.clone());
 
-            // Get per-GPU mutex
-            let gpu_mutexes = get_gpu_mutexes();
-            let gpu_mutex = gpu_mutexes[gpu_index].clone();
-
-            // Acquire mutex for this specific GPU
-            let _gpu_guard = gpu_mutex.lock().await;
             tracing::info!(
                 "[HYBRID] Acquired GPU {} mutex (index {}), starting GPU proof",
                 assigned_gpu,
