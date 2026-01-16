@@ -1177,20 +1177,22 @@ pub(crate) async fn mine(
             None
         };
 
-        // Reset recheck timer ONLY when neither guessing nor composing.
-        // This ensures the loop re-evaluates conditions periodically when idle
-        // (e.g., when --prioritize-upgrades is waiting for upgrades/merges to complete)
-        // but doesn't interrupt ongoing composition or guessing work.
-        if guesser_task.is_none() && composer_task.is_none() {
-            recheck_timer
-                .as_mut()
-                .reset(tokio::time::Instant::now() + Duration::from_secs(RECHECK_INTERVAL_SECS));
+        // Reset recheck timer - when idle, check frequently (5s) for upgrade completion.
+        // When composing with --prioritize-upgrades, check periodically (10s) for new
+        // transactions that may need upgrading, so we can cancel compose if needed.
+        // When guessing, disable the timer (guessing has its own restart mechanism).
+        let recheck_interval = if guesser_task.is_some() {
+            infinite // Guessing has its own timer
+        } else if composer_task.is_some() && cli_args.prioritize_upgrades {
+            Duration::from_secs(10) // Check for new txs needing upgrade while composing
+        } else if composer_task.is_some() {
+            infinite // Composing without prioritize_upgrades - don't interrupt
         } else {
-            // Disable recheck timer when actively working - set it to far future
-            recheck_timer
-                .as_mut()
-                .reset(tokio::time::Instant::now() + infinite);
-        }
+            Duration::from_secs(RECHECK_INTERVAL_SECS) // Idle - check for upgrade completion
+        };
+        recheck_timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + recheck_interval);
 
         let mut restart_guessing = false;
         let mut stop_guessing = false;
@@ -1205,10 +1207,31 @@ pub(crate) async fn mine(
                 restart_guessing = true;
             }
             _ = &mut recheck_timer => {
-                // Periodic recheck - just continue to re-evaluate conditions at top of loop
-                // This is especially important when --prioritize-upgrades is waiting for
-                // upgrades/merges to complete before starting composing
-                trace!("Recheck timer triggered - re-evaluating mine loop conditions");
+                // Periodic recheck - check if we should stop composing for upgrades
+                // or if upgrade work completed and we can start composing
+                if cli_args.prioritize_upgrades && composer_task.is_some() {
+                    // Check if new transactions arrived that need upgrading
+                    let (new_single_proof_count, new_upgrades_needed) = global_state_lock
+                        .lock(|s| {
+                            (
+                                s.mempool.count_synced_single_proof_transactions(),
+                                s.mempool.count_transactions_needing_upgrade(),
+                            )
+                        })
+                        .await;
+                    
+                    if new_single_proof_count >= 2 || new_upgrades_needed > 0 {
+                        info!(
+                            "Stopping compose to prioritize upgrades: {} SingleProof tx(s), {} tx(s) needing upgrade",
+                            new_single_proof_count, new_upgrades_needed
+                        );
+                        stop_composing = true;
+                    } else {
+                        trace!("Recheck: still composing, no new upgrades needed");
+                    }
+                } else {
+                    trace!("Recheck timer triggered - re-evaluating mine loop conditions");
+                }
             }
             Ok(Err(e)) = async { 
                 match &mut composer_task {
