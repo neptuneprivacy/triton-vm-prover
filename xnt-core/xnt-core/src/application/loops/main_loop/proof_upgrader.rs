@@ -6,6 +6,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use tasm_lib::prelude::Digest;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -311,13 +312,11 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => Timestamp::max(left_kernel.timestamp, right_kernel.timestamp),
-            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
-                transactions
-                    .iter()
-                    .map(|(kernel, _)| kernel.timestamp)
-                    .max()
-                    .unwrap_or(Timestamp::zero())
-            }
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => transactions
+                .iter()
+                .map(|(kernel, _)| kernel.timestamp)
+                .max()
+                .unwrap_or(Timestamp::zero()),
             UpgradeJob::UpdateMutatorSetData(update_mutator_set_data_job) => {
                 update_mutator_set_data_job.old_kernel.timestamp
             }
@@ -368,9 +367,10 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => vec![left_kernel.txid(), right_kernel.txid()],
-            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
-                transactions.iter().map(|(kernel, _)| kernel.txid()).collect()
-            }
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => transactions
+                .iter()
+                .map(|(kernel, _)| kernel.txid())
+                .collect(),
             UpgradeJob::PrimitiveWitnessToProofCollection(pw_to_pc) => {
                 vec![pw_to_pc.primitive_witness.kernel.txid()]
             }
@@ -866,15 +866,12 @@ impl UpgradeJob {
                     .await?,
                 expected_utxos,
             )),
-            UpgradeJob::BinaryTreeMerge {
-                transactions,
-                ..
-            } => {
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
                 info!(
                     "Proof-upgrader: Start binary tree merge of {} transactions",
                     transactions.len()
                 );
-                
+
                 // Convert to Transaction objects
                 let mut txs: Vec<Transaction> = transactions
                     .into_iter()
@@ -885,21 +882,22 @@ impl UpgradeJob {
                     .collect();
 
                 // Perform binary tree merge
-                let mut rng: StdRng =
-                    SeedableRng::from_seed(own_wallet_entropy.shuffle_seed(current_block_height.next()));
-                
+                let mut rng: StdRng = SeedableRng::from_seed(
+                    own_wallet_entropy.shuffle_seed(current_block_height.next()),
+                );
+
                 // Binary tree merge: recursively merge pairs
                 while txs.len() > 1 {
                     let mut next_level = Vec::new();
                     let mut i = 0;
-                    
+
                     while i < txs.len() {
                         if i + 1 < txs.len() {
                             // Merge pair
                             let left = txs[i].clone();
                             let right = txs[i + 1].clone();
                             let shuffle_seed: [u8; 32] = rng.random();
-                            
+
                             let merged = Transaction::merge_with(
                                 left,
                                 right,
@@ -909,7 +907,7 @@ impl UpgradeJob {
                                 consensus_rule_set,
                             )
                             .await?;
-                            
+
                             next_level.push(merged);
                             i += 2;
                         } else {
@@ -918,11 +916,14 @@ impl UpgradeJob {
                             i += 1;
                         }
                     }
-                    
+
                     txs = next_level;
                 }
-                
-                let mut ret = txs.into_iter().next().expect("Should have at least one transaction");
+
+                let mut ret = txs
+                    .into_iter()
+                    .next()
+                    .expect("Should have at least one transaction");
                 info!("Proof-upgrader, binary tree merge: Done");
 
                 // Merge with gobbler if present
@@ -1013,6 +1014,13 @@ pub(super) async fn get_upgrade_task_from_mempool(
 
     // Can we do a binary tree merge of multiple single proofs?
     let max_merge_count = global_state.cli().max_upgrade_merge_count.get();
+    debug!(
+        "Checking for binary tree merge: max_merge_count={}, synced_single_proof_count={}",
+        max_merge_count,
+        global_state
+            .mempool
+            .count_synced_single_proof_transactions()
+    );
     let binary_tree_merge_job = if max_merge_count >= 3 {
         if let Some((transactions, upgrade_priority)) = global_state
             .mempool
@@ -1020,7 +1028,10 @@ pub(super) async fn get_upgrade_task_from_mempool(
         {
             // Sanity check: all transactions must have matching mutator set hashes
             let first_hash = transactions[0].0.mutator_set_hash;
-            if !transactions.iter().all(|(kernel, _)| kernel.mutator_set_hash == first_hash) {
+            if !transactions
+                .iter()
+                .all(|(kernel, _)| kernel.mutator_set_hash == first_hash)
+            {
                 error!(
                     "Mempool returned transactions with mismatched mutator set hashes for binary tree merge."
                 );
@@ -1033,10 +1044,8 @@ pub(super) async fn get_upgrade_task_from_mempool(
                 return None;
             }
 
-            let total_fee: NativeCurrencyAmount = transactions
-                .iter()
-                .map(|(kernel, _)| kernel.fee)
-                .sum();
+            let total_fee: NativeCurrencyAmount =
+                transactions.iter().map(|(kernel, _)| kernel.fee).sum();
             let gobbling_potential = total_fee.lossy_f64_fraction_mul(gobbling_fraction);
             let upgrade_incentive =
                 upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
@@ -1060,6 +1069,12 @@ pub(super) async fn get_upgrade_task_from_mempool(
     };
 
     // Can we merge two single proofs?
+    debug!(
+        "Checking for pair merge: synced_single_proof_count={}",
+        global_state
+            .mempool
+            .count_synced_single_proof_transactions()
+    );
     let merge_job = if let Some((
         [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
         upgrade_priority,
@@ -1112,7 +1127,34 @@ pub(super) async fn get_upgrade_task_from_mempool(
     .into_iter()
     .flatten()
     .collect_vec();
+
+    debug!(
+        "Upgrade job candidates: {} total (proof_collection={}, binary_tree_merge={}, merge={}, update={})",
+        jobs.len(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::ProofCollectionToSingleProof(_))).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::BinaryTreeMerge { .. })).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::Merge { .. })).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::UpdateMutatorSetData(_))).count(),
+    );
+
     jobs.sort_by_key(|job| job.upgrade_incentive());
+
+    if let Some(selected) = jobs.first() {
+        info!(
+            "Selected upgrade job type: {}",
+            match selected {
+                UpgradeJob::ProofCollectionToSingleProof(_) => "ProofCollectionToSingleProof",
+                UpgradeJob::PrimitiveWitnessToSingleProof(_) => "PrimitiveWitnessToSingleProof",
+                UpgradeJob::PrimitiveWitnessToProofCollection(_) =>
+                    "PrimitiveWitnessToProofCollection",
+                UpgradeJob::Merge { .. } => "Merge (pair)",
+                UpgradeJob::BinaryTreeMerge { .. } => "BinaryTreeMerge",
+                UpgradeJob::UpdateMutatorSetData(_) => "UpdateMutatorSetData",
+            }
+        );
+    } else {
+        debug!("No upgrade job candidates found");
+    }
 
     jobs.first().cloned()
 }

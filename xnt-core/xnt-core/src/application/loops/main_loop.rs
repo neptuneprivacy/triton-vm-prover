@@ -1594,7 +1594,10 @@ impl MainLoopHandler {
             };
 
             let Some((upgrade_candidate, affected_txids)) = upgrade_result else {
-                continue;
+                // Break instead of continue: if the best candidate is already in progress,
+                // calling get_upgrade_task_from_mempool again will return the same candidate.
+                // We should wait for the current tasks to finish before trying again.
+                break;
             };
 
             info!(
@@ -1606,7 +1609,6 @@ impl MainLoopHandler {
             // like mining, or proving our own transaction. Running the prover takes
             // a long time (minutes), so we spawn a task for this such that we do
             // not block the main loop.
-            let affected_txids_for_cleanup = affected_txids.clone();
             let vm_job_queue_clone = vm_job_queue.clone();
             let global_state_lock_clone = self.global_state_lock.clone();
             let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
@@ -1618,7 +1620,7 @@ impl MainLoopHandler {
                         main_to_peer_broadcast_tx_clone,
                     )
                     .await;
-                
+
                 // Note: In-progress tracking cleanup happens when task finishes
                 // We'll clean this up in the next iteration when we check finished tasks
             });
