@@ -20,6 +20,7 @@ XNT_CORE_PATH="${XNT_CORE_PATH:-$SCRIPT_DIR/xnt-core/target/release/xnt-core}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"  # Use GPU 0 and 1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-64}"
 export TRITON_OMP_INIT="${TRITON_OMP_INIT:-0}"
+export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-4}"  # Max parallel CPU proof jobs
 
 # GPU optimization settings - Performance tuning for GPU prover
 export TRITON_AUX_CPU="${TRITON_AUX_CPU:-1}"                     # Use CPU for auxiliary tables
@@ -55,6 +56,7 @@ echo "  OMP Threads:    $OMP_NUM_THREADS"
 echo "  OMP Init:       $TRITON_OMP_INIT"
 echo "  Taskflow:       $TVM_USE_TASKFLOW"
 echo "  TBB:            $TVM_USE_TBB"
+echo "  Max CPU Jobs:   $TRITON_VM_MAX_CPU_JOBS"
 echo ""
 echo "GPU Optimizations:"
 echo "  Degree Lower:   $TRITON_GPU_DEGREE_LOWERING"
