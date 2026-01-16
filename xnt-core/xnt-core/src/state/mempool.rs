@@ -913,18 +913,6 @@ impl Mempool {
             .count()
     }
 
-    /// Return the count of transactions backed by ProofCollection.
-    /// These are transactions that will be upgraded to SingleProof.
-    /// Used to determine if we should wait for more SingleProofs before merging.
-    ///
-    /// Computes in O(n)
-    pub fn count_proof_collection_transactions(&self) -> usize {
-        self.tx_dictionary
-            .values()
-            .filter(|tx| matches!(&tx.transaction.proof, TransactionProof::ProofCollection(_)))
-            .count()
-    }
-
     /// Return a vector with copies of the transactions, in descending order by
     /// fee density. Only returns transactions that are
     /// - backed by single proofs, and
