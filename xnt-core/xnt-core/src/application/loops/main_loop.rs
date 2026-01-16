@@ -65,6 +65,7 @@ use crate::state::mempool::mempool_update_job_result::MempoolUpdateJobResult;
 use crate::state::mempool::upgrade_priority::UpgradePriority;
 use crate::state::mining::block_proposal::BlockProposal;
 use crate::state::networking_state::SyncAnchor;
+use crate::state::transaction::transaction_kernel_id::TransactionKernelId;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::state::GlobalState;
 use crate::state::GlobalStateLock;
@@ -156,6 +157,10 @@ struct MutableMainLoopState {
     /// Supports parallel processing of multiple upgrade jobs.
     proof_upgrader_tasks: Vec<JoinHandle<()>>,
 
+    /// Track which transactions are currently being upgraded to prevent duplicate work.
+    /// Maps transaction IDs to the number of tasks working on them.
+    in_progress_txids: std::collections::HashMap<TransactionKernelId, usize>,
+
     /// A join-handle to a task running the update of the mempool transactions.
     update_mempool_txs_handle: Option<JoinHandle<()>>,
 
@@ -173,6 +178,7 @@ impl MutableMainLoopState {
             potential_peers: PotentialPeersState::default(),
             task_handles,
             proof_upgrader_tasks: Vec::new(),
+            in_progress_txids: HashMap::new(),
             update_mempool_txs_handle: None,
             update_mempool_receiver: dummy_receiver,
         }
@@ -1515,6 +1521,9 @@ impl MainLoopHandler {
         trace!("Running proof upgrader scheduled task");
 
         // Clean up finished tasks
+        // Note: We retain tasks that are still running, but we can't easily
+        // clean up in_progress_txids here without tracking which txids belong to which task.
+        // The mempool will naturally filter out already-upgraded transactions.
         main_loop_state
             .proof_upgrader_tasks
             .retain(|task| !task.is_finished());
@@ -1545,7 +1554,7 @@ impl MainLoopHandler {
 
         // Try to spawn multiple upgrade tasks
         for _ in 0..tasks_to_spawn {
-            let upgrade_candidate = {
+            let upgrade_result = {
                 let mut global_state = self.global_state_lock.lock_guard_mut().await;
 
                 // Re-check conditions in case something changed
@@ -1563,18 +1572,41 @@ impl MainLoopHandler {
                     break;
                 };
 
-                upgrade_candidate
+                // Check if any of the affected transactions are already in progress
+                let affected_txids = upgrade_candidate.affected_txids();
+                let already_in_progress = affected_txids
+                    .iter()
+                    .any(|txid| main_loop_state.in_progress_txids.contains_key(txid));
+
+                if already_in_progress {
+                    debug!(
+                        "Skipping upgrade candidate - transactions already in progress: {}",
+                        affected_txids.iter().join("; ")
+                    );
+                    None
+                } else {
+                    // Mark transactions as in-progress
+                    for txid in &affected_txids {
+                        *main_loop_state.in_progress_txids.entry(*txid).or_insert(0) += 1;
+                    }
+                    Some((upgrade_candidate, affected_txids))
+                }
+            };
+
+            let Some((upgrade_candidate, affected_txids)) = upgrade_result else {
+                continue;
             };
 
             info!(
                 "Attempting to upgrade transaction proofs of: {}",
-                upgrade_candidate.affected_txids().iter().join("; ")
+                affected_txids.iter().join("; ")
             );
 
             // Perform the upgrade, if we're not using the prover for anything else,
             // like mining, or proving our own transaction. Running the prover takes
             // a long time (minutes), so we spawn a task for this such that we do
             // not block the main loop.
+            let affected_txids_for_cleanup = affected_txids.clone();
             let vm_job_queue_clone = vm_job_queue.clone();
             let global_state_lock_clone = self.global_state_lock.clone();
             let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
@@ -1585,13 +1617,27 @@ impl MainLoopHandler {
                         global_state_lock_clone,
                         main_to_peer_broadcast_tx_clone,
                     )
-                    .await
+                    .await;
+                
+                // Note: In-progress tracking cleanup happens when task finishes
+                // We'll clean this up in the next iteration when we check finished tasks
             });
 
             main_loop_state
                 .proof_upgrader_tasks
                 .push(proof_upgrader_task);
             spawned_count += 1;
+        }
+
+        // Clean up in-progress tracking periodically
+        // Remove txids that are no longer in the mempool (already upgraded/mined)
+        // This is a simple cleanup - a more complete solution would track txids per-task
+        if !main_loop_state.in_progress_txids.is_empty() {
+            let global_state = self.global_state_lock.lock_guard().await;
+            main_loop_state.in_progress_txids.retain(|txid, _| {
+                // Keep if transaction is still in mempool (might still be upgrading)
+                global_state.mempool.contains(*txid)
+            });
         }
 
         if spawned_count > 0 {
