@@ -143,6 +143,9 @@ pub struct MainLoopHandler {
     mock_now: Option<SystemTime>,
 }
 
+/// Channel capacity for upgrade completion signals
+const UPGRADE_COMPLETION_CHANNEL_CAPACITY: usize = 64;
+
 /// The mutable part of the main loop function
 struct MutableMainLoopState {
     /// Information used to batch-download blocks.
@@ -169,12 +172,19 @@ struct MutableMainLoopState {
     /// A channel that the task updating mempool transactions can use to
     /// communicate its result.
     update_mempool_receiver: mpsc::Receiver<Vec<MempoolUpdateJobResult>>,
+
+    /// Channel for signaling when an upgrade task completes, so we can
+    /// immediately look for more work instead of waiting for the next timer tick.
+    upgrade_completion_sender: mpsc::Sender<()>,
+    upgrade_completion_receiver: mpsc::Receiver<()>,
 }
 
 impl MutableMainLoopState {
     fn new(task_handles: Vec<JoinHandle<()>>) -> Self {
         let (_dummy_sender, dummy_receiver) =
             mpsc::channel::<Vec<MempoolUpdateJobResult>>(TX_UPDATER_CHANNEL_CAPACITY);
+        let (upgrade_completion_sender, upgrade_completion_receiver) =
+            mpsc::channel::<()>(UPGRADE_COMPLETION_CHANNEL_CAPACITY);
         Self {
             sync_state: SyncState::default(),
             potential_peers: PotentialPeersState::default(),
@@ -183,6 +193,8 @@ impl MutableMainLoopState {
             in_progress_txids: HashSet::new(),
             update_mempool_txs_handle: None,
             update_mempool_receiver: dummy_receiver,
+            upgrade_completion_sender,
+            upgrade_completion_receiver,
         }
     }
 }
@@ -1618,6 +1630,7 @@ impl MainLoopHandler {
             let global_state_lock_clone = self.global_state_lock.clone();
             let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
             let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
+            let completion_sender = main_loop_state.upgrade_completion_sender.clone();
             let proof_upgrader_task = tokio::task::spawn(async move {
                 upgrade_candidate
                     .handle_upgrade(
@@ -1627,6 +1640,9 @@ impl MainLoopHandler {
                         main_to_miner_tx_clone,
                     )
                     .await;
+                // Signal that this upgrade task has completed so the main loop
+                // can immediately look for more work instead of waiting for the timer
+                let _ = completion_sender.send(()).await;
             });
 
             // Store both the task handle and its affected txids for cleanup tracking
@@ -1959,6 +1975,15 @@ impl MainLoopHandler {
                     log_slow_scope!(fn_name!() + "::select::tx_proof_upgrade_interval");
 
                     trace!("Timer: tx-proof-upgrader");
+                    self.proof_upgrader(&mut main_loop_state).await?;
+                }
+
+                // Handle upgrade task completion - immediately look for more work
+                // This ensures GPUs don't sit idle waiting for the next timer tick
+                _ = main_loop_state.upgrade_completion_receiver.recv() => {
+                    log_slow_scope!(fn_name!() + "::select::upgrade_completion");
+
+                    trace!("Upgrade task completed, checking for more work");
                     self.proof_upgrader(&mut main_loop_state).await?;
                 }
 

@@ -20,7 +20,7 @@ XNT_CORE_PATH="${XNT_CORE_PATH:-$SCRIPT_DIR/xnt-core/target/release/xnt-core}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"  # Use all 8 GPUs
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-64}"
 export TRITON_OMP_INIT="${TRITON_OMP_INIT:-0}"
-export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-8}"  # Max parallel CPU proof jobs (increased for 8 GPUs)
+export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-24}"  # Max parallel CPU proof jobs (3x GPU count for 8 GPUs)
 
 # GPU optimization settings - Performance tuning for GPU prover
 export TRITON_AUX_CPU="${TRITON_AUX_CPU:-1}"                     # Use CPU for auxiliary tables
