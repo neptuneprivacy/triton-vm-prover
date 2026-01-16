@@ -773,20 +773,9 @@ pub(crate) async fn create_block_transaction_from(
                 .mempool
                 .count_synced_single_proof_transactions();
             info!(
-                "Mempool stats: {} total txs, {} with SingleProof, {} synced+SingleProof (ready for merge), max_mergers={}",
+                "Mempool stats: {} total txs, {} with SingleProof, {} synced+SingleProof (ready for composition), max_mergers={}",
                 mempool_size, single_proof_count, synced_single_proof_count, max_num_mergers
             );
-            if synced_single_proof_count >= 3 {
-                info!(
-                    "*** {} synced SingleProof txs available - BINARY TREE MERGE path possible! ***",
-                    synced_single_proof_count
-                );
-            } else if synced_single_proof_count > 0 {
-                info!(
-                    "Only {} synced SingleProof tx(s) - need 3+ for binary-tree merge",
-                    synced_single_proof_count
-                );
-            }
             mempool_guard
                 .mempool
                 .get_transactions_for_block_composition(
@@ -799,7 +788,7 @@ pub(crate) async fn create_block_transaction_from(
     };
 
     info!(
-        "Transactions selected for merge: {} (need 3+ for binary-tree merge)",
+        "Transactions selected for composition: {}",
         transactions_to_merge.len()
     );
 
@@ -910,7 +899,7 @@ pub(crate) async fn create_block_transaction_from(
                 )
                 .await?;
             } else if num_small == 2 {
-                info!("Using SEQUENTIAL merge for 2 small transactions (need 3+ for binary-tree)");
+                info!("Using SEQUENTIAL merge for 2 small transactions");
                 for (i, tx) in small_transactions.into_iter().enumerate() {
                     info!("Merging small transaction {} / {}", i + 1, 2);
                     info!(
@@ -932,7 +921,7 @@ pub(crate) async fn create_block_transaction_from(
                 }
             } else {
                 let tx = small_transactions.into_iter().next().unwrap();
-                info!("Merging 1 small transaction (need 3+ for binary-tree merge)");
+                info!("Merging 1 small transaction");
                 info!(
                     "Merging tx with {} inputs, {} outputs, fee {}",
                     tx.kernel.inputs.len(),
