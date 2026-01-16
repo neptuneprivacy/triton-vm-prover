@@ -1069,47 +1069,75 @@ pub(super) async fn get_upgrade_task_from_mempool(
     };
 
     // Can we merge two single proofs?
-    debug!(
-        "Checking for pair merge: synced_single_proof_count={}",
-        global_state
-            .mempool
-            .count_synced_single_proof_transactions()
-    );
-    let merge_job = if let Some((
-        [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
-        upgrade_priority,
-    )) = global_state
+    // Skip pair merge if we expect 4+ total transactions (wait for binary tree merge)
+    let synced_single_proof_count = global_state
         .mempool
-        .preferred_single_proof_pair(upgrade_filter)
-    {
-        // Sanity check
-        assert_eq!(
-            left_kernel.mutator_set_hash, right_kernel.mutator_set_hash,
-            "Mempool must return transactions with matching mutator set hashes."
+        .count_synced_single_proof_transactions();
+    let pending_proof_collection_count = global_state
+        .mempool
+        .count_proof_collection_transactions();
+    let total_expected = synced_single_proof_count + pending_proof_collection_count;
+    
+    debug!(
+        "Checking for pair merge: synced_single_proof_count={}, pending_proof_collection={}, total_expected={}",
+        synced_single_proof_count,
+        pending_proof_collection_count,
+        total_expected
+    );
+    
+    // If we expect 4+ total transactions and binary tree merge is enabled,
+    // skip pair merge to allow transactions to accumulate for binary tree merge
+    let skip_pair_for_binary_tree = max_merge_count >= 4 
+        && total_expected >= 4 
+        && synced_single_proof_count >= 2
+        && pending_proof_collection_count > 0;
+    
+    if skip_pair_for_binary_tree {
+        debug!(
+            "Skipping pair merge to wait for binary tree merge (expected {} txs)",
+            total_expected
         );
-        if left_kernel.mutator_set_hash != tip_mutator_set.hash() {
-            error!(
-                "Deprecated transactions returned by mempool for merging. This shouldn't happen."
+    }
+    
+    let merge_job = if !skip_pair_for_binary_tree {
+        if let Some((
+            [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
+            upgrade_priority,
+        )) = global_state
+            .mempool
+            .preferred_single_proof_pair(upgrade_filter)
+        {
+            // Sanity check
+            assert_eq!(
+                left_kernel.mutator_set_hash, right_kernel.mutator_set_hash,
+                "Mempool must return transactions with matching mutator set hashes."
             );
-            return None;
-        }
+            if left_kernel.mutator_set_hash != tip_mutator_set.hash() {
+                error!(
+                    "Deprecated transactions returned by mempool for merging. This shouldn't happen."
+                );
+                return None;
+            }
 
-        let gobbling_potential =
-            (left_kernel.fee + right_kernel.fee).lossy_f64_fraction_mul(gobbling_fraction);
-        let upgrade_incentive =
-            upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
-        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
-            let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
-            let upgrade_decision = UpgradeJob::Merge {
-                left_kernel: left_kernel.to_owned(),
-                single_proof_left: left_single_proof.to_owned(),
-                right_kernel: right_kernel.to_owned(),
-                single_proof_right: right_single_proof.to_owned(),
-                shuffle_seed: rng.random(),
-                mutator_set: tip_mutator_set,
-                upgrade_incentive,
-            };
-            Some(upgrade_decision)
+            let gobbling_potential =
+                (left_kernel.fee + right_kernel.fee).lossy_f64_fraction_mul(gobbling_fraction);
+            let upgrade_incentive =
+                upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
+            if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+                let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
+                let upgrade_decision = UpgradeJob::Merge {
+                    left_kernel: left_kernel.to_owned(),
+                    single_proof_left: left_single_proof.to_owned(),
+                    right_kernel: right_kernel.to_owned(),
+                    single_proof_right: right_single_proof.to_owned(),
+                    shuffle_seed: rng.random(),
+                    mutator_set: tip_mutator_set,
+                    upgrade_incentive,
+                };
+                Some(upgrade_decision)
+            } else {
+                None
+            }
         } else {
             None
         }
