@@ -1177,12 +1177,20 @@ pub(crate) async fn mine(
             None
         };
 
-        // Reset recheck timer - this ensures the loop re-evaluates conditions
-        // periodically even when neither guessing nor composing (e.g., when
-        // --prioritize-upgrades is waiting for upgrades/merges to complete)
-        recheck_timer
-            .as_mut()
-            .reset(tokio::time::Instant::now() + Duration::from_secs(RECHECK_INTERVAL_SECS));
+        // Reset recheck timer ONLY when neither guessing nor composing.
+        // This ensures the loop re-evaluates conditions periodically when idle
+        // (e.g., when --prioritize-upgrades is waiting for upgrades/merges to complete)
+        // but doesn't interrupt ongoing composition or guessing work.
+        if guesser_task.is_none() && composer_task.is_none() {
+            recheck_timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + Duration::from_secs(RECHECK_INTERVAL_SECS));
+        } else {
+            // Disable recheck timer when actively working - set it to far future
+            recheck_timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + infinite);
+        }
 
         let mut restart_guessing = false;
         let mut stop_guessing = false;
