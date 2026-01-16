@@ -1493,7 +1493,7 @@ impl MainLoopHandler {
     async fn proof_upgrader(&mut self, main_loop_state: &mut MutableMainLoopState) -> Result<()> {
         fn can_attempt_upgrade(
             global_state: &GlobalState,
-            main_loop_state: &MutableMainLoopState,
+            _main_loop_state: &MutableMainLoopState,
         ) -> bool {
             // Don't run proof upgrader if binary merge is active - this prevents
             // the upgrader from interfering with the parallel merge process
@@ -1515,7 +1515,9 @@ impl MainLoopHandler {
         trace!("Running proof upgrader scheduled task");
 
         // Clean up finished tasks
-        main_loop_state.proof_upgrader_tasks.retain(|task| !task.is_finished());
+        main_loop_state
+            .proof_upgrader_tasks
+            .retain(|task| !task.is_finished());
 
         // Check if we can attempt upgrades
         let max_parallel = {
@@ -1545,7 +1547,7 @@ impl MainLoopHandler {
         for _ in 0..tasks_to_spawn {
             let upgrade_candidate = {
                 let mut global_state = self.global_state_lock.lock_guard_mut().await;
-                
+
                 // Re-check conditions in case something changed
                 if !can_attempt_upgrade(&global_state, main_loop_state) {
                     break;
@@ -1554,7 +1556,8 @@ impl MainLoopHandler {
                 debug!("Attempting to run transaction-proof-upgrade");
 
                 // Find a candidate for proof upgrade
-                let Some(upgrade_candidate) = get_upgrade_task_from_mempool(&mut global_state).await
+                let Some(upgrade_candidate) =
+                    get_upgrade_task_from_mempool(&mut global_state).await
                 else {
                     debug!("Found no transaction-proof to upgrade");
                     break;
@@ -1572,19 +1575,22 @@ impl MainLoopHandler {
             // like mining, or proving our own transaction. Running the prover takes
             // a long time (minutes), so we spawn a task for this such that we do
             // not block the main loop.
+            let vm_job_queue_clone = vm_job_queue.clone();
             let global_state_lock_clone = self.global_state_lock.clone();
             let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
             let proof_upgrader_task = tokio::task::spawn(async move {
                 upgrade_candidate
                     .handle_upgrade(
-                        vm_job_queue.clone(),
+                        vm_job_queue_clone,
                         global_state_lock_clone,
                         main_to_peer_broadcast_tx_clone,
                     )
                     .await
             });
 
-            main_loop_state.proof_upgrader_tasks.push(proof_upgrader_task);
+            main_loop_state
+                .proof_upgrader_tasks
+                .push(proof_upgrader_task);
             spawned_count += 1;
         }
 

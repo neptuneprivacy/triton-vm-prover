@@ -95,11 +95,30 @@ fi
 
 # Run xnt-core with GPU prover enabled
 # No separate prover server needed!
+#
+# === TPS OPTIMIZATION PARAMETERS ===
+#
+# --max-num-compose-mergers 1
+#   Composer handles only 1 transaction (no binary merging at composer).
+#   This separates responsibilities: proof-upgrader does merging, composer does composition.
+#
+# --max-parallel-upgrades 4
+#   Allow up to 4 parallel proof upgrade jobs in the proof-upgrader.
+#   Increase this for higher TPS (requires more CPU/GPU resources).
+#   Recommended: 2-4 for standard hardware, 4-8 for high-end systems.
+#
+# --max-upgrade-merge-count 8
+#   Maximum transactions to merge in a single binary tree merge operation.
+#   When >=3, enables binary tree merging for efficient multi-tx processing.
+#   Set to 2 for pair-only merging, or higher (4, 8) for batch merging.
+#
 exec "$XNT_CORE_PATH" \
   --network testnet \
   --compose \
   --guess \
-  --max-num-compose-mergers 3 \
+  --max-num-compose-mergers 1 \
+  --max-parallel-upgrades 4 \
+  --max-upgrade-merge-count 8 \
   --tx-proof-upgrading \
   --tx-proving-capability=singleproof \
   --gobbling-fraction=0.6 \
