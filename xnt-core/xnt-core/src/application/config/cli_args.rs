@@ -242,13 +242,18 @@ pub struct Args {
     #[clap(long)]
     pub(crate) compose: bool,
 
-    /// When set, composing is paused if there are 2 or more SingleProof
-    /// transactions in the mempool. This prioritizes proof upgrading and
-    /// merging to consolidate transactions before composing a block.
+    /// When set, composing is skipped when there's upgrade or merge work to do.
     ///
-    /// Only when there is 1 or 0 SingleProof transactions will composing
-    /// proceed. This can improve throughput when many transactions are
-    /// pending.
+    /// Compose only starts when:
+    /// - 0-1 SingleProof transactions in mempool, AND
+    /// - 0 transactions needing upgrade (no PrimitiveWitness/ProofCollection)
+    ///
+    /// Compose is skipped when:
+    /// - 2+ SingleProof transactions exist (merge them first), OR
+    /// - Any transactions need upgrading (upgrade them first)
+    ///
+    /// This improves throughput by ensuring all transactions are processed
+    /// and merged before creating a block.
     #[clap(long)]
     pub(crate) prioritize_upgrades: bool,
 

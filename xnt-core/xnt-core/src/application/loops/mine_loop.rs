@@ -1111,15 +1111,33 @@ pub(crate) async fn mine(
         let (cancel_compose_tx, cancel_compose_rx) = tokio::sync::watch::channel(());
 
         // Check if we should skip composing to prioritize upgrades/merges
-        let single_proof_count = global_state_lock
-            .lock(|s| s.mempool.count_synced_single_proof_transactions())
+        // When --prioritize-upgrades is set:
+        // - Compose only when: 0-1 SingleProof AND 0 transactions needing upgrade
+        // - Skip compose when: 2+ SingleProof (need merge) OR any tx needs upgrade
+        let (single_proof_count, upgrades_needed) = global_state_lock
+            .lock(|s| {
+                (
+                    s.mempool.count_synced_single_proof_transactions(),
+                    s.mempool.count_transactions_needing_upgrade(),
+                )
+            })
             .await;
-        let should_skip_for_upgrades = cli_args.prioritize_upgrades && single_proof_count >= 2;
+        
+        let should_skip_for_upgrades = cli_args.prioritize_upgrades
+            && (single_proof_count >= 2 || upgrades_needed > 0);
+        
         if should_skip_for_upgrades {
-            tracing::info!(
-                "Skipping compose: {} SingleProof txs in mempool (prioritize_upgrades enabled)",
-                single_proof_count
-            );
+            if upgrades_needed > 0 {
+                tracing::info!(
+                    "Skipping compose: {} tx(s) need upgrading first (prioritize_upgrades enabled)",
+                    upgrades_needed
+                );
+            } else {
+                tracing::info!(
+                    "Skipping compose: {} SingleProof txs need merging first (prioritize_upgrades enabled)",
+                    single_proof_count
+                );
+            }
         }
 
         let compose = cli_args.compose && !should_skip_for_upgrades;

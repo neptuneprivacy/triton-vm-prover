@@ -115,10 +115,11 @@ fi
 #   Set to 2 for pair-only merging, or higher (4, 8) for batch merging.
 #
 # --prioritize-upgrades
-#   When set, skip composing if there are 2+ SingleProof transactions in mempool.
-#   This prioritizes proof upgrading and merging over composing, allowing more
-#   transactions to be consolidated before creating a block.
-#   Only compose when there's 0-1 SingleProof transactions left.
+#   When set, skip composing if there's work to do:
+#   - 2+ SingleProof transactions exist → merge them first
+#   - Any transactions need upgrading → upgrade them first
+#   Only compose when: 0-1 SingleProof AND 0 upgrades needed.
+#   This ensures all transactions are processed before creating a block.
 #
 exec "$XNT_CORE_PATH" \
   --network testnet \

@@ -913,6 +913,18 @@ impl Mempool {
             .count()
     }
 
+    /// Return the count of transactions that need upgrading (not SingleProof).
+    /// These are transactions backed by PrimitiveWitness or ProofCollection
+    /// that need to be upgraded to SingleProof before they can be composed.
+    ///
+    /// Computes in O(n)
+    pub fn count_transactions_needing_upgrade(&self) -> usize {
+        self.tx_dictionary
+            .values()
+            .filter(|tx| !tx.transaction.proof.is_single_proof())
+            .count()
+    }
+
     /// Return a vector with copies of the transactions, in descending order by
     /// fee density. Only returns transactions that are
     /// - backed by single proofs, and
