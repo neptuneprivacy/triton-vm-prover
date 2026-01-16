@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <unordered_map>
+#include <iostream>
 #ifdef TVM_USE_TBB
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_invoke.h>
@@ -191,8 +192,12 @@ AlgebraicExecutionTrace::AlgebraicExecutionTrace(std::vector<BFieldElement> prog
     , processor_trace_rows_(0)
     , processor_trace_capacity_(0)
     , processor_trace_legacy_()
-    , op_stack_underflow_trace_()
-    , ram_trace_()
+    , op_stack_trace_flat_()
+    , op_stack_trace_rows_(0)
+    , op_stack_underflow_trace_legacy_()
+    , ram_trace_flat_()
+    , ram_trace_rows_(0)
+    , ram_trace_legacy_()
     , program_hash_trace_()
     , hash_trace_()
     , sponge_trace_()
@@ -214,8 +219,9 @@ void AlgebraicExecutionTrace::reserve_processor_trace(size_t capacity) {
 
 void AlgebraicExecutionTrace::reserve_tables(size_t estimated_rows) {
     // Reserve space for sub-tables based on typical ratios
-    op_stack_underflow_trace_.reserve(estimated_rows);
-    ram_trace_.reserve(estimated_rows / 2);
+    // OPTIMIZED: Use flat buffers for op_stack and ram traces
+    op_stack_trace_flat_.reserve(estimated_rows * OP_STACK_WIDTH);
+    ram_trace_flat_.reserve((estimated_rows / 2) * RAM_WIDTH);
     hash_trace_.reserve(estimated_rows / 10);
     sponge_trace_.reserve(estimated_rows / 10);
     u32_entries_.reserve(estimated_rows / 4);
@@ -271,28 +277,24 @@ void AlgebraicExecutionTrace::load_from_rust_ffi(
         }
     }
     
-    // Load op_stack trace
-    op_stack_underflow_trace_.clear();
-    op_stack_underflow_trace_.reserve(op_stack_trace_rows);
+    // Load op_stack trace - OPTIMIZED: flat buffer
+    op_stack_trace_flat_.resize(op_stack_trace_rows * OP_STACK_WIDTH);
+    op_stack_trace_rows_ = op_stack_trace_rows;
+    op_stack_underflow_trace_legacy_.clear(); // Invalidate legacy cache
     for (size_t r = 0; r < op_stack_trace_rows; ++r) {
-        std::vector<BFieldElement> row;
-        row.reserve(op_stack_trace_cols);
-        for (size_t c = 0; c < op_stack_trace_cols; ++c) {
-            row.push_back(BFieldElement(op_stack_trace_data[r * op_stack_trace_cols + c]));
+        for (size_t c = 0; c < OP_STACK_WIDTH && c < op_stack_trace_cols; ++c) {
+            op_stack_trace_flat_[r * OP_STACK_WIDTH + c] = BFieldElement(op_stack_trace_data[r * op_stack_trace_cols + c]);
         }
-        op_stack_underflow_trace_.push_back(std::move(row));
     }
     
-    // Load ram trace
-    ram_trace_.clear();
-    ram_trace_.reserve(ram_trace_rows);
+    // Load ram trace - OPTIMIZED: flat buffer
+    ram_trace_flat_.resize(ram_trace_rows * RAM_WIDTH);
+    ram_trace_rows_ = ram_trace_rows;
+    ram_trace_legacy_.clear(); // Invalidate legacy cache
     for (size_t r = 0; r < ram_trace_rows; ++r) {
-        std::vector<BFieldElement> row;
-        row.reserve(ram_trace_cols);
-        for (size_t c = 0; c < ram_trace_cols; ++c) {
-            row.push_back(BFieldElement(ram_trace_data[r * ram_trace_cols + c]));
+        for (size_t c = 0; c < RAM_WIDTH && c < ram_trace_cols; ++c) {
+            ram_trace_flat_[r * RAM_WIDTH + c] = BFieldElement(ram_trace_data[r * ram_trace_cols + c]);
         }
-        ram_trace_.push_back(std::move(row));
     }
     
     // Load program_hash trace
@@ -557,23 +559,35 @@ void AlgebraicExecutionTrace::record_co_processor_call(const CoProcessorCall& ca
                 }
             }
             if (call.type == CoProcessorCall::Type::Ram && call.ram_call) {
-                // OPTIMIZED: Write directly to trace, avoid temporary vector
-                ram_trace_.emplace_back(RAM_WIDTH, BFieldElement::zero());
-                auto& row = ram_trace_.back();
-                row[RamMainColumn::CLK] = BFieldElement(static_cast<uint64_t>(call.ram_call->clk));
-                row[RamMainColumn::InstructionType] = call.ram_call->is_write ? BFieldElement(0) : BFieldElement(1);
-                row[RamMainColumn::RamPointer] = call.ram_call->ram_pointer;
-                row[RamMainColumn::RamValue] = call.ram_call->ram_value;
+                // OPTIMIZED: Write directly to flat buffer
+                size_t row_start = ram_trace_rows_ * RAM_WIDTH;
+                if (row_start + RAM_WIDTH > ram_trace_flat_.size()) {
+                    ram_trace_flat_.resize(std::max(ram_trace_flat_.size() * 2, row_start + RAM_WIDTH * 1024));
+                }
+                ram_trace_flat_[row_start + RamMainColumn::CLK] = BFieldElement(static_cast<uint64_t>(call.ram_call->clk));
+                ram_trace_flat_[row_start + RamMainColumn::InstructionType] = call.ram_call->is_write ? BFieldElement(0) : BFieldElement(1);
+                ram_trace_flat_[row_start + RamMainColumn::RamPointer] = call.ram_call->ram_pointer;
+                ram_trace_flat_[row_start + RamMainColumn::RamValue] = call.ram_call->ram_value;
+                // Initialize remaining columns to zero (InverseOfRampDifference, BezoutCoeff0, BezoutCoeff1)
+                for (size_t c = 4; c < RAM_WIDTH; ++c) {
+                    ram_trace_flat_[row_start + c] = BFieldElement::zero();
+                }
+                ram_trace_rows_++;
+                ram_trace_legacy_.clear(); // Invalidate legacy cache
             }
             if (call.type == CoProcessorCall::Type::OpStack && call.op_stack_entry) {
-                // OPTIMIZED: Write directly to trace, avoid temporary vector
-                op_stack_underflow_trace_.emplace_back(OP_STACK_WIDTH, BFieldElement::zero());
-                auto& row = op_stack_underflow_trace_.back();
-                row[OpStackMainColumn::CLK] = BFieldElement(static_cast<uint64_t>(call.op_stack_entry->clk));
-                row[OpStackMainColumn::IB1ShrinkStack] =
+                // OPTIMIZED: Write directly to flat buffer
+                size_t row_start = op_stack_trace_rows_ * OP_STACK_WIDTH;
+                if (row_start + OP_STACK_WIDTH > op_stack_trace_flat_.size()) {
+                    op_stack_trace_flat_.resize(std::max(op_stack_trace_flat_.size() * 2, row_start + OP_STACK_WIDTH * 1024));
+                }
+                op_stack_trace_flat_[row_start + OpStackMainColumn::CLK] = BFieldElement(static_cast<uint64_t>(call.op_stack_entry->clk));
+                op_stack_trace_flat_[row_start + OpStackMainColumn::IB1ShrinkStack] =
                     call.op_stack_entry->underflow_io.shrinks_stack() ? BFieldElement::one() : BFieldElement::zero();
-                row[OpStackMainColumn::StackPointer] = call.op_stack_entry->op_stack_pointer;
-                row[OpStackMainColumn::FirstUnderflowElement] = call.op_stack_entry->underflow_io.payload;
+                op_stack_trace_flat_[row_start + OpStackMainColumn::StackPointer] = call.op_stack_entry->op_stack_pointer;
+                op_stack_trace_flat_[row_start + OpStackMainColumn::FirstUnderflowElement] = call.op_stack_entry->underflow_io.payload;
+                op_stack_trace_rows_++;
+                op_stack_underflow_trace_legacy_.clear(); // Invalidate legacy cache
             }
             break;
     }
@@ -627,9 +641,9 @@ size_t AlgebraicExecutionTrace::height_of_table(size_t table_id) const {
         case 1: // Processor
             return processor_trace_rows_;
         case 2: // OpStack
-            return op_stack_underflow_trace_.size();
+            return op_stack_trace_rows_;
         case 3: // RAM
-            return ram_trace_.size();
+            return ram_trace_rows_;
         case 4: // JumpStack (same as Processor)
             return processor_trace_rows_;
         case 5: { // Hash
@@ -703,6 +717,36 @@ const std::vector<std::vector<BFieldElement>>& AlgebraicExecutionTrace::processo
         }
     }
     return processor_trace_legacy_;
+}
+
+const std::vector<std::vector<BFieldElement>>& AlgebraicExecutionTrace::op_stack_underflow_trace() const {
+    // LAZY CONVERSION: Only build legacy format when needed
+    if (op_stack_underflow_trace_legacy_.size() != op_stack_trace_rows_) {
+        op_stack_underflow_trace_legacy_.resize(op_stack_trace_rows_);
+        for (size_t r = 0; r < op_stack_trace_rows_; ++r) {
+            op_stack_underflow_trace_legacy_[r].resize(OP_STACK_WIDTH);
+            const BFieldElement* row_ptr = op_stack_trace_flat_.data() + r * OP_STACK_WIDTH;
+            for (size_t c = 0; c < OP_STACK_WIDTH; ++c) {
+                op_stack_underflow_trace_legacy_[r][c] = row_ptr[c];
+            }
+        }
+    }
+    return op_stack_underflow_trace_legacy_;
+}
+
+const std::vector<std::vector<BFieldElement>>& AlgebraicExecutionTrace::ram_trace() const {
+    // LAZY CONVERSION: Only build legacy format when needed
+    if (ram_trace_legacy_.size() != ram_trace_rows_) {
+        ram_trace_legacy_.resize(ram_trace_rows_);
+        for (size_t r = 0; r < ram_trace_rows_; ++r) {
+            ram_trace_legacy_[r].resize(RAM_WIDTH);
+            const BFieldElement* row_ptr = ram_trace_flat_.data() + r * RAM_WIDTH;
+            for (size_t c = 0; c < RAM_WIDTH; ++c) {
+                ram_trace_legacy_[r][c] = row_ptr[c];
+            }
+        }
+    }
+    return ram_trace_legacy_;
 }
 
 void AlgebraicExecutionTrace::fill_program_hash_trace() {

@@ -763,14 +763,18 @@ MasterMainTable MasterMainTable::from_aet(
     
     // Fill OpStack table from AET (columns 46-49), matching Rust `OpStackTable::fill`.
     // Sort by (StackPointer, CLK) and collect clock jump differences when StackPointer stays constant.
+    // OPTIMIZED: Use flat buffer access directly
     {
-        const auto& op_stack_trace = aet.op_stack_underflow_trace();
+        const BFieldElement* op_stack_flat = aet.op_stack_trace_flat_data();
+        const size_t op_stack_rows = aet.op_stack_trace_rows();
+        constexpr size_t OS_WIDTH = AlgebraicExecutionTrace::OP_STACK_WIDTH;
+        
         struct OSRow { BFieldElement clk; BFieldElement ib1; BFieldElement sp; BFieldElement first; };
         std::vector<OSRow> rows;
-        rows.reserve(op_stack_trace.size());
-        for (const auto& r : op_stack_trace) {
-            if (r.size() < OP_STACK_TABLE_COLS) continue;
-            rows.push_back(OSRow{r[0], r[1], r[2], r[3]});
+        rows.reserve(op_stack_rows);
+        for (size_t r = 0; r < op_stack_rows; ++r) {
+            const BFieldElement* row_ptr = op_stack_flat + r * OS_WIDTH;
+            rows.push_back(OSRow{row_ptr[0], row_ptr[1], row_ptr[2], row_ptr[3]});
         }
         parallel_sort(rows.begin(), rows.end(), [](const OSRow& a, const OSRow& b) {
             if (a.sp.value() != b.sp.value()) return a.sp.value() < b.sp.value();
@@ -804,6 +808,7 @@ MasterMainTable MasterMainTable::from_aet(
     // 1) sort by (RamPointer, CLK)
     // 2) set InverseOfRampDifference and BezoutCoefficientPolynomialCoefficient0/1
     // 3) compute clock jump diffs (for processor multiplicities)
+    // OPTIMIZED: Use flat buffer access directly
     struct RamRow {
         BFieldElement clk;
         BFieldElement inst_type;
@@ -811,14 +816,17 @@ MasterMainTable MasterMainTable::from_aet(
         BFieldElement ramv;
     };
     std::vector<RamRow> ram_rows;
-    ram_rows.reserve(aet.ram_trace().size());
-    for (const auto& r : aet.ram_trace()) {
-        if (r.size() < RAM_TABLE_COLS) continue;
+    const BFieldElement* ram_flat = aet.ram_trace_flat_data();
+    const size_t ram_trace_rows = aet.ram_trace_rows();
+    constexpr size_t RAM_WIDTH = AlgebraicExecutionTrace::RAM_WIDTH;
+    ram_rows.reserve(ram_trace_rows);
+    for (size_t r = 0; r < ram_trace_rows; ++r) {
+        const BFieldElement* row_ptr = ram_flat + r * RAM_WIDTH;
         ram_rows.push_back(RamRow{
-            r[RamMainColumn::CLK],
-            r[RamMainColumn::InstructionType],
-            r[RamMainColumn::RamPointer],
-            r[RamMainColumn::RamValue],
+            row_ptr[RamMainColumn::CLK],
+            row_ptr[RamMainColumn::InstructionType],
+            row_ptr[RamMainColumn::RamPointer],
+            row_ptr[RamMainColumn::RamValue],
         });
     }
     parallel_sort(ram_rows.begin(), ram_rows.end(), [](const RamRow& a, const RamRow& b) {
@@ -1628,59 +1636,54 @@ MasterMainTable MasterMainTable::from_aet(
     log_section("RAM table fill");
 
     // Fill JumpStack table (columns 57-61) from the processor trace (matches Rust: JumpStack table is derived per-cycle).
+    // OPTIMIZED: Use parallel prefix sum + scatter for better cache locality
     {
         using namespace JumpStackMainColumn;
-        // OPTIMIZED: Use flat buffer directly instead of processor_trace()
         const BFieldElement* proc_data = aet.processor_trace_flat_data();
         const size_t proc_rows = aet.processor_trace_height();
         const size_t proc_cols = aet.processor_trace_width();
 
-        // Preprocess by JSP value, preserving processor CLK order.
-        std::vector<std::vector<std::tuple<BFieldElement, BFieldElement, BFieldElement, BFieldElement>>> buckets;
-        buckets.reserve(64);
+        // Compact struct for better cache efficiency
+        struct JSRow { BFieldElement clk; BFieldElement ci; BFieldElement jsp; BFieldElement jso; BFieldElement jsd; };
+        
+        // Phase 1: Extract all rows in parallel
+        std::vector<JSRow> all_rows(proc_rows);
+        #pragma omp parallel for schedule(static)
         for (size_t row = 0; row < proc_rows; ++row) {
             const BFieldElement* pr = proc_data + row * proc_cols;
-            BFieldElement clk = pr[processor_column_index(ProcessorMainColumn::CLK)];
-            BFieldElement ci = pr[processor_column_index(ProcessorMainColumn::CI)];
-            BFieldElement jsp = pr[processor_column_index(ProcessorMainColumn::JSP)];
-            BFieldElement jso = pr[processor_column_index(ProcessorMainColumn::JSO)];
-            BFieldElement jsd = pr[processor_column_index(ProcessorMainColumn::JSD)];
-
-            size_t jsp_val = static_cast<size_t>(jsp.value());
-            if (jsp_val < buckets.size()) {
-                buckets[jsp_val].push_back({clk, ci, jso, jsd});
-            } else if (jsp_val == buckets.size()) {
-                buckets.push_back({{clk, ci, jso, jsd}});
-            } else {
-                throw std::runtime_error("JSP must increase by at most 1 per execution step.");
-            }
+            all_rows[row] = JSRow{
+                pr[processor_column_index(ProcessorMainColumn::CLK)],
+                pr[processor_column_index(ProcessorMainColumn::CI)],
+                pr[processor_column_index(ProcessorMainColumn::JSP)],
+                pr[processor_column_index(ProcessorMainColumn::JSO)],
+                pr[processor_column_index(ProcessorMainColumn::JSD)]
+            };
         }
 
-        // Move rows into jump stack table, sorted by JSP first, CLK second
-        size_t row_idx = 0;
-        for (size_t jsp_val = 0; jsp_val < buckets.size(); ++jsp_val) {
-            BFieldElement jsp_bfe(static_cast<uint64_t>(jsp_val));
-            for (const auto& [clk, ci, jso, jsd] : buckets[jsp_val]) {
-                if (row_idx >= table.num_rows()) break;
-                table.set(row_idx, JUMP_STACK_TABLE_START + CLK, clk);
-                table.set(row_idx, JUMP_STACK_TABLE_START + CI, ci);
-                table.set(row_idx, JUMP_STACK_TABLE_START + JSP, jsp_bfe);
-                table.set(row_idx, JUMP_STACK_TABLE_START + JSO, jso);
-                table.set(row_idx, JUMP_STACK_TABLE_START + JSD, jsd);
-                row_idx++;
-            }
+        // Phase 2: Sort by (JSP, CLK) - stable sort preserves CLK order within same JSP
+        parallel_sort(all_rows.begin(), all_rows.end(), [](const JSRow& a, const JSRow& b) {
+            if (a.jsp.value() != b.jsp.value()) return a.jsp.value() < b.jsp.value();
+            return a.clk.value() < b.clk.value();
+        });
+
+        // Phase 3: Fill table in parallel
+        const size_t fill_rows = std::min(all_rows.size(), table.num_rows());
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < fill_rows; ++i) {
+            const auto& r = all_rows[i];
+            table.set(i, JUMP_STACK_TABLE_START + CLK, r.clk);
+            table.set(i, JUMP_STACK_TABLE_START + CI, r.ci);
+            table.set(i, JUMP_STACK_TABLE_START + JSP, r.jsp);
+            table.set(i, JUMP_STACK_TABLE_START + JSO, r.jso);
+            table.set(i, JUMP_STACK_TABLE_START + JSD, r.jsd);
         }
 
-        // Collect clock jump differences (only when JSP stays constant)
-        if (row_idx > 1) {
-            clk_jump_diffs_jump_stack.reserve(row_idx);
-            for (size_t i = 0; i + 1 < row_idx; ++i) {
-                BFieldElement curr_clk = table.get(i, JUMP_STACK_TABLE_START + CLK);
-                BFieldElement next_clk = table.get(i + 1, JUMP_STACK_TABLE_START + CLK);
-                BFieldElement curr_jsp = table.get(i, JUMP_STACK_TABLE_START + JSP);
-                BFieldElement next_jsp = table.get(i + 1, JUMP_STACK_TABLE_START + JSP);
-                if (curr_jsp == next_jsp) {
-                    clk_jump_diffs_jump_stack.push_back(next_clk - curr_clk);
+        // Phase 4: Collect clock jump differences (only when JSP stays constant)
+        if (fill_rows > 1) {
+            clk_jump_diffs_jump_stack.reserve(fill_rows);
+            for (size_t i = 0; i + 1 < fill_rows; ++i) {
+                if (all_rows[i].jsp == all_rows[i + 1].jsp) {
+                    clk_jump_diffs_jump_stack.push_back(all_rows[i + 1].clk - all_rows[i].clk);
                 }
             }
         }

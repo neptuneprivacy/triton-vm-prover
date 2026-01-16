@@ -158,8 +158,18 @@ public:
     // Direct flat buffer access (for GPU upload, avoids conversion)
     const BFieldElement* processor_trace_flat_data() const { return processor_trace_flat_.data(); }
     size_t processor_trace_flat_size() const { return processor_trace_rows_ * PROCESSOR_WIDTH; }
-    const std::vector<std::vector<BFieldElement>>& op_stack_underflow_trace() const { return op_stack_underflow_trace_; }
-    const std::vector<std::vector<BFieldElement>>& ram_trace() const { return ram_trace_; }
+    
+    // Op stack flat buffer access
+    const BFieldElement* op_stack_trace_flat_data() const { return op_stack_trace_flat_.data(); }
+    size_t op_stack_trace_rows() const { return op_stack_trace_rows_; }
+    size_t op_stack_trace_flat_size() const { return op_stack_trace_rows_ * OP_STACK_WIDTH; }
+    const std::vector<std::vector<BFieldElement>>& op_stack_underflow_trace() const;
+    
+    // RAM flat buffer access
+    const BFieldElement* ram_trace_flat_data() const { return ram_trace_flat_.data(); }
+    size_t ram_trace_rows() const { return ram_trace_rows_; }
+    size_t ram_trace_flat_size() const { return ram_trace_rows_ * RAM_WIDTH; }
+    const std::vector<std::vector<BFieldElement>>& ram_trace() const;
     const std::vector<std::vector<BFieldElement>>& program_hash_trace() const { return program_hash_trace_; }
     const std::vector<std::vector<BFieldElement>>& hash_trace() const { return hash_trace_; }
     const std::vector<std::vector<BFieldElement>>& sponge_trace() const { return sponge_trace_; }
@@ -196,11 +206,19 @@ private:
     /// Legacy accessor (for compatibility with existing code)
     mutable std::vector<std::vector<BFieldElement>> processor_trace_legacy_;
     
-    /// Op stack underflow trace
-    std::vector<std::vector<BFieldElement>> op_stack_underflow_trace_;
+    /// Op stack underflow trace - OPTIMIZED: flat row-major buffer
+    std::vector<BFieldElement> op_stack_trace_flat_;
+    size_t op_stack_trace_rows_ = 0;
     
-    /// RAM trace
-    std::vector<std::vector<BFieldElement>> ram_trace_;
+    /// Legacy accessor for op_stack trace (lazy conversion)
+    mutable std::vector<std::vector<BFieldElement>> op_stack_underflow_trace_legacy_;
+    
+    /// RAM trace - OPTIMIZED: flat row-major buffer
+    std::vector<BFieldElement> ram_trace_flat_;
+    size_t ram_trace_rows_ = 0;
+    
+    /// Legacy accessor for ram trace (lazy conversion)
+    mutable std::vector<std::vector<BFieldElement>> ram_trace_legacy_;
     
     /// Program hash trace
     std::vector<std::vector<BFieldElement>> program_hash_trace_;
