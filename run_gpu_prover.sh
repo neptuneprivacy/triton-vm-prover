@@ -9,6 +9,7 @@
 #   --multi-gpu      Enable multi-GPU unified memory (for larger inputs)
 #   --gpu-count=N    Limit to N GPUs (e.g., --gpu-count=2 uses only 2 of 8 GPUs)
 #   --cpu-aux        Use hybrid CPU/GPU for aux table (faster, now working!)
+#   --gpu-aux        Force GPU-only aux table path (disables CPU aux auto-detect)
 #   --arch=SM        Override CUDA architecture (e.g., 90 for Hopper, 120 for Blackwell)
 #   --clean          Force clean rebuild (removes build directory)
 #   --profile        Enable detailed profiling output
@@ -53,6 +54,7 @@ INPUT="${2:-18}"
 MULTI_GPU=0
 GPU_COUNT=""
 CPU_AUX=0
+CPU_AUX_SOURCE=""
 ARCH_OVERRIDE=""
 CLEAN_BUILD=0
 PROFILE_MODE=0
@@ -71,6 +73,11 @@ for arg in "$@"; do
             ;;
         --cpu-aux)
             CPU_AUX=1
+            CPU_AUX_SOURCE="flag"
+            ;;
+        --gpu-aux|--no-cpu-aux)
+            CPU_AUX=0
+            CPU_AUX_SOURCE="flag"
             ;;
         --arch=*)
             ARCH_OVERRIDE="${arg#*=}"
@@ -89,6 +96,22 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Default CPU aux on unless explicitly overridden.
+# Also respect TRITON_AUX_CPU from the environment when set.
+if [[ -z "$CPU_AUX_SOURCE" ]]; then
+    if [[ -n "${TRITON_AUX_CPU:-}" ]]; then
+        if [[ "$TRITON_AUX_CPU" == "1" || "$TRITON_AUX_CPU" == "true" ]]; then
+            CPU_AUX=1
+        else
+            CPU_AUX=0
+        fi
+        CPU_AUX_SOURCE="env"
+    else
+        CPU_AUX=1
+        CPU_AUX_SOURCE="default"
+    fi
+fi
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -117,7 +140,13 @@ else
 echo -e "${BLUE}║  Mode:    Single GPU${NC}"
 fi
 if [[ $CPU_AUX -eq 1 ]]; then
+    if [[ "$CPU_AUX_SOURCE" == "env" ]]; then
+echo -e "${BLUE}║  Aux:     ${GREEN}Hybrid CPU/GPU (env)${NC}"
+    elif [[ "$CPU_AUX_SOURCE" == "default" ]]; then
+echo -e "${BLUE}║  Aux:     ${GREEN}Hybrid CPU/GPU (default)${NC}"
+    else
 echo -e "${BLUE}║  Aux:     ${GREEN}Hybrid CPU/GPU (optimized)${NC}"
+    fi
 fi
 if [[ $PROFILE_LDE -eq 1 ]]; then
 echo -e "${BLUE}║  LDE:     ${YELLOW}Detailed profiling enabled${NC}"
@@ -318,6 +347,10 @@ if [[ ! -f "$PROGRAM" ]]; then
     exit 1
 fi
 
+# Default GPU settings (can be overridden via env or flags below)
+export TRITON_MULTI_GPU=${TRITON_MULTI_GPU:-0}
+export TRITON_GPU_COUNT=${TRITON_GPU_COUNT:-1}
+
 # Set environment for multi-GPU mode
 if [[ $MULTI_GPU -eq 1 ]]; then
     export TRITON_MULTI_GPU=1
@@ -331,12 +364,14 @@ fi
 # Set environment for hybrid CPU/GPU aux computation (35% faster)
 if [[ $CPU_AUX -eq 1 ]]; then
     export TRITON_AUX_CPU=1
+elif [[ "$CPU_AUX_SOURCE" == "flag" ]]; then
+    export TRITON_AUX_CPU=0
 fi
 
 # Set OpenMP thread count for maximum CPU utilization
 # Threadripper 9995WX: 96 cores, 192 threads (Zen 5)
-# Set to 96 threads to match physical cores
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-96}
+# Default to 64 threads unless overridden
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-64}
 # Enable thread binding for better performance
 export OMP_PROC_BIND=spread
 export OMP_PLACES=cores
@@ -348,7 +383,19 @@ export OMP_SCHEDULE=dynamic
 export TRITON_OMP_UPLOAD=${TRITON_OMP_UPLOAD:-1}
 export TRITON_OMP_INIT=${TRITON_OMP_INIT:-0}
 export TRITON_OMP_QUOTIENT=${TRITON_OMP_QUOTIENT:-1}
-export TRITON_OMP_PROCESSOR=${TRITON_OMP_PROCESSOR:-0}
+export TRITON_OMP_PROCESSOR=${TRITON_OMP_PROCESSOR:-1}
+
+# GPU/CPU performance defaults (can be overridden via env)
+export TVM_USE_TASKFLOW=${TVM_USE_TASKFLOW:-1}
+export TVM_USE_TBB=${TVM_USE_TBB:-1}
+export TRITON_GPU_DEGREE_LOWERING=${TRITON_GPU_DEGREE_LOWERING:-1}
+export TRITON_GPU_U32=${TRITON_GPU_U32:-1}
+export TVM_USE_RUST_TRACE=${TVM_USE_RUST_TRACE:-1}
+export TRITON_NTT_REG6STAGE=${TRITON_NTT_REG6STAGE:-1}
+export TRITON_NTT_FUSED12=${TRITON_NTT_FUSED12:-1}
+export TRITON_NTT_COALESCED=${TRITON_NTT_COALESCED:-1}
+export TRITON_GPU_USE_RAM_OVERFLOW=${TRITON_GPU_USE_RAM_OVERFLOW:-1}
+export TRITON_PAD_SCALE_MODE=${TRITON_PAD_SCALE_MODE:-4}
 
 echo "OpenMP configuration:"
 echo "  OMP_NUM_THREADS=$OMP_NUM_THREADS"

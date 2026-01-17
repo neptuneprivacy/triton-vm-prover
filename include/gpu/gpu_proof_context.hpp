@@ -181,6 +181,14 @@ public:
     
     size_t total_gpu_memory_bytes() const { return total_allocated_; }
     void print_memory_usage() const;
+
+    // =========================================================================
+    // Memory Release Helpers (reduce UM working set after large phases)
+    // =========================================================================
+
+    void release_trace_buffers();
+    void release_quotient_buffers(bool keep_codeword);
+    void release_hash_helpers();
     
 private:
     Dimensions dims_;

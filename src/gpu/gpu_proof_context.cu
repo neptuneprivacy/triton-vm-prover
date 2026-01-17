@@ -349,6 +349,51 @@ void GpuProofContext::synchronize() {
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 
+void GpuProofContext::release_trace_buffers() {
+    if (d_main_trace_) {
+        CUDA_CHECK(cudaFree(d_main_trace_));
+        d_main_trace_ = nullptr;
+    }
+    if (d_aux_trace_) {
+        CUDA_CHECK(cudaFree(d_aux_trace_));
+        d_aux_trace_ = nullptr;
+    }
+}
+
+void GpuProofContext::release_quotient_buffers(bool keep_codeword) {
+    if (d_quotient_segment_coeffs_) {
+        CUDA_CHECK(cudaFree(d_quotient_segment_coeffs_));
+        d_quotient_segment_coeffs_ = nullptr;
+    }
+    if (!keep_codeword && d_quotient_codeword_) {
+        CUDA_CHECK(cudaFree(d_quotient_codeword_));
+        d_quotient_codeword_ = nullptr;
+    }
+}
+
+void GpuProofContext::release_hash_helpers() {
+    if (d_hash_limb_pairs_) {
+        CUDA_CHECK(cudaFree(d_hash_limb_pairs_));
+        d_hash_limb_pairs_ = nullptr;
+    }
+    if (d_hash_cascade_diffs_) {
+        CUDA_CHECK(cudaFree(d_hash_cascade_diffs_));
+        d_hash_cascade_diffs_ = nullptr;
+    }
+    if (d_hash_cascade_prefix_) {
+        CUDA_CHECK(cudaFree(d_hash_cascade_prefix_));
+        d_hash_cascade_prefix_ = nullptr;
+    }
+    if (d_hash_cascade_inverses_) {
+        CUDA_CHECK(cudaFree(d_hash_cascade_inverses_));
+        d_hash_cascade_inverses_ = nullptr;
+    }
+    if (d_hash_cascade_mask_) {
+        CUDA_CHECK(cudaFree(d_hash_cascade_mask_));
+        d_hash_cascade_mask_ = nullptr;
+    }
+}
+
 void GpuProofContext::print_memory_usage() const {
     std::cout << "\n[GPU] Memory Usage Summary:" << std::endl;
     std::cout << "  Padded height:     " << dims_.padded_height << std::endl;

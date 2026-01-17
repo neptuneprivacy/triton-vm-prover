@@ -1730,6 +1730,14 @@ Proof GpuStark::prove(
         std::cout << "[DBG] sanity: OK" << std::endl;
     }
     step_times[2] = elapsed_ms(t3);
+
+    // Free hash helper buffers early to reduce unified-memory pressure (unused after Step 3).
+    if (triton_vm::gpu::use_unified_memory()) {
+        const char* keep = std::getenv("TRITON_KEEP_HASH_HELPERS");
+        if (!(keep && (strcmp(keep, "1") == 0 || strcmp(keep, "true") == 0))) {
+            ctx_->release_hash_helpers();
+        }
+    }
     
     // Step 4: Quotient computation
     auto t4 = std::chrono::high_resolution_clock::now();
@@ -1737,6 +1745,13 @@ Proof GpuStark::prove(
     step_quotient_commitment();
     ctx_->synchronize();
     step_times[3] = elapsed_ms(t4);
+
+    // Release quotient coefficient/codeword buffers after they are no longer needed.
+    if (triton_vm::gpu::use_unified_memory()) {
+        const bool keep_codeword = (std::getenv("TVM_DEBUG_KEEP_QUOT_CODEWORD") != nullptr) ||
+                                   (std::getenv("TVM_DEBUG_OOD_QUOT_SEGMENTS_RUST") != nullptr);
+        ctx_->release_quotient_buffers(keep_codeword);
+    }
     
     // Step 5: Out-of-domain evaluation
     auto t5 = std::chrono::high_resolution_clock::now();
@@ -1744,6 +1759,14 @@ Proof GpuStark::prove(
     step_out_of_domain_evaluation();
     ctx_->synchronize();
     step_times[4] = elapsed_ms(t5);
+
+    // Release trace-domain buffers once OOD evaluations are done.
+    if (triton_vm::gpu::use_unified_memory()) {
+        const char* keep = std::getenv("TRITON_KEEP_TRACE_BUFFERS");
+        if (!(keep && (strcmp(keep, "1") == 0 || strcmp(keep, "true") == 0))) {
+            ctx_->release_trace_buffers();
+        }
+    }
     
     // Step 6: FRI protocol
     auto t6 = std::chrono::high_resolution_clock::now();
@@ -3577,6 +3600,26 @@ void GpuStark::step_out_of_domain_evaluation() {
     uint64_t* d_aux_next  = scratch + off; off += dims_.aux_width * 3;
     uint64_t* d_quot_ood  = scratch + off; off += dims_.num_quotient_segments * 3;
 
+    // Unified-memory perf: prefetch trace-domain tables before the heavy OOD evaluations.
+    if (triton_vm::gpu::use_unified_memory()) {
+        static int prefetch_ood = -1;
+        if (prefetch_ood == -1) {
+            const char* env = std::getenv("TRITON_PREFETCH_OOD");
+            prefetch_ood = (env == nullptr || (strcmp(env, "0") != 0 && strcmp(env, "false") != 0)) ? 1 : 0;
+        }
+        if (prefetch_ood) {
+            int device = 0;
+            CUDA_CHECK(cudaGetDevice(&device));
+            cudaMemLocation location;
+            location.type = cudaMemLocationTypeDevice;
+            location.id = device;
+            const size_t main_bytes = dims_.padded_height * dims_.main_width * sizeof(uint64_t);
+            const size_t aux_bytes = dims_.padded_height * dims_.aux_width * 3 * sizeof(uint64_t);
+            CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_main_trace(), main_bytes, location, ctx_->stream()));
+            CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_aux_trace(), aux_bytes, location, ctx_->stream()));
+        }
+    }
+
     // 1) domain values for trace domain (use exact offset+generator from Rust)
     uint64_t trace_offset = dims_.trace_offset;
     uint64_t trace_gen = dims_.trace_generator;
@@ -4537,16 +4580,20 @@ void GpuStark::step_fri_protocol() {
 
     // Unified-memory perf: prefetch the big FRI-domain tables to the active GPU before
     // building the DEEP/FRI input codeword. This avoids massive UM page-fault overhead.
-    // Enable via TRITON_PREFETCH_FRI=1.
-    if (triton_vm::gpu::use_unified_memory() && std::getenv("TRITON_PREFETCH_FRI")) {
+    // Enabled by default for UM (disable via TRITON_PREFETCH_FRI=0).
+    bool prefetch_fri = triton_vm::gpu::use_unified_memory();
+    if (const char* env = std::getenv("TRITON_PREFETCH_FRI")) {
+        prefetch_fri = (strcmp(env, "0") != 0 && strcmp(env, "false") != 0);
+    }
+    if (prefetch_fri) {
         int dev = 0;
         CUDA_CHECK(cudaGetDevice(&dev));
         cudaMemLocation location;
         location.type = cudaMemLocationTypeDevice;
         location.id = dev;
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_main_lde(), n * main_width * sizeof(uint64_t), location, 0, ctx_->stream()));
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_aux_lde(), n * aux_width * 3 * sizeof(uint64_t), location, 0, ctx_->stream()));
-        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_quotient_segments(), n * num_segments * 3 * sizeof(uint64_t), location, 0, ctx_->stream()));
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_main_lde(), n * main_width * sizeof(uint64_t), location, ctx_->stream()));
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_aux_lde(), n * aux_width * 3 * sizeof(uint64_t), location, ctx_->stream()));
+        CUDA_CHECK(cudaMemPrefetchAsync(ctx_->d_quotient_segments(), n * num_segments * 3 * sizeof(uint64_t), location, ctx_->stream()));
     }
 
     // Use scratch for weights and intermediates
@@ -5551,6 +5598,14 @@ Proof GpuStark::prove_with_gpu_phase1(
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[2] = elapsed_ms(t3);
 
+    // Free hash helper buffers early to reduce unified-memory pressure (unused after Step 3).
+    if (triton_vm::gpu::use_unified_memory()) {
+        const char* keep = std::getenv("TRITON_KEEP_HASH_HELPERS");
+        if (!(keep && (strcmp(keep, "1") == 0 || strcmp(keep, "true") == 0))) {
+            ctx_->release_hash_helpers();
+        }
+    }
+
     auto t4 = std::chrono::high_resolution_clock::now();
     TRITON_PROFILE_COUT("[GPU] Step 4: Quotient computation" << std::endl);
     step_quotient_commitment();
@@ -5558,12 +5613,27 @@ Proof GpuStark::prove_with_gpu_phase1(
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[3] = elapsed_ms(t4);
 
+    // Release quotient coefficient/codeword buffers after they are no longer needed.
+    if (triton_vm::gpu::use_unified_memory()) {
+        const bool keep_codeword = (std::getenv("TVM_DEBUG_KEEP_QUOT_CODEWORD") != nullptr) ||
+                                   (std::getenv("TVM_DEBUG_OOD_QUOT_SEGMENTS_RUST") != nullptr);
+        ctx_->release_quotient_buffers(keep_codeword);
+    }
+
     auto t5 = std::chrono::high_resolution_clock::now();
     TRITON_PROFILE_COUT("[GPU] Step 5: Out-of-domain evaluation" << std::endl);
     step_out_of_domain_evaluation();
     ctx_->synchronize();
     if (std::getenv("TVM_DEBUG_GPU_SYNC_ALL")) { CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize()); }
     step_times[4] = elapsed_ms(t5);
+
+    // Release trace-domain buffers once OOD evaluations are done.
+    if (triton_vm::gpu::use_unified_memory()) {
+        const char* keep = std::getenv("TRITON_KEEP_TRACE_BUFFERS");
+        if (!(keep && (strcmp(keep, "1") == 0 || strcmp(keep, "true") == 0))) {
+            ctx_->release_trace_buffers();
+        }
+    }
 
     auto t6 = std::chrono::high_resolution_clock::now();
     TRITON_PROFILE_COUT("[GPU] Step 6: FRI protocol" << std::endl);
