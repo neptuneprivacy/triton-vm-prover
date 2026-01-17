@@ -1271,7 +1271,8 @@ pub(crate) async fn mine(
                     MainToMiner::MempoolChanged => {
                         // Re-evaluate whether composing should be stopped to prioritize upgrades/merges.
                         // This allows immediate reaction to new tx arrivals or proof upgrades while composing.
-                        if cli_args.prioritize_upgrades {
+                        // Only stop compose if --restart-compose-on-new-tx is set (default: false).
+                        if cli_args.prioritize_upgrades && cli_args.restart_compose_on_new_tx {
                             let (single_proof_count, upgrades_needed) = global_state_lock
                                 .lock(|s| {
                                     (
@@ -1287,7 +1288,7 @@ pub(crate) async fn mine(
                             if should_stop_for_upgrades {
                                 if composer_task.is_some() {
                                     info!(
-                                        "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (prioritize_upgrades enabled)",
+                                        "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (restart_compose_on_new_tx enabled)",
                                         single_proof_count, upgrades_needed
                                     );
                                     stop_composing = true;

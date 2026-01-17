@@ -121,11 +121,33 @@ fi
 #   Only compose when: 0-1 SingleProof AND 0 upgrades needed.
 #   This ensures all transactions are processed before creating a block.
 #
+# --restart-compose-on-new-tx (default: false)
+#   When set, cancel and restart compose when new tx arrives or proof is upgraded.
+#   Requires --prioritize-upgrades to be effective.
+#   Default false: compose continues until completion without interruption.
+#
+# --upgrade-all-proof-collections (default: false)
+#   When set, upgrade ALL peer ProofCollection transactions to SingleProof,
+#   regardless of the gobbling fee incentive (bypasses min-gobbling-fee check).
+#   Useful to help the network by upgrading low-fee peer transactions.
+#
+# --max-num-proofs (default: 16)
+#   Maximum number of proofs in a ProofCollection that can be upgraded.
+#   A transaction with N inputs has approximately N+5 proofs (one per lock script).
+#   Set high enough to handle large transactions (e.g., 100 for up to ~95 inputs).
+#
 exec "$XNT_CORE_PATH" \
-  --network testnet \
+  --network main \
+  --peer 161.97.150.88:9898 \
+  --peer 154.38.160.61:9898 \
+  --peer 103.78.0.72:9898 \
+  --peer 5.21.91.33:9898 \
+  --peer 154.7.90.1:9898 \
+  --peer [::ffff:176.97.248.147]:9898 \
+  --peer 199.127.60.95:9898 \
+  --peer 172.96.172.242:9898 \
   --compose \
-  --guess \
-  --prioritize-upgrades \
+  --guesser-fraction 0.5 \
   --max-num-compose-mergers 1 \
   --max-parallel-upgrades 2 \
   --max-upgrade-merge-count 2 \
@@ -134,4 +156,8 @@ exec "$XNT_CORE_PATH" \
   --gobbling-fraction=0.6 \
   --min-gobbling-fee=0.0001 \
   --tx-upgrade-filter=1:0 \
+  --prioritize-upgrades \
+  --upgrade-all-proof-collections \
+  --restart-compose-on-new-tx \
+  --max-num-proofs 100 \
   "$@"

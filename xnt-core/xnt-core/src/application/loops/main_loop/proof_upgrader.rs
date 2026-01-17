@@ -993,6 +993,7 @@ pub(super) async fn get_upgrade_task_from_mempool(
     let num_proofs_threshold = global_state.max_num_proofs();
 
     let upgrade_filter = global_state.cli().tx_upgrade_filter;
+    let upgrade_all_proof_collections = global_state.cli().upgrade_all_proof_collections;
 
     // Do we have any `ProofCollection`s?
     let proof_collection_job = if let Some((kernel, proof, upgrade_priority)) = global_state
@@ -1007,7 +1008,11 @@ pub(super) async fn get_upgrade_task_from_mempool(
         let gobbling_potential = kernel.fee.lossy_f64_fraction_mul(gobbling_fraction);
         let upgrade_incentive =
             upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
-        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+
+        // Upgrade if incentive is worth it, OR if upgrade_all_proof_collections is enabled
+        // (bypasses the fee check for peer ProofCollections)
+        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) || upgrade_all_proof_collections
+        {
             let upgrade_job =
                 UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
                     kernel: kernel.to_owned(),

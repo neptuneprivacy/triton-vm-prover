@@ -223,6 +223,18 @@ pub struct Args {
     #[clap(long, default_value = "0.01", value_parser = NativeCurrencyAmount::coins_from_str)]
     pub(crate) min_gobbling_fee: NativeCurrencyAmount,
 
+    /// When set, all ProofCollection transactions from peers (synced to tip)
+    /// will be upgraded to SingleProof, regardless of the gobbling fee incentive.
+    ///
+    /// By default (false), peer ProofCollections are only upgraded if
+    /// `fee * gobbling_fraction >= min_gobbling_fee`. With this flag enabled,
+    /// the fee check is bypassed for ProofCollection upgrades only.
+    ///
+    /// This is useful if you want to upgrade all peer ProofCollections to help
+    /// the network, even when the fees don't meet the minimum threshold.
+    #[clap(long, default_value = "false")]
+    pub(crate) upgrade_all_proof_collections: bool,
+
     /// Minimum fee value for ProofCollection-backed transaction per input.
     ///
     /// Transactions with fees lower than this will not be requested from
@@ -256,6 +268,17 @@ pub struct Args {
     /// and merged before creating a block.
     #[clap(long)]
     pub(crate) prioritize_upgrades: bool,
+
+    /// When set, the compose task will be cancelled and restarted when a new
+    /// transaction arrives or a proof is upgraded (MempoolChanged event).
+    ///
+    /// This allows immediate reaction to new transactions while composing,
+    /// but may cause wasted work if transactions arrive frequently.
+    ///
+    /// Requires `--prioritize-upgrades` to be effective.
+    /// Default is false (compose continues until completion).
+    #[clap(long, default_value = "false")]
+    pub(crate) restart_compose_on_new_tx: bool,
 
     /// When compsing, the maximum number of single proof backed transactions
     /// that will be merged from the mempool.

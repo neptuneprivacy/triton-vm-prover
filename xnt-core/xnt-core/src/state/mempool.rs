@@ -937,15 +937,31 @@ impl Mempool {
             .count()
     }
 
-    /// Return the count of transactions that need upgrading (not SingleProof).
-    /// These are transactions backed by PrimitiveWitness or ProofCollection
-    /// that need to be upgraded to SingleProof before they can be composed.
+    /// Return the count of transactions that can actually be upgraded.
+    /// Only counts:
+    /// - ProofCollections that are synced to tip (can be upgraded to SingleProof)
+    /// - PrimitiveWitness transactions (if they have stored primitive_witness data)
+    ///
+    /// This ensures the count reflects transactions that the proof upgrader
+    /// can actually process, avoiding false "needs upgrade" messages.
     ///
     /// Computes in O(n)
     pub fn count_transactions_needing_upgrade(&self) -> usize {
         self.tx_dictionary
             .values()
-            .filter(|tx| !tx.transaction.proof.is_single_proof())
+            .filter(|tx| {
+                match &tx.transaction.proof {
+                    TransactionProof::SingleProof(_) => false, // Already upgraded
+                    TransactionProof::ProofCollection(_) => {
+                        // ProofCollection can only be upgraded if synced to tip
+                        self.tx_is_synced(&tx.transaction.kernel)
+                    }
+                    TransactionProof::Witness(_) => {
+                        // PrimitiveWitness can be upgraded if we have the witness data
+                        tx.primitive_witness.is_some()
+                    }
+                }
+            })
             .count()
     }
 
