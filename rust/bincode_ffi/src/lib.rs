@@ -2767,7 +2767,7 @@ pub extern "C" fn debug_barycentric_weights_rust(
         .unwrap()
         .with_offset(bfe!(trace_offset));
     let z = XFieldElement::new([bfe!(z0), bfe!(z1), bfe!(z2)]);
-    let dom_vals = domain.domain_values();
+    let dom_vals = domain.values();
     let domain_shift = dom_vals.iter().map(|&d| z - d).collect::<Vec<_>>();
     let invs = XFieldElement::batch_inversion(domain_shift);
     let dom_over = dom_vals

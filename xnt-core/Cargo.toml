@@ -119,3 +119,14 @@ panic = "abort"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[patch.crates-io]
+triton-vm = { path = "../triton-vm/triton-vm" }
+triton-air = { path = "../triton-vm/triton-air" }
+triton-isa = { path = "../triton-vm/triton-isa" }
+triton-constraint-builder = { path = "../triton-vm/triton-constraint-builder" }
+triton-constraint-circuit = { path = "../triton-vm/triton-constraint-circuit" }
+twenty-first = { path = "../triton-vm/twenty-first-local/twenty-first" }
+bfieldcodec_derive = { path = "../triton-vm/twenty-first-local/bfieldcodec_derive" }
+tasm-lib = { path = "../tasm-lib/tasm-lib" }
+tasm-object-derive = { path = "../tasm-lib/tasm-object-derive" }
