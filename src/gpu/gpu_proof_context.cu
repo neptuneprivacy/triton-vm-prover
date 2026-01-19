@@ -80,6 +80,7 @@ void GpuProofContext::allocate_memory() {
     const size_t aux_width = dims_.aux_width;
     const size_t num_segments = dims_.num_quotient_segments;
     const size_t num_randomizers = dims_.num_trace_randomizers;
+    const bool frugal_mode = dims_.lde_frugal_mode;
     
     // Merkle tree sizes (full tree = 2*leaves - 1, but we store just 2*leaves)
     const size_t main_merkle_leaves = fri_length;
@@ -88,25 +89,74 @@ void GpuProofContext::allocate_memory() {
     
     size_t total = 0;
     
+    if (frugal_mode) {
+        std::cout << "[GPU] LDE FRUGAL MODE enabled - 8-way coset streaming (no cached FRI LDE)" << std::endl;
+        std::cout << "      Keeping only per-coset LDE buffers of length padded_height" << std::endl;
+    }
+    
     // Main table (trace domain): padded_height × main_width × sizeof(u64)
     size_t main_trace_size = trace_height * main_width * sizeof(uint64_t);
     CUDA_ALLOC(&d_main_trace_, main_trace_size);
     total += main_trace_size;
     
-    // Main table (FRI domain): fri_length × main_width × sizeof(u64)
-    size_t main_lde_size = fri_length * main_width * sizeof(uint64_t);
-    CUDA_ALLOC(&d_main_lde_, main_lde_size);
-    total += main_lde_size;
+    if (frugal_mode) {
+        // =================== FRUGAL MODE ===================
+        // Per-coset working buffer (quotient/fri coset): padded_height × main_width (BFE), col-major.
+        // This is reused for:
+        // - streaming main Merkle leaves (compute one coset at a time, scatter digests)
+        // - quotient computation (compute one coset at a time)
+        // - building the FRI input codeword (coset by coset)
+        // - opening queried rows (coset by coset)
+        size_t working_main_size = trace_height * main_width * sizeof(uint64_t);
+        CUDA_ALLOC(&d_working_main_, working_main_size);
+        total += working_main_size;
+
+        // No cached FRI-domain main LDE in frugal mode.
+        d_main_lde_ = nullptr;
+        d_main_coeffs_ = nullptr;
+
+        std::cout << "[GPU] FRUGAL: working_main=" << (working_main_size / 1024 / 1024) << " MB" << std::endl;
+    } else {
+        // =================== CACHED MODE ===================
+        // Full FRI-domain LDE for fastest computation
+        size_t main_lde_size = fri_length * main_width * sizeof(uint64_t);
+        CUDA_ALLOC(&d_main_lde_, main_lde_size);
+        total += main_lde_size;
+        
+        d_working_main_ = nullptr;
+        d_main_coeffs_ = nullptr;
+    }
     
     // Aux table (trace domain): padded_height × aux_width × 3 (XFE) × sizeof(u64)
     size_t aux_trace_size = trace_height * aux_width * 3 * sizeof(uint64_t);
     CUDA_ALLOC(&d_aux_trace_, aux_trace_size);
     total += aux_trace_size;
     
-    // Aux table (FRI domain): fri_length × aux_width × 3 × sizeof(u64)
-    size_t aux_lde_size = fri_length * aux_width * 3 * sizeof(uint64_t);
-    CUDA_ALLOC(&d_aux_lde_, aux_lde_size);
-    total += aux_lde_size;
+    if (frugal_mode) {
+        // =================== FRUGAL MODE (Aux) ===================
+        // Per-coset working buffer for aux, stored as BFE component columns:
+        // (aux_width*3) × padded_height, comp-major col-major.
+        size_t working_aux_size = trace_height * aux_width * 3 * sizeof(uint64_t);
+        CUDA_ALLOC(&d_working_aux_, working_aux_size);
+        total += working_aux_size;
+
+        // No cached FRI-domain aux LDE in frugal mode.
+        d_aux_lde_ = nullptr;
+        d_aux_coeffs_ = nullptr;
+
+        std::cout << "[GPU] FRUGAL: working_aux=" << (working_aux_size / 1024 / 1024) << " MB" << std::endl;
+    } else {
+        // =================== CACHED MODE (Aux) ===================
+        size_t aux_lde_size = fri_length * aux_width * 3 * sizeof(uint64_t);
+        CUDA_ALLOC(&d_aux_lde_, aux_lde_size);
+        total += aux_lde_size;
+        
+        d_working_aux_ = nullptr;
+        d_aux_coeffs_ = nullptr;
+    }
+
+    // Reserved for future coefficient caching / working-domain tuning.
+    working_domain_len_ = 0;
 
     // Trace randomizer coefficients (persist for entire proof)
     // Main: [main_width * num_randomizers] (BFE)
@@ -243,6 +293,10 @@ void GpuProofContext::free_memory() {
     if (d_main_lde_) cudaFree(d_main_lde_);
     if (d_aux_trace_) cudaFree(d_aux_trace_);
     if (d_aux_lde_) cudaFree(d_aux_lde_);
+    if (d_working_main_) cudaFree(d_working_main_);
+    if (d_working_aux_) cudaFree(d_working_aux_);
+    if (d_main_coeffs_) cudaFree(d_main_coeffs_);
+    if (d_aux_coeffs_) cudaFree(d_aux_coeffs_);
     if (d_main_randomizer_coeffs_) cudaFree(d_main_randomizer_coeffs_);
     if (d_aux_randomizer_coeffs_) cudaFree(d_aux_randomizer_coeffs_);
     if (d_quotient_segments_) cudaFree(d_quotient_segments_);

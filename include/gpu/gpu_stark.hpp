@@ -245,6 +245,7 @@ private:
      * - Split into segments, build Merkle tree
      */
     void step_quotient_commitment();
+    void step_quotient_commitment_frugal();
     
     /**
      * Step 5: Out-of-domain sampling
@@ -261,6 +262,7 @@ private:
      * - FRI query phase (authentication paths)
      */
     void step_fri_protocol();
+    void step_fri_protocol_frugal();
     
     /**
      * Step 7: Open trace at query indices
@@ -268,6 +270,7 @@ private:
      * - Add authentication paths
      */
     void step_open_trace();
+    void step_open_trace_frugal();
     
     /**
      * Step 8: Encode proof

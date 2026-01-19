@@ -111,13 +111,16 @@ public:
     // Aux table
     uint64_t* d_aux_trace() { return d_aux_trace_; }       // XFE: 3 u64 per element
     uint64_t* d_aux_lde() { return d_aux_lde_; }
+
+    // In frugal mode we do not cache full FRI-domain LDE tables. Instead we reuse these
+    // working buffers for per-coset LDE evaluations (length = padded_height).
+    // Layout matches the LDE kernels: column-major for main, component-major column-major for aux.
     
-    // LDE Frugal mode: working domain buffers (smaller than full LDE)
-    // Used for coset-based streaming quotient computation
-    uint64_t* d_working_main() { return d_working_main_; }  // working_domain_len × main_width
-    uint64_t* d_working_aux() { return d_working_aux_; }    // working_domain_len × aux_width × 3
-    uint64_t* d_main_coeffs() { return d_main_coeffs_; }    // padded_height × main_width (interpolants)
-    uint64_t* d_aux_coeffs() { return d_aux_coeffs_; }      // padded_height × aux_width × 3 (interpolants)
+    uint64_t* d_working_main() { return d_working_main_; }  // padded_height × main_width (BFE), col-major
+    uint64_t* d_working_aux() { return d_working_aux_; }    // padded_height × (aux_width*3) (BFE), comp-major col-major
+    // Reserved for future coefficient caching (not used in current frugal implementation)
+    uint64_t* d_main_coeffs() { return d_main_coeffs_; }
+    uint64_t* d_aux_coeffs() { return d_aux_coeffs_; }
     size_t working_domain_len() const { return working_domain_len_; }
     bool is_frugal_mode() const { return dims_.lde_frugal_mode; }
 
