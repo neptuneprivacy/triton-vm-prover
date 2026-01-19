@@ -17,7 +17,7 @@ path = "src/bin/dump_to_vmstate.rs"
 
 [dependencies]
 # Triton VM types (same as bincode_ffi uses)
-triton-vm = { path = "../../triton-vm-1.0.0/triton-vm", default-features = false }
+triton-vm = { path = "../../triton-vm/triton-vm", default-features = false }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
