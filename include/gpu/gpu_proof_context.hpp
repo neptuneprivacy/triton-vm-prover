@@ -109,9 +109,15 @@ public:
     uint64_t* d_next_row_point() { return d_next_row_point_; } // [3]
     
     // Merkle trees (digests: 5 u64 per digest)
+    // Note: In JIT mode, these store only leaves; roots stored separately
     uint64_t* d_main_merkle() { return d_main_merkle_; }
     uint64_t* d_aux_merkle() { return d_aux_merkle_; }
     uint64_t* d_quotient_merkle() { return d_quotient_merkle_; }
+    
+    // Merkle roots (5 u64 per root) - JIT optimization: store roots separately
+    uint64_t* d_main_merkle_root() { return d_main_merkle_root_; }
+    uint64_t* d_aux_merkle_root() { return d_aux_merkle_root_; }
+    uint64_t* d_quotient_merkle_root() { return d_quotient_merkle_root_; }
     
     // FRI data (round 0 is initial codeword at fri_length; each subsequent round halves)
     uint64_t* d_fri_codeword(size_t round) { return d_fri_codewords_[round]; }
@@ -210,10 +216,15 @@ private:
     uint64_t* d_next_row_point_ = nullptr;  // [3]
     
     // Merkle trees (Digest = 5 × u64)
-    // Full tree size = 2 * num_leaves - 1
+    // Full tree size = 2 * num_leaves - 1 (or just leaves in JIT mode)
     uint64_t* d_main_merkle_ = nullptr;
     uint64_t* d_aux_merkle_ = nullptr;
     uint64_t* d_quotient_merkle_ = nullptr;
+    
+    // Merkle roots (JIT optimization: store roots separately)
+    uint64_t* d_main_merkle_root_ = nullptr;  // [5]
+    uint64_t* d_aux_merkle_root_ = nullptr;    // [5]
+    uint64_t* d_quotient_merkle_root_ = nullptr; // [5]
     
     // FRI data (variable sizes per round)
     std::vector<uint64_t*> d_fri_codewords_;

@@ -142,6 +142,7 @@ void GpuProofContext::allocate_memory() {
     total += ood_points_size;
     
     // Merkle trees: 2 × num_leaves × 5 (Digest) × sizeof(u64)
+    // Note: In JIT mode, we could store only leaves, but for now keep full tree for auth paths
     size_t main_merkle_size = 2 * main_merkle_leaves * 5 * sizeof(uint64_t);
     CUDA_ALLOC(&d_main_merkle_, main_merkle_size);
     total += main_merkle_size;
@@ -153,6 +154,12 @@ void GpuProofContext::allocate_memory() {
     size_t quot_merkle_size = 2 * quot_merkle_leaves * 5 * sizeof(uint64_t);
     CUDA_ALLOC(&d_quotient_merkle_, quot_merkle_size);
     total += quot_merkle_size;
+    
+    // Merkle roots (JIT optimization: store roots separately)
+    CUDA_ALLOC(&d_main_merkle_root_, 5 * sizeof(uint64_t));
+    CUDA_ALLOC(&d_aux_merkle_root_, 5 * sizeof(uint64_t));
+    CUDA_ALLOC(&d_quotient_merkle_root_, 5 * sizeof(uint64_t));
+    total += 3 * 5 * sizeof(uint64_t);
     
     // FRI codewords and Merkle trees (sizes per round)
     // We allocate round 0 for the initial codeword (fri_length), then each subsequent round halves.
@@ -253,6 +260,9 @@ void GpuProofContext::free_memory() {
     if (d_main_merkle_) cudaFree(d_main_merkle_);
     if (d_aux_merkle_) cudaFree(d_aux_merkle_);
     if (d_quotient_merkle_) cudaFree(d_quotient_merkle_);
+    if (d_main_merkle_root_) cudaFree(d_main_merkle_root_);
+    if (d_aux_merkle_root_) cudaFree(d_aux_merkle_root_);
+    if (d_quotient_merkle_root_) cudaFree(d_quotient_merkle_root_);
     
     for (auto* ptr : d_fri_codewords_) {
         if (ptr) cudaFree(ptr);

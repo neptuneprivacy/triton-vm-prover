@@ -178,6 +178,9 @@ private:
     // U32 entries for GPU table fill (optional)
     std::vector<std::tuple<uint32_t, uint64_t, uint64_t, uint64_t>> u32_entries_;
     
+    // JIT optimization flags (cached from environment variables)
+    mutable int jit_merkle_mode_ = -1;  // -1 = uninitialized, 0 = disabled, 1 = enabled
+    
 public:
     /**
      * Set U32 entries for GPU table fill

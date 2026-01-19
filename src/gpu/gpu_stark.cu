@@ -1403,10 +1403,23 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
         std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4" << std::endl;
     } else {
         // Small instances (<= 2^20): Use direct GPU mode
-        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);  // Always override
-        setenv("TRITON_PAD_SCALE_MODE", "0", 1);
-        std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
+        // Only override if user hasn't explicitly set TRITON_GPU_USE_RAM_OVERFLOW
+        const char* user_ram_overflow = std::getenv("TRITON_GPU_USE_RAM_OVERFLOW");
+        if (user_ram_overflow == nullptr) {
+            setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);
+            setenv("TRITON_PAD_SCALE_MODE", "0", 1);
+            std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
+            std::cout << "      Auto-setting TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
+        } else {
+            // User explicitly set the value, respect it
+            std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
+            std::cout << "      Using user-specified TRITON_GPU_USE_RAM_OVERFLOW=" << user_ram_overflow << std::endl;
+            // Still auto-set PAD_SCALE_MODE if not explicitly set
+            const char* user_pad_mode = std::getenv("TRITON_PAD_SCALE_MODE");
+            if (user_pad_mode == nullptr) {
+                setenv("TRITON_PAD_SCALE_MODE", "0", 1);
+            }
+        }
     }
     
     size_t required = estimate_gpu_memory(padded_height);
@@ -2167,19 +2180,48 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
     );
     if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] hash rows (" << dims_.fri_length << " rows × " << dims_.main_width << " cols): " << elapsed_ms(t_hash) << " ms\n"; }
     
-    // 3. Build Merkle tree
+    // 3. Build Merkle tree and compute root
     auto t_merkle = std::chrono::high_resolution_clock::now();
-    kernels::merkle_tree_gpu(
-        ctx_->d_main_merkle(),  // Leaves at bottom
-        ctx_->d_main_merkle(),  // Full tree output
-        dims_.fri_length,
-        ctx_->stream()
-    );
+    
+    // Check for JIT mode (TRITON_GPU_JIT_MERKLE_ROOT_ONLY)
+    if (jit_merkle_mode_ == -1) {
+        const char* env = std::getenv("TRITON_GPU_JIT_MERKLE_ROOT_ONLY");
+        jit_merkle_mode_ = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
+    }
+    
+    uint64_t* d_root;
+    if (jit_merkle_mode_) {
+        // JIT mode: Compute root directly without building full tree
+        // Still need to build full tree for auth paths, but root is computed separately
+        kernels::merkle_root_gpu(
+            ctx_->d_main_merkle(),  // Leaves
+            ctx_->d_main_merkle_root(),  // Root output
+            dims_.fri_length,
+            ctx_->stream()
+        );
+        d_root = ctx_->d_main_merkle_root();
+        
+        // Still build full tree for authentication paths (will optimize later)
+        kernels::merkle_tree_gpu(
+            ctx_->d_main_merkle(),  // Leaves at bottom
+            ctx_->d_main_merkle(),  // Full tree output
+            dims_.fri_length,
+            ctx_->stream()
+        );
+    } else {
+        // Original mode: Build full tree and extract root
+        kernels::merkle_tree_gpu(
+            ctx_->d_main_merkle(),  // Leaves at bottom
+            ctx_->d_main_merkle(),  // Full tree output
+            dims_.fri_length,
+            ctx_->stream()
+        );
+        // Root is at index (2*num_leaves - 2) in our flat tree layout
+        d_root = ctx_->d_main_merkle() + (2 * dims_.fri_length - 2) * 5;
+    }
     if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] merkle tree (" << dims_.fri_length << " leaves): " << elapsed_ms(t_merkle) << " ms\n"; }
     
     // 4. Extract root and absorb into sponge (device-only)
-    // Root is at index (2*num_leaves - 2) in our flat tree layout
-    uint64_t* d_root = ctx_->d_main_merkle() + (2 * dims_.fri_length - 2) * 5;
     // Fiat-Shamir absorbs the *encoded* proof item. For MerkleRoot, that's:
     // [discriminant=0] + [digest (5 BFEs)]
     uint64_t* d_enc = ctx_->d_scratch_b(); // at least 6 u64
@@ -2791,18 +2833,38 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
     // Sync after hash to catch errors early
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
     
-    kernels::merkle_tree_gpu(
-        ctx_->d_aux_merkle(),
-        ctx_->d_aux_merkle(),
-        dims_.fri_length,
-        ctx_->stream()
-    );
+    // Check for JIT mode (reuse same member variable)
+    if (jit_merkle_mode_) {
+        // JIT mode: Compute root directly
+        kernels::merkle_root_gpu(
+            ctx_->d_aux_merkle(),  // Leaves
+            ctx_->d_aux_merkle_root(),  // Root output
+            dims_.fri_length,
+            ctx_->stream()
+        );
+        // Still build full tree for authentication paths
+        kernels::merkle_tree_gpu(
+            ctx_->d_aux_merkle(),
+            ctx_->d_aux_merkle(),
+            dims_.fri_length,
+            ctx_->stream()
+        );
+    } else {
+        kernels::merkle_tree_gpu(
+            ctx_->d_aux_merkle(),
+            ctx_->d_aux_merkle(),
+            dims_.fri_length,
+            ctx_->stream()
+        );
+    }
     
     // Ensure merkle tree computation completes before accessing root
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
     
     // 5. Absorb root and add to proof (device-only)
-    uint64_t* d_root = ctx_->d_aux_merkle() + (2 * dims_.fri_length - 2) * 5;
+    uint64_t* d_root = jit_merkle_mode_ 
+        ? ctx_->d_aux_merkle_root()
+        : ctx_->d_aux_merkle() + (2 * dims_.fri_length - 2) * 5;
     // Absorb encoded MerkleRoot proof item: [0] + digest(5)
     // Allocate temporary buffer for encoding (6 uint64_t) to avoid scratch space conflicts
     uint64_t* d_enc = nullptr;
@@ -3476,18 +3538,38 @@ void GpuStark::step_quotient_commitment() {
     );
     // Ensure hash computation completes before merkle_tree_gpu
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
-    kernels::merkle_tree_gpu(
-        ctx_->d_quotient_merkle(),
-        ctx_->d_quotient_merkle(),
-        fri_len,
-        ctx_->stream()
-    );
+    // Check for JIT mode (reuse same member variable)
+    if (jit_merkle_mode_) {
+        // JIT mode: Compute root directly
+        kernels::merkle_root_gpu(
+            ctx_->d_quotient_merkle(),  // Leaves
+            ctx_->d_quotient_merkle_root(),  // Root output
+            fri_len,
+            ctx_->stream()
+        );
+        // Still build full tree for authentication paths
+        kernels::merkle_tree_gpu(
+            ctx_->d_quotient_merkle(),
+            ctx_->d_quotient_merkle(),
+            fri_len,
+            ctx_->stream()
+        );
+    } else {
+        kernels::merkle_tree_gpu(
+            ctx_->d_quotient_merkle(),
+            ctx_->d_quotient_merkle(),
+            fri_len,
+            ctx_->stream()
+        );
+    }
     // Ensure merkle tree computation completes before accessing root
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
     if (profile_quot) { std::cout << "    [Quot] hash+merkle: " << elapsed_ms(t_hash) << " ms" << std::endl; }
 
     // Absorb encoded MerkleRoot proof item: [0] + digest(5)
-    uint64_t* d_root = ctx_->d_quotient_merkle() + (2 * fri_len - 2) * 5;
+    uint64_t* d_root = jit_merkle_mode_
+        ? ctx_->d_quotient_merkle_root()
+        : ctx_->d_quotient_merkle() + (2 * fri_len - 2) * 5;
     uint64_t* d_enc = ctx_->d_scratch_b(); // at least 6 u64
     uint64_t disc = 0;
     CUDA_CHECK(cudaMemcpyAsync(d_enc, &disc, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx_->stream()));

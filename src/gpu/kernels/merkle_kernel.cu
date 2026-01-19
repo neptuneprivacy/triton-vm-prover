@@ -102,7 +102,10 @@ void merkle_tree_gpu(
 }
 
 /**
- * Compute just the Merkle root on GPU
+ * Compute just the Merkle root on GPU (optimized - no temporary allocation)
+ * 
+ * This version computes the root in-place by building the tree level by level
+ * and only keeping the current level in memory.
  */
 void merkle_root_gpu(
     const uint64_t* d_leaves,
@@ -123,25 +126,61 @@ void merkle_root_gpu(
         return;
     }
     
-    // Allocate temporary storage for tree
-    size_t total_nodes = 2 * num_leaves - 1;
-    uint64_t* d_tree;
-    cudaMalloc(&d_tree, total_nodes * DIGEST_LEN * sizeof(uint64_t));
+    // For small trees, use a scratch buffer that's reused
+    // For large trees, we build level by level in-place
+    size_t current_level_size = num_leaves;
+    const uint64_t* current_level = d_leaves;
     
-    // Build tree
-    merkle_tree_gpu(d_leaves, d_tree, num_leaves, stream);
+    // Allocate scratch space for one level (worst case: num_leaves/2 digests)
+    size_t max_level_size = (num_leaves + 1) / 2;
+    uint64_t* d_level_a;
+    uint64_t* d_level_b;
+    cudaMalloc(&d_level_a, max_level_size * DIGEST_LEN * sizeof(uint64_t));
+    cudaMalloc(&d_level_b, max_level_size * DIGEST_LEN * sizeof(uint64_t));
     
-    // Root is at the last position
+    uint64_t* d_current = d_level_a;
+    uint64_t* d_next = d_level_b;
+    
+    // Copy leaves to first level buffer
+    cudaMemcpyAsync(
+        d_current,
+        d_leaves,
+        num_leaves * DIGEST_LEN * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        stream
+    );
+    
+    // Build tree level by level
+    while (current_level_size > 1) {
+        size_t pairs = current_level_size / 2;
+        
+        // Hash pairs: current_level[2*i], current_level[2*i+1] -> next_level[i]
+        hash_pairs_strided_gpu(
+            d_current,
+            d_next,
+            pairs,
+            stream
+        );
+        
+        // Swap buffers
+        uint64_t* temp = d_current;
+        d_current = d_next;
+        d_next = temp;
+        
+        current_level_size = pairs;
+    }
+    
+    // Root is in d_current[0]
     cudaMemcpyAsync(
         d_root,
-        d_tree + (total_nodes - 1) * DIGEST_LEN,
+        d_current,
         DIGEST_LEN * sizeof(uint64_t),
         cudaMemcpyDeviceToDevice,
         stream
     );
     
-    cudaStreamSynchronize(stream);
-    cudaFree(d_tree);
+    cudaFree(d_level_a);
+    cudaFree(d_level_b);
 }
 
 // Backward compatibility

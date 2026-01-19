@@ -987,10 +987,19 @@ static void randomized_lde_batch_impl(
     (void)d_scratch2;  // Unused now
     
     if (needs_alloc) {
-        cudaError_t alloc_err = cudaMalloc(&d_interpolants, num_cols * trace_len * sizeof(uint64_t));
+        // Use unified memory when enabled (allows RAM overflow for large allocations)
+        size_t alloc_size = num_cols * trace_len * sizeof(uint64_t);
+        cudaError_t alloc_err;
+        if (triton_vm::gpu::use_unified_memory()) {
+            alloc_err = cudaMallocManaged(&d_interpolants, alloc_size);
+        } else {
+            alloc_err = cudaMalloc(&d_interpolants, alloc_size);
+        }
         if (alloc_err != cudaSuccess) {
             throw std::runtime_error("Failed to allocate interpolants buffer for LDE: " + std::string(cudaGetErrorString(alloc_err)) + 
-                                   " (num_cols=" + std::to_string(num_cols) + ", trace_len=" + std::to_string(trace_len) + ")");
+                                   " (num_cols=" + std::to_string(num_cols) + ", trace_len=" + std::to_string(trace_len) + 
+                                   ", size=" + std::to_string(alloc_size / (1024*1024)) + " MB, unified=" + 
+                                   (triton_vm::gpu::use_unified_memory() ? "yes" : "no") + ")");
         }
         if (profile) { cudaStreamSynchronize(stream); printf("      [LDE] alloc: %.2f ms\n", elapsed()); }
     } else {
