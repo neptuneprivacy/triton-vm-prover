@@ -38,23 +38,26 @@ public:
     // Table dimensions
     struct Dimensions {
         // Domain sizes
-        size_t padded_height;       // Trace domain size (power of 2)
-        size_t quotient_length;     // Quotient domain size (typically 4x padded_height)
-        size_t fri_length;          // FRI domain size (typically 8x padded_height)
+        size_t padded_height = 0;       // Trace domain size (power of 2)
+        size_t quotient_length = 0;     // Quotient domain size (typically 4x padded_height)
+        size_t fri_length = 0;          // FRI domain size (typically 8x padded_height)
 
         // Domain cosets (offset) and generators (root of unity)
-        uint64_t trace_offset;
-        uint64_t trace_generator;
-        uint64_t quotient_offset;
-        uint64_t quotient_generator;
-        uint64_t fri_offset;
-        uint64_t fri_generator;
+        uint64_t trace_offset = 0;
+        uint64_t trace_generator = 0;
+        uint64_t quotient_offset = 0;
+        uint64_t quotient_generator = 0;
+        uint64_t fri_offset = 0;
+        uint64_t fri_generator = 0;
 
-        size_t main_width;          // 379 for Triton VM
-        size_t aux_width;           // 88 for Triton VM
-        size_t num_trace_randomizers; // number of per-column trace randomizer coefficients
-        size_t num_quotient_segments; // NUM_QUOTIENT_SEGMENTS (typically 4)
-        size_t num_fri_rounds;      // log2(fri_length / last_polynomial_len)
+        size_t main_width = 0;          // 379 for Triton VM
+        size_t aux_width = 0;           // 88 for Triton VM
+        size_t num_trace_randomizers = 0; // number of per-column trace randomizer coefficients
+        size_t num_quotient_segments = 0; // NUM_QUOTIENT_SEGMENTS (typically 4)
+        size_t num_fri_rounds = 0;      // log2(fri_length / last_polynomial_len)
+        
+        // LDE Frugal mode: trade compute for memory by not caching full LDE tables
+        bool lde_frugal_mode = false;   // If true, use coset-based streaming LDE (default: disabled)
     };
     
     GpuProofContext(const Dimensions& dims);
@@ -63,6 +66,22 @@ public:
     // No copy
     GpuProofContext(const GpuProofContext&) = delete;
     GpuProofContext& operator=(const GpuProofContext&) = delete;
+    
+    // =========================================================================
+    // Frugal Mode: Memory Management
+    // =========================================================================
+    
+    /**
+     * Free main LDE buffer after Merkle commitment (frugal mode only)
+     * Coefficients are kept in d_main_coeffs_ for on-demand evaluation
+     */
+    void free_main_lde_for_frugal();
+    
+    /**
+     * Free aux LDE buffer after Merkle commitment (frugal mode only)
+     * Coefficients are kept in d_aux_coeffs_ for on-demand evaluation
+     */
+    void free_aux_lde_for_frugal();
     
     // =========================================================================
     // Initial Data Upload (ONLY H2D transfer in entire proof generation)
@@ -92,6 +111,15 @@ public:
     // Aux table
     uint64_t* d_aux_trace() { return d_aux_trace_; }       // XFE: 3 u64 per element
     uint64_t* d_aux_lde() { return d_aux_lde_; }
+    
+    // LDE Frugal mode: working domain buffers (smaller than full LDE)
+    // Used for coset-based streaming quotient computation
+    uint64_t* d_working_main() { return d_working_main_; }  // working_domain_len × main_width
+    uint64_t* d_working_aux() { return d_working_aux_; }    // working_domain_len × aux_width × 3
+    uint64_t* d_main_coeffs() { return d_main_coeffs_; }    // padded_height × main_width (interpolants)
+    uint64_t* d_aux_coeffs() { return d_aux_coeffs_; }      // padded_height × aux_width × 3 (interpolants)
+    size_t working_domain_len() const { return working_domain_len_; }
+    bool is_frugal_mode() const { return dims_.lde_frugal_mode; }
 
     // Trace randomizer coefficients (used for randomized LDE and OOD evaluations)
     uint64_t* d_main_randomizer_coeffs() { return d_main_randomizer_coeffs_; } // [main_width * num_trace_randomizers]
@@ -188,11 +216,18 @@ private:
     
     // Main table storage
     uint64_t* d_main_trace_ = nullptr;      // padded_height × main_width
-    uint64_t* d_main_lde_ = nullptr;        // fri_length × main_width
+    uint64_t* d_main_lde_ = nullptr;        // fri_length × main_width (NULL in frugal mode)
     
     // Aux table storage (XFE = 3 × u64)
     uint64_t* d_aux_trace_ = nullptr;       // padded_height × aux_width × 3
-    uint64_t* d_aux_lde_ = nullptr;         // fri_length × aux_width × 3
+    uint64_t* d_aux_lde_ = nullptr;         // fri_length × aux_width × 3 (NULL in frugal mode)
+    
+    // LDE Frugal mode: working domain buffers (only allocated in frugal mode)
+    uint64_t* d_working_main_ = nullptr;    // working_domain_len × main_width
+    uint64_t* d_working_aux_ = nullptr;     // working_domain_len × aux_width × 3
+    uint64_t* d_main_coeffs_ = nullptr;     // padded_height × main_width (polynomial coefficients)
+    uint64_t* d_aux_coeffs_ = nullptr;      // padded_height × aux_width × 3 (polynomial coefficients)
+    size_t working_domain_len_ = 0;         // = randomized_trace_len / 2
 
     // Trace randomizer coefficients (persist for entire proof)
     uint64_t* d_main_randomizer_coeffs_ = nullptr; // main_width × num_trace_randomizers

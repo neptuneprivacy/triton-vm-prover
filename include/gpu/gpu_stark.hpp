@@ -138,9 +138,15 @@ public:
     );
     
     /**
-     * Get estimated GPU memory requirement
+     * Get estimated GPU memory requirement (auto-selects frugal mode based on padded_height)
      */
     static size_t estimate_gpu_memory(size_t padded_height);
+    
+    /**
+     * Get estimated GPU memory requirement with explicit mode selection
+     * @param frugal_mode If true, estimate memory for coset-streaming mode (less memory, more compute)
+     */
+    static size_t estimate_gpu_memory_with_mode(size_t padded_height, bool frugal_mode);
     
     /**
      * Check if GPU has enough memory for given trace size
@@ -159,8 +165,8 @@ private:
     // We only use it to sample challenges/indices and to enqueue FS-relevant proof items.
     ProofStream fs_cpu_;
     
-    // Dimensions
-    GpuProofContext::Dimensions dims_;
+    // Dimensions (default-initialized to prevent garbage values)
+    GpuProofContext::Dimensions dims_{};
     
     // Tip5 tables on GPU
     uint16_t* d_sbox_table_ = nullptr;

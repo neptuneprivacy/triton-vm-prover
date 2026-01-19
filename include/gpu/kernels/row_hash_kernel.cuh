@@ -49,6 +49,33 @@ void hash_xfield_rows_gpu(
     cudaStream_t stream = 0
 );
 
+/**
+ * Streaming row hashing (frugal mode):
+ * Initialize per-row sponge states, absorb one RATE-sized chunk, and finalize.
+ */
+void row_sponge_init_gpu(
+    uint64_t* d_states,   // [num_rows * 16]
+    size_t num_rows,
+    cudaStream_t stream = 0
+);
+
+void row_sponge_absorb_rate_gpu(
+    const uint64_t* d_table,  // [batch_cols * num_rows] col-major
+    size_t num_rows,
+    size_t num_cols_total,
+    size_t col_start,
+    size_t batch_cols,
+    uint64_t* d_states,       // [num_rows * 16]
+    cudaStream_t stream = 0
+);
+
+void row_sponge_finalize_gpu(
+    const uint64_t* d_states, // [num_rows * 16]
+    size_t num_rows,
+    uint64_t* d_digests,       // [num_rows * 5]
+    cudaStream_t stream = 0
+);
+
 } // namespace kernels
 } // namespace gpu
 } // namespace triton_vm

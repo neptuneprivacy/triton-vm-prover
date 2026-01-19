@@ -481,6 +481,79 @@ __global__ void hash_xfield_rows_kernel(
 }
 
 // ============================================================================
+// Streaming Row Hashing (Frugal Mode)
+// ============================================================================
+
+__global__ void row_sponge_init_kernel(
+    uint64_t* __restrict__ d_states,
+    size_t num_rows
+) {
+    size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+    #pragma unroll
+    for (int i = 0; i < TIP5_STATE_SIZE; ++i) {
+        d_states[row * TIP5_STATE_SIZE + i] = 0;
+    }
+}
+
+__global__ void row_sponge_absorb_rate_kernel(
+    const uint64_t* __restrict__ d_table,   // [batch_cols * num_rows] col-major
+    size_t num_rows,
+    size_t num_cols_total,
+    size_t col_start,
+    size_t batch_cols,
+    uint64_t* __restrict__ d_states         // [num_rows * 16]
+) {
+    size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    uint64_t state[TIP5_STATE_SIZE];
+    #pragma unroll
+    for (int i = 0; i < TIP5_STATE_SIZE; ++i) {
+        state[i] = d_states[row * TIP5_STATE_SIZE + i];
+    }
+
+    // Overwrite rate with this chunk (with padding only for last chunk)
+    #pragma unroll
+    for (int i = 0; i < TIP5_RATE; ++i) {
+        size_t col = col_start + (size_t)i;
+        uint64_t v = 0;
+        if (col < num_cols_total) {
+            // Column-major: d_table[local_col * num_rows + row]
+            size_t local_col = (col - col_start);
+            if (local_col < batch_cols) {
+                v = __ldca(&d_table[local_col * num_rows + row]);
+            }
+        } else if (col == num_cols_total) {
+            v = 1; // padding marker
+        } else {
+            v = 0; // zero padding
+        }
+        state[i] = v;
+    }
+
+    rh_tip5_permutation(state);
+
+    #pragma unroll
+    for (int i = 0; i < TIP5_STATE_SIZE; ++i) {
+        d_states[row * TIP5_STATE_SIZE + i] = state[i];
+    }
+}
+
+__global__ void row_sponge_finalize_kernel(
+    const uint64_t* __restrict__ d_states,  // [num_rows * 16]
+    size_t num_rows,
+    uint64_t* __restrict__ d_digests        // [num_rows * 5]
+) {
+    size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+    #pragma unroll
+    for (int i = 0; i < DIGEST_LEN; ++i) {
+        d_digests[row * DIGEST_LEN + i] = d_states[row * TIP5_STATE_SIZE + i];
+    }
+}
+
+// ============================================================================
 // Host Interface
 // ============================================================================
 
@@ -516,6 +589,48 @@ void hash_xfield_rows_gpu(
     
     hash_xfield_rows_kernel<<<grid_size, block_size, 0, stream>>>(
         d_table, num_rows, num_xfe_cols, d_digests
+    );
+}
+
+void row_sponge_init_gpu(
+    uint64_t* d_states,
+    size_t num_rows,
+    cudaStream_t stream
+) {
+    if (num_rows == 0) return;
+    int block_size = 256;
+    int grid_size = (num_rows + block_size - 1) / block_size;
+    row_sponge_init_kernel<<<grid_size, block_size, 0, stream>>>(d_states, num_rows);
+}
+
+void row_sponge_absorb_rate_gpu(
+    const uint64_t* d_table,
+    size_t num_rows,
+    size_t num_cols_total,
+    size_t col_start,
+    size_t batch_cols,
+    uint64_t* d_states,
+    cudaStream_t stream
+) {
+    if (num_rows == 0 || batch_cols == 0) return;
+    int block_size = 256;
+    int grid_size = (num_rows + block_size - 1) / block_size;
+    row_sponge_absorb_rate_kernel<<<grid_size, block_size, 0, stream>>>(
+        d_table, num_rows, num_cols_total, col_start, batch_cols, d_states
+    );
+}
+
+void row_sponge_finalize_gpu(
+    const uint64_t* d_states,
+    size_t num_rows,
+    uint64_t* d_digests,
+    cudaStream_t stream
+) {
+    if (num_rows == 0) return;
+    int block_size = 256;
+    int grid_size = (num_rows + block_size - 1) / block_size;
+    row_sponge_finalize_kernel<<<grid_size, block_size, 0, stream>>>(
+        d_states, num_rows, d_digests
     );
 }
 
