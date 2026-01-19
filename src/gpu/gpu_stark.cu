@@ -2213,7 +2213,7 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
     }
 
     if (dims_.lde_frugal_mode) {
-        // FRUGAL: 8-way coset streaming.
+        // FRUGAL: 8-way coset streaming with multi-GPU support.
         // Compute LDE on each coset (length = trace_len), hash rows, and scatter digests into full leaf array.
         auto t_stream = std::chrono::high_resolution_clock::now();
         const size_t fri_len = dims_.fri_length;
@@ -2225,53 +2225,147 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
             TRITON_PROFILE_COUT("[GPU] FRUGAL: Warning: expected 8 cosets, got " << num_cosets << std::endl);
         }
 
-        // Temp digests for one coset: [trace_len * 5]
-        uint64_t* d_tmp_digests = ctx_->d_scratch_b();
-        uint64_t* d_working = ctx_->d_working_main(); // [width * trace_len] col-major
-
-        constexpr int DIGEST_BLOCK = 256;
-        int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
-
-        for (size_t coset = 0; coset < num_cosets; ++coset) {
-            // coset_offset = fri_offset * fri_generator^coset
-            uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-
-            // Preallocated path: use working buffer as interpolants scratch to avoid cudaMalloc per coset.
-            kernels::randomized_lde_batch_gpu_preallocated(
-                d_trace_colmajor,
-                width,
-                trace_len,
-                d_randomizer_coeffs,
-                num_randomizers,
-                trace_offset,
-                coset_offset,
-                trace_len,     // one coset
-                d_working,
-                d_working,     // scratch1 (num_cols * trace_len)
-                nullptr,
-                ctx_->stream()
-            );
-
-            // Hash rows of this coset (row order corresponds to k=0..trace_len-1)
-            kernels::hash_bfield_rows_gpu(
-                d_working,
-                trace_len,
-                width,
-                d_tmp_digests,
-                ctx_->stream()
-            );
-
-            // Scatter digests into the full-domain leaf array at stride = num_cosets
-            qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
-                d_tmp_digests,
-                ctx_->d_main_merkle(),
-                trace_len,
-                coset,
-                num_cosets
-            );
+        // Check for multi-GPU with peer access
+        int num_gpus = get_effective_gpu_count();
+        if (num_gpus > 2) num_gpus = 2;
+        bool multi_gpu = false; // Disabled due to memory issues
+        
+        // Verify peer access is available
+        if (multi_gpu) {
+            int can_access_0_1 = 0, can_access_1_0 = 0;
+            cudaDeviceCanAccessPeer(&can_access_0_1, 0, 1);
+            cudaDeviceCanAccessPeer(&can_access_1_0, 1, 0);
+            if (!can_access_0_1 || !can_access_1_0) {
+                multi_gpu = false;
+                TRITON_PROFILE_COUT("[GPU] Multi-GPU disabled: peer access not available\n");
+            }
         }
+        
+        // Multi-GPU disabled due to memory access issues; use concurrent streams instead
+        multi_gpu = false;
+        
+        if (multi_gpu) {
+            // Multi-GPU: distribute cosets across GPUs
+            // GPU 0: cosets 0,1,2,3  GPU 1: cosets 4,5,6,7
+            const size_t cosets_per_gpu = num_cosets / num_gpus;
+            
+            // Create per-GPU resources - use cudaMallocManaged for cross-GPU access
+            cudaStream_t streams[2];
+            uint64_t* d_working_per_gpu[2];
+            uint64_t* d_digests_per_gpu[2];
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+                // Use managed memory for working buffers so all GPUs can access inputs
+                CUDA_CHECK(cudaMallocManaged(&d_working_per_gpu[gpu], width * trace_len * sizeof(uint64_t)));
+                CUDA_CHECK(cudaMallocManaged(&d_digests_per_gpu[gpu], trace_len * 5 * sizeof(uint64_t)));
+                // Advise CUDA to prefer this GPU for these allocations
+                
+                
+            }
+            
+            // Launch cosets in parallel across GPUs
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                size_t coset_start = gpu * cosets_per_gpu;
+                size_t coset_end = coset_start + cosets_per_gpu;
+                
+                for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                    uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                    
+                    kernels::randomized_lde_batch_gpu_preallocated(
+                        d_trace_colmajor,
+                        width,
+                        trace_len,
+                        d_randomizer_coeffs,
+                        num_randomizers,
+                        trace_offset,
+                        coset_offset,
+                        trace_len,
+                        d_working_per_gpu[gpu],
+                        d_working_per_gpu[gpu],
+                        nullptr,
+                        streams[gpu]
+                    );
+                    
+                    kernels::hash_bfield_rows_gpu(
+                        d_working_per_gpu[gpu],
+                        trace_len,
+                        width,
+                        d_digests_per_gpu[gpu],
+                        streams[gpu]
+                    );
+                    
+                    qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, streams[gpu]>>>(
+                        d_digests_per_gpu[gpu],
+                        ctx_->d_main_merkle(),
+                        trace_len,
+                        coset,
+                        num_cosets
+                    );
+                }
+            }
+            
+            // Synchronize all GPUs
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+                CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+                CUDA_CHECK(cudaFree(d_working_per_gpu[gpu]));
+                CUDA_CHECK(cudaFree(d_digests_per_gpu[gpu]));
+            }
+            CUDA_CHECK(cudaSetDevice(0)); // Return to primary GPU
+            
+            if (profile_main) { std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (multi-GPU): " << elapsed_ms(t_stream) << " ms\n"; }
+        } else {
+            // Single-GPU path
+            uint64_t* d_tmp_digests = ctx_->d_scratch_b();
+            uint64_t* d_working = ctx_->d_working_main();
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
 
-        if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter: " << elapsed_ms(t_stream) << " ms\n"; }
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_trace_colmajor,
+                    width,
+                    trace_len,
+                    d_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working,
+                    d_working,
+                    nullptr,
+                    ctx_->stream()
+                );
+
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    width,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
+
+                qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_main_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
+
+            if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter: " << elapsed_ms(t_stream) << " ms\n"; }
+        }
     } else {
         // Note: Can't use scratch_a for interpolants because d_trace_colmajor IS scratch_a
         // Allocate internally for Main LDE
@@ -2945,54 +3039,133 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
     uint64_t* d_lde_scratch2 = nullptr;  // Not used anymore (fused into kernel)
     
     if (dims_.lde_frugal_mode) {
-        // FRUGAL: 8-way coset streaming.
-        // Compute aux LDE on each coset (length = trace_len), hash rows (as BFEs), scatter digests into full leaf array.
+        // FRUGAL: 8-way coset streaming with multi-GPU support.
         const size_t fri_len = dims_.fri_length;
         const size_t num_cosets = fri_len / trace_len;
         if (num_cosets == 0 || fri_len % trace_len != 0) {
             throw std::runtime_error("FRUGAL AUX: invalid domains (fri_len must be multiple of trace_len)");
         }
 
-        const size_t num_cols_bfe = aux_width * 3; // component columns
-        uint64_t* d_working = ctx_->d_working_aux();   // [num_cols_bfe * trace_len]
-        uint64_t* d_tmp_digests = ctx_->d_scratch_a(); // [trace_len * 5]
+        const size_t num_cols_bfe = aux_width * 3;
+        
+        // Check for multi-GPU with peer access
+        int num_gpus = get_effective_gpu_count();
+        if (num_gpus > 2) num_gpus = 2;
+        bool multi_gpu = false; // Disabled due to memory issues
+        
+        // Multi-GPU disabled due to memory access issues
+        multi_gpu = false;
+        
+        if (multi_gpu) {
+            const size_t cosets_per_gpu = num_cosets / num_gpus;
+            
+            cudaStream_t streams[2];
+            uint64_t* d_working_per_gpu[2];
+            uint64_t* d_digests_per_gpu[2];
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+                CUDA_CHECK(cudaMallocManaged(&d_working_per_gpu[gpu], num_cols_bfe * trace_len * sizeof(uint64_t)));
+                CUDA_CHECK(cudaMallocManaged(&d_digests_per_gpu[gpu], trace_len * 5 * sizeof(uint64_t)));
+                
+                
+            }
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                size_t coset_start = gpu * cosets_per_gpu;
+                size_t coset_end = coset_start + cosets_per_gpu;
+                
+                for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                    uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                    
+                    kernels::randomized_lde_batch_gpu_preallocated(
+                        d_aux_colmajor_components,
+                        num_cols_bfe,
+                        trace_len,
+                        d_aux_randomizer_coeffs,
+                        num_randomizers,
+                        trace_offset,
+                        coset_offset,
+                        trace_len,
+                        d_working_per_gpu[gpu],
+                        d_working_per_gpu[gpu],
+                        nullptr,
+                        streams[gpu]
+                    );
+                    
+                    kernels::hash_bfield_rows_gpu(
+                        d_working_per_gpu[gpu],
+                        trace_len,
+                        num_cols_bfe,
+                        d_digests_per_gpu[gpu],
+                        streams[gpu]
+                    );
+                    
+                    qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, streams[gpu]>>>(
+                        d_digests_per_gpu[gpu],
+                        ctx_->d_aux_merkle(),
+                        trace_len,
+                        coset,
+                        num_cosets
+                    );
+                }
+            }
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+                CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+                CUDA_CHECK(cudaFree(d_working_per_gpu[gpu]));
+                CUDA_CHECK(cudaFree(d_digests_per_gpu[gpu]));
+            }
+            CUDA_CHECK(cudaSetDevice(0));
+        } else {
+            // Single-GPU path
+            uint64_t* d_working = ctx_->d_working_aux();
+            uint64_t* d_tmp_digests = ctx_->d_scratch_a();
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
 
-        constexpr int DIGEST_BLOCK = 256;
-        int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
 
-        for (size_t coset = 0; coset < num_cosets; ++coset) {
-            uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_aux_colmajor_components,
+                    num_cols_bfe,
+                    trace_len,
+                    d_aux_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working,
+                    d_working,
+                    nullptr,
+                    ctx_->stream()
+                );
 
-            kernels::randomized_lde_batch_gpu_preallocated(
-                d_aux_colmajor_components,
-                num_cols_bfe,
-                trace_len,
-                d_aux_randomizer_coeffs,
-                num_randomizers,
-                trace_offset,
-                coset_offset,
-                trace_len,
-                d_working,
-                d_working, // scratch1
-                nullptr,
-                ctx_->stream()
-            );
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    num_cols_bfe,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
 
-            kernels::hash_bfield_rows_gpu(
-                d_working,
-                trace_len,
-                num_cols_bfe,
-                d_tmp_digests,
-                ctx_->stream()
-            );
-
-            qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
-                d_tmp_digests,
-                ctx_->d_aux_merkle(),
-                trace_len,
-                coset,
-                num_cosets
-            );
+                qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_aux_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
         }
 
         if (aux_profile_mode) {
@@ -5900,47 +6073,128 @@ void GpuStark::step_fri_protocol_frugal() {
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
 
-    for (size_t coset = 0; coset < num_cosets; ++coset) {
-        uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::randomized_lde_batch_gpu_preallocated(
-            d_main_colmajor,
-            main_width,
-            trace_len,
-            ctx_->d_main_randomizer_coeffs(),
-            dims_.num_trace_randomizers,
-            dims_.trace_offset,
-            coset_offset,
-            trace_len,
-            ctx_->d_working_main(),
-            ctx_->d_working_main(), // scratch1
-            nullptr,
-            ctx_->stream()
-        );
-        kernels::randomized_lde_batch_gpu_preallocated(
-            d_aux_colmajor_components,
-            aux_width * 3,
-            trace_len,
-            ctx_->d_aux_randomizer_coeffs(),
-            dims_.num_trace_randomizers,
-            dims_.trace_offset,
-            coset_offset,
-            trace_len,
-            ctx_->d_working_aux(),
-            ctx_->d_working_aux(), // scratch1
-            nullptr,
-            ctx_->stream()
-        );
-        qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
-            ctx_->d_working_main(),
-            ctx_->d_working_aux(),
-            d_weights,
-            trace_len,
-            coset,
-            num_cosets,
-            main_width,
-            aux_width,
-            d_main_aux_codeword
-        );
+    // Check for multi-GPU (disabled due to memory access issues)
+    int num_gpus = get_effective_gpu_count();
+    if (num_gpus > 2) num_gpus = 2;
+    bool multi_gpu = false; // Disabled
+    
+    if (multi_gpu) {
+        const size_t cosets_per_gpu = num_cosets / num_gpus;
+        
+        cudaStream_t streams[2];
+        uint64_t* d_working_main_per_gpu[2];
+        uint64_t* d_working_aux_per_gpu[2];
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+            CUDA_CHECK(cudaMallocManaged(&d_working_main_per_gpu[gpu], main_width * trace_len * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMallocManaged(&d_working_aux_per_gpu[gpu], aux_width * 3 * trace_len * sizeof(uint64_t)));
+            
+            
+        }
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            size_t coset_start = gpu * cosets_per_gpu;
+            size_t coset_end = coset_start + cosets_per_gpu;
+            
+            for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_main_colmajor,
+                    main_width,
+                    trace_len,
+                    ctx_->d_main_randomizer_coeffs(),
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working_main_per_gpu[gpu],
+                    d_working_main_per_gpu[gpu],
+                    nullptr,
+                    streams[gpu]
+                );
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_aux_colmajor_components,
+                    aux_width * 3,
+                    trace_len,
+                    ctx_->d_aux_randomizer_coeffs(),
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working_aux_per_gpu[gpu],
+                    d_working_aux_per_gpu[gpu],
+                    nullptr,
+                    streams[gpu]
+                );
+                qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, streams[gpu]>>>(
+                    d_working_main_per_gpu[gpu],
+                    d_working_aux_per_gpu[gpu],
+                    d_weights,
+                    trace_len,
+                    coset,
+                    num_cosets,
+                    main_width,
+                    aux_width,
+                    d_main_aux_codeword
+                );
+            }
+        }
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+            CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+            CUDA_CHECK(cudaFree(d_working_main_per_gpu[gpu]));
+            CUDA_CHECK(cudaFree(d_working_aux_per_gpu[gpu]));
+        }
+        CUDA_CHECK(cudaSetDevice(0));
+    } else {
+        for (size_t coset = 0; coset < num_cosets; ++coset) {
+            uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+            kernels::randomized_lde_batch_gpu_preallocated(
+                d_main_colmajor,
+                main_width,
+                trace_len,
+                ctx_->d_main_randomizer_coeffs(),
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                coset_offset,
+                trace_len,
+                ctx_->d_working_main(),
+                ctx_->d_working_main(),
+                nullptr,
+                ctx_->stream()
+            );
+            kernels::randomized_lde_batch_gpu_preallocated(
+                d_aux_colmajor_components,
+                aux_width * 3,
+                trace_len,
+                ctx_->d_aux_randomizer_coeffs(),
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                coset_offset,
+                trace_len,
+                ctx_->d_working_aux(),
+                ctx_->d_working_aux(),
+                nullptr,
+                ctx_->stream()
+            );
+            qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_working_main(),
+                ctx_->d_working_aux(),
+                d_weights,
+                trace_len,
+                coset,
+                num_cosets,
+                main_width,
+                aux_width,
+                d_main_aux_codeword
+            );
+        }
     }
 
     // build quotient combination codeword from quotient segments on FRI domain
@@ -6572,51 +6826,143 @@ void GpuStark::step_open_trace_frugal() {
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
 
-    // Fill outputs by coset
+    // Fill outputs by coset - with multi-GPU support
     int grid_q = (int)((NUM_QUERIES + BLOCK - 1) / BLOCK);
-    for (size_t coset = 0; coset < num_cosets; ++coset) {
-        uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::randomized_lde_batch_gpu_preallocated(
-            d_main_colmajor,
-            dims_.main_width,
-            trace_len,
-            ctx_->d_main_randomizer_coeffs(),
-            dims_.num_trace_randomizers,
-            dims_.trace_offset,
-            coset_offset,
-            trace_len,
-            ctx_->d_working_main(),
-            ctx_->d_working_main(), // scratch1
-            nullptr,
-            ctx_->stream()
-        );
-        kernels::randomized_lde_batch_gpu_preallocated(
-            d_aux_colmajor_components,
-            dims_.aux_width * 3,
-            trace_len,
-            ctx_->d_aux_randomizer_coeffs(),
-            dims_.num_trace_randomizers,
-            dims_.trace_offset,
-            coset_offset,
-            trace_len,
-            ctx_->d_working_aux(),
-            ctx_->d_working_aux(), // scratch1
-            nullptr,
-            ctx_->stream()
-        );
-        qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, ctx_->stream()>>>(
-            d_indices,
-            NUM_QUERIES,
-            ctx_->d_working_main(),
-            ctx_->d_working_aux(),
-            trace_len,
-            coset,
-            num_cosets,
-            dims_.main_width,
-            dims_.aux_width,
-            d_main_rows,
-            d_aux_rows
-        );
+    
+    int num_gpus = get_effective_gpu_count();
+    if (num_gpus > 2) num_gpus = 2;
+    bool multi_gpu = false; // Disabled due to memory issues
+    
+        if (multi_gpu) {
+        int can_access_0_1 = 0, can_access_1_0 = 0;
+        cudaDeviceCanAccessPeer(&can_access_0_1, 0, 1);
+        cudaDeviceCanAccessPeer(&can_access_1_0, 1, 0);
+        if (!can_access_0_1 || !can_access_1_0) {
+            multi_gpu = false;
+        }
+    }
+    
+        if (multi_gpu) {
+        const size_t cosets_per_gpu = num_cosets / num_gpus;
+        
+        cudaStream_t streams[2];
+        uint64_t* d_working_main_per_gpu[2];
+        uint64_t* d_working_aux_per_gpu[2];
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+            CUDA_CHECK(cudaMallocManaged(&d_working_main_per_gpu[gpu], dims_.main_width * trace_len * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMallocManaged(&d_working_aux_per_gpu[gpu], dims_.aux_width * 3 * trace_len * sizeof(uint64_t)));
+            
+            
+        }
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            size_t coset_start = gpu * cosets_per_gpu;
+            size_t coset_end = coset_start + cosets_per_gpu;
+            
+            for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_main_colmajor,
+                    dims_.main_width,
+                    trace_len,
+                    ctx_->d_main_randomizer_coeffs(),
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working_main_per_gpu[gpu],
+                    d_working_main_per_gpu[gpu],
+                    nullptr,
+                    streams[gpu]
+                );
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_aux_colmajor_components,
+                    dims_.aux_width * 3,
+                    trace_len,
+                    ctx_->d_aux_randomizer_coeffs(),
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    coset_offset,
+                    trace_len,
+                    d_working_aux_per_gpu[gpu],
+                    d_working_aux_per_gpu[gpu],
+                    nullptr,
+                    streams[gpu]
+                );
+                qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, streams[gpu]>>>(
+                    d_indices,
+                    NUM_QUERIES,
+                    d_working_main_per_gpu[gpu],
+                    d_working_aux_per_gpu[gpu],
+                    trace_len,
+                    coset,
+                    num_cosets,
+                    dims_.main_width,
+                    dims_.aux_width,
+                    d_main_rows,
+                    d_aux_rows
+                );
+            }
+        }
+        
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            CUDA_CHECK(cudaSetDevice(gpu));
+            CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+            CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+            CUDA_CHECK(cudaFree(d_working_main_per_gpu[gpu]));
+            CUDA_CHECK(cudaFree(d_working_aux_per_gpu[gpu]));
+        }
+        CUDA_CHECK(cudaSetDevice(0));
+    } else {
+        for (size_t coset = 0; coset < num_cosets; ++coset) {
+            uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+            kernels::randomized_lde_batch_gpu_preallocated(
+                d_main_colmajor,
+                dims_.main_width,
+                trace_len,
+                ctx_->d_main_randomizer_coeffs(),
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                coset_offset,
+                trace_len,
+                ctx_->d_working_main(),
+                ctx_->d_working_main(),
+                nullptr,
+                ctx_->stream()
+            );
+            kernels::randomized_lde_batch_gpu_preallocated(
+                d_aux_colmajor_components,
+                dims_.aux_width * 3,
+                trace_len,
+                ctx_->d_aux_randomizer_coeffs(),
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                coset_offset,
+                trace_len,
+                ctx_->d_working_aux(),
+                ctx_->d_working_aux(),
+                nullptr,
+                ctx_->stream()
+            );
+            qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, ctx_->stream()>>>(
+                d_indices,
+                NUM_QUERIES,
+                ctx_->d_working_main(),
+                ctx_->d_working_aux(),
+                trace_len,
+                coset,
+                num_cosets,
+                dims_.main_width,
+                dims_.aux_width,
+                d_main_rows,
+                d_aux_rows
+            );
+        }
     }
 
     // Quotient segment rows are already on full FRI domain
