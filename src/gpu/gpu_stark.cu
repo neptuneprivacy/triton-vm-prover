@@ -2322,28 +2322,47 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
             
             if (profile_main) { std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (multi-GPU): " << elapsed_ms(t_stream) << " ms\n"; }
         } else {
-            // Single-GPU path
+            // Single-GPU path with TWO-PHASE optimization
+            // Phase 1: Compute polynomial coefficients ONCE (memcpy + INTT)
+            // Phase 2: For each coset, only evaluate at coset points (fast)
             uint64_t* d_tmp_digests = ctx_->d_scratch_b();
             uint64_t* d_working = ctx_->d_working_main();
+            
+            // Allocate buffers for coefficients (reused for all cosets)
+            uint64_t* d_coefficients = nullptr;
+            uint64_t* d_tail_scratch = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_coefficients, width * trace_len * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMalloc(&d_tail_scratch, width * trace_len * sizeof(uint64_t)));
+            
+            // Phase 1: Compute coefficients once (expensive: ~487ms)
+            if (profile_main) { std::cout << "    [Main] FRUGAL Phase 1: Computing coefficients...\n"; }
+            kernels::compute_trace_coefficients_gpu(
+                d_trace_colmajor,
+                width,
+                trace_len,
+                trace_offset,
+                d_coefficients,
+                ctx_->stream()
+            );
             
             constexpr int DIGEST_BLOCK = 256;
             int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
 
+            // Phase 2: Evaluate at each coset (fast: ~20ms each)
+            if (profile_main) { std::cout << "    [Main] FRUGAL Phase 2: Evaluating " << num_cosets << " cosets...\n"; }
             for (size_t coset = 0; coset < num_cosets; ++coset) {
                 uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
 
-                kernels::randomized_lde_batch_gpu_preallocated(
-                    d_trace_colmajor,
+                kernels::evaluate_coset_from_coefficients_gpu(
+                    d_coefficients,
                     width,
                     trace_len,
                     d_randomizer_coeffs,
                     num_randomizers,
                     trace_offset,
                     coset_offset,
-                    trace_len,
                     d_working,
-                    d_working,
-                    nullptr,
+                    d_tail_scratch,
                     ctx_->stream()
                 );
 
@@ -2363,8 +2382,11 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
                     num_cosets
                 );
             }
+            
+            CUDA_CHECK(cudaFree(d_coefficients));
+            CUDA_CHECK(cudaFree(d_tail_scratch));
 
-            if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter: " << elapsed_ms(t_stream) << " ms\n"; }
+            if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (2-phase): " << elapsed_ms(t_stream) << " ms\n"; }
         }
     } else {
         // Note: Can't use scratch_a for interpolants because d_trace_colmajor IS scratch_a
@@ -2578,9 +2600,14 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
     static int use_cpu_aux = -1;
     if (use_cpu_aux == -1) {
         const char* env = std::getenv("TRITON_AUX_CPU");
-        use_cpu_aux = (env && (strcmp(env, "1") == 0 || strcmp(env, "true") == 0)) ? 1 : 0;
+        if (env) {
+            use_cpu_aux = (strcmp(env, "1") == 0 || strcmp(env, "true") == 0) ? 1 : 0;
+        } else {
+            // Default to CPU aux in frugal mode (GPU aux is much slower for large padded heights)
+            use_cpu_aux = dims_.lde_frugal_mode ? 1 : 0;
+        }
         if (use_cpu_aux) {
-            TRITON_PROFILE_COUT("[AUX] Using CPU computation mode (TRITON_AUX_CPU=1)" << std::endl);
+            TRITON_PROFILE_COUT("[AUX] Using CPU computation mode (TRITON_AUX_CPU=1 or frugal default)" << std::endl);
             TRITON_PROFILE_COUT("🔧 [CPU-AUX TAG] Hybrid CPU/GPU auxiliary table computation active" << std::endl);
         }
     }

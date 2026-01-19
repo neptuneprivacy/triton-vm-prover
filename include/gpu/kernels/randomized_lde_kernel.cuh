@@ -105,6 +105,63 @@ uint64_t bfield_inv_host(uint64_t a);
 uint64_t bfield_pow_host(uint64_t base, uint64_t exp);
 
 /**
+ * Phase 1: Compute polynomial coefficients from trace (INTT + coset scaling)
+ * 
+ * This is the expensive step that only needs to be done ONCE per trace table,
+ * regardless of how many cosets will be evaluated.
+ * 
+ * Steps performed:
+ * 1. Copy trace to coefficients buffer
+ * 2. INTT to get polynomial coefficients
+ * 3. Apply trace_offset coset scaling
+ * 
+ * After calling this, use evaluate_coset_from_coefficients_gpu() for each coset.
+ * 
+ * @param d_trace_table Column-major trace table
+ * @param num_cols Number of columns
+ * @param trace_len Trace domain length
+ * @param trace_offset Trace domain offset (usually 1)
+ * @param d_coefficients Output: polynomial coefficients [num_cols * trace_len]
+ * @param stream CUDA stream
+ */
+void compute_trace_coefficients_gpu(
+    const uint64_t* d_trace_table,
+    size_t num_cols,
+    size_t trace_len,
+    uint64_t trace_offset,
+    uint64_t* d_coefficients,
+    cudaStream_t stream = 0
+);
+
+/**
+ * Phase 2: Evaluate polynomial at a specific coset from pre-computed coefficients
+ * 
+ * This is the fast step that can be called multiple times with different coset offsets.
+ * 
+ * @param d_coefficients Pre-computed coefficients from compute_trace_coefficients_gpu()
+ * @param num_cols Number of columns
+ * @param trace_len Coefficient count per column
+ * @param d_randomizer_coeffs Randomizer coefficients [num_cols * randomizer_len]
+ * @param randomizer_len Randomizer length per column
+ * @param trace_offset Original trace domain offset
+ * @param coset_offset Target coset offset
+ * @param d_output Output: LDE values at coset [num_cols * trace_len]
+ * @param stream CUDA stream
+ */
+void evaluate_coset_from_coefficients_gpu(
+    const uint64_t* d_coefficients,
+    size_t num_cols,
+    size_t trace_len,
+    const uint64_t* d_randomizer_coeffs,
+    size_t randomizer_len,
+    uint64_t trace_offset,
+    uint64_t coset_offset,
+    uint64_t* d_output,
+    uint64_t* d_tail_scratch,
+    cudaStream_t stream = 0
+);
+
+/**
  * Batch randomized LDE for XFieldElement columns (aux table)
  *
  * Each XFE column is processed as 3 BFE components.
