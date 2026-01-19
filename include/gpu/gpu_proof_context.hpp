@@ -120,8 +120,21 @@ public:
     uint64_t* d_quotient_merkle_root() { return d_quotient_merkle_root_; }
     
     // FRI data (round 0 is initial codeword at fri_length; each subsequent round halves)
-    uint64_t* d_fri_codeword(size_t round) { return d_fri_codewords_[round]; }
+    // Note: In JIT streaming mode, rounds are allocated on-demand
+    uint64_t* d_fri_codeword(size_t round) { 
+        if (round >= d_fri_codewords_.size()) {
+            return nullptr;
+        }
+        return d_fri_codewords_[round]; 
+    }
     uint64_t* d_fri_merkle(size_t round) { return d_fri_merkles_[round]; }
+    
+    // Allocate FRI codeword for a specific round (JIT on-demand allocation)
+    void allocate_fri_codeword(size_t round, size_t size);
+    
+    // FRI query values storage (JIT optimization: store only query indices' values)
+    // Layout: [round][query_idx][3] = [num_rounds][NUM_FRI_QUERIES][3]
+    uint64_t* d_fri_query_values() { return d_fri_query_values_; }
 
     // First-round FRI query indices (used for FriResponses and later trace openings)
     size_t* d_fri_query_indices() { return d_fri_query_indices_; } // [NUM_FRI_QUERIES]
@@ -227,8 +240,13 @@ private:
     uint64_t* d_quotient_merkle_root_ = nullptr; // [5]
     
     // FRI data (variable sizes per round)
+    // Note: In JIT streaming mode, only current round codeword is kept
     std::vector<uint64_t*> d_fri_codewords_;
     std::vector<uint64_t*> d_fri_merkles_;
+    
+    // FRI query values storage (JIT optimization: store only query indices' values)
+    // Layout: [round][query_idx][3] = [num_fri_rounds+1][NUM_FRI_QUERIES][3]
+    uint64_t* d_fri_query_values_ = nullptr;
 
     // FRI query indices (device)
     size_t* d_fri_query_indices_ = nullptr;

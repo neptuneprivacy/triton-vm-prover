@@ -7,6 +7,7 @@
 #ifdef TRITON_CUDA_ENABLED
 
 #include "gpu/kernels/tip5_kernel.cuh"
+#include "gpu/cuda_common.cuh"
 #include <cuda_runtime.h>
 
 namespace triton_vm {
@@ -14,6 +15,25 @@ namespace gpu {
 namespace kernels {
 
 constexpr size_t DIGEST_LEN = 5;
+
+// ============================================================================
+// Copy Kernel (works with both device and unified memory)
+// ============================================================================
+
+__global__ void copy_digests_kernel(
+    const uint64_t* __restrict__ src,
+    uint64_t* __restrict__ dst,
+    size_t num_digests
+) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_digests) return;
+    
+    size_t base = idx * DIGEST_LEN;
+    #pragma unroll
+    for (size_t i = 0; i < DIGEST_LEN; ++i) {
+        dst[base + i] = src[base + i];
+    }
+}
 
 // ============================================================================
 // Host Interface
@@ -63,11 +83,15 @@ void merkle_tree_gpu(
     
     // Copy leaves to beginning of tree (unless caller already wrote leaves in-place).
     if (d_tree != d_leaves) {
+        // Use cudaMemcpyDefault for unified memory compatibility
+        cudaMemcpyKind copy_kind = triton_vm::gpu::use_unified_memory() 
+            ? cudaMemcpyDefault 
+            : cudaMemcpyDeviceToDevice;
         cudaMemcpyAsync(
             d_tree,
             d_leaves,
             num_leaves * DIGEST_LEN * sizeof(uint64_t),
-            cudaMemcpyDeviceToDevice,
+            copy_kind,
             stream
         );
     }
@@ -102,10 +126,10 @@ void merkle_tree_gpu(
 }
 
 /**
- * Compute just the Merkle root on GPU (optimized - no temporary allocation)
+ * Compute just the Merkle root on GPU (optimized - computes root directly)
  * 
- * This version computes the root in-place by building the tree level by level
- * and only keeping the current level in memory.
+ * This version computes the root by hashing level by level without storing
+ * the full tree. This avoids large memory allocations and copy issues.
  */
 void merkle_root_gpu(
     const uint64_t* d_leaves,
@@ -116,71 +140,86 @@ void merkle_root_gpu(
     if (num_leaves == 0) return;
     
     if (num_leaves == 1) {
-        cudaMemcpyAsync(
-            d_root,
-            d_leaves,
-            DIGEST_LEN * sizeof(uint64_t),
-            cudaMemcpyDeviceToDevice,
-            stream
-        );
+        // Single leaf: root is the leaf itself
+        dim3 block(256);
+        dim3 grid(1);
+        copy_digests_kernel<<<grid, block, 0, stream>>>(d_leaves, d_root, 1);
+        CUDA_CHECK(cudaGetLastError());
         return;
     }
     
-    // For small trees, use a scratch buffer that's reused
-    // For large trees, we build level by level in-place
-    size_t current_level_size = num_leaves;
+    // Compute root by hashing level by level
+    // We only need two buffers: one for current level, one for next level
+    size_t current_size = num_leaves;
     const uint64_t* current_level = d_leaves;
     
-    // Allocate scratch space for one level (worst case: num_leaves/2 digests)
-    size_t max_level_size = (num_leaves + 1) / 2;
-    uint64_t* d_level_a;
-    uint64_t* d_level_b;
-    cudaMalloc(&d_level_a, max_level_size * DIGEST_LEN * sizeof(uint64_t));
-    cudaMalloc(&d_level_b, max_level_size * DIGEST_LEN * sizeof(uint64_t));
+    // Allocate buffers for two levels (current and next)
+    // Next level will be at most current_size/2
+    size_t level_a_size = num_leaves;
+    size_t level_b_size = (num_leaves + 1) / 2;
+    uint64_t* d_level_a = nullptr;
+    uint64_t* d_level_b = nullptr;
+    
+    size_t level_a_bytes = level_a_size * DIGEST_LEN * sizeof(uint64_t);
+    size_t level_b_bytes = level_b_size * DIGEST_LEN * sizeof(uint64_t);
+    
+    if (triton_vm::gpu::use_unified_memory()) {
+        CUDA_CHECK(cudaMallocManaged(&d_level_a, level_a_bytes));
+        CUDA_CHECK(cudaMallocManaged(&d_level_b, level_b_bytes));
+    } else {
+        CUDA_CHECK(cudaMalloc(&d_level_a, level_a_bytes));
+        CUDA_CHECK(cudaMalloc(&d_level_b, level_b_bytes));
+    }
+    
+    // Copy leaves to first buffer using cudaMemcpyAsync (works better with unified memory)
+    cudaMemcpyKind copy_kind = triton_vm::gpu::use_unified_memory() 
+        ? cudaMemcpyDefault 
+        : cudaMemcpyDeviceToDevice;
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_level_a,
+        d_leaves,
+        num_leaves * DIGEST_LEN * sizeof(uint64_t),
+        copy_kind,
+        stream
+    ));
+    
+    // Synchronize to ensure copy is complete before hashing
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     
     uint64_t* d_current = d_level_a;
     uint64_t* d_next = d_level_b;
     
-    // Copy leaves to first level buffer
-    cudaMemcpyAsync(
-        d_current,
-        d_leaves,
-        num_leaves * DIGEST_LEN * sizeof(uint64_t),
-        cudaMemcpyDeviceToDevice,
-        stream
-    );
-    
-    // Build tree level by level
-    while (current_level_size > 1) {
-        size_t pairs = current_level_size / 2;
+    // Hash level by level until we get the root
+    while (current_size > 1) {
+        size_t pairs = current_size / 2;
+        if (pairs == 0) break; // Safety check
         
-        // Hash pairs: current_level[2*i], current_level[2*i+1] -> next_level[i]
-        hash_pairs_strided_gpu(
-            d_current,
-            d_next,
-            pairs,
-            stream
-        );
+        // Hash pairs: current[2*i], current[2*i+1] -> next[i]
+        // Verify we have enough space
+        if (pairs > level_b_size && d_next == d_level_b) {
+            throw std::runtime_error("Insufficient buffer size for hash pairs");
+        }
+        hash_pairs_strided_gpu(d_current, d_next, pairs, stream);
+        CUDA_CHECK(cudaGetLastError());
         
-        // Swap buffers
+        // Swap buffers for next iteration
         uint64_t* temp = d_current;
         d_current = d_next;
         d_next = temp;
         
-        current_level_size = pairs;
+        current_size = pairs;
     }
     
     // Root is in d_current[0]
-    cudaMemcpyAsync(
-        d_root,
-        d_current,
-        DIGEST_LEN * sizeof(uint64_t),
-        cudaMemcpyDeviceToDevice,
-        stream
-    );
+    dim3 root_block(256);
+    dim3 root_grid(1);
+    copy_digests_kernel<<<root_grid, root_block, 0, stream>>>(d_current, d_root, 1);
+    CUDA_CHECK(cudaGetLastError());
     
-    cudaFree(d_level_a);
-    cudaFree(d_level_b);
+    // Synchronize before freeing
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaFree(d_level_a));
+    CUDA_CHECK(cudaFree(d_level_b));
 }
 
 // Backward compatibility

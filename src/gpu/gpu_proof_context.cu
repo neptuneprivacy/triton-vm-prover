@@ -162,24 +162,64 @@ void GpuProofContext::allocate_memory() {
     total += 3 * 5 * sizeof(uint64_t);
     
     // FRI codewords and Merkle trees (sizes per round)
-    // We allocate round 0 for the initial codeword (fri_length), then each subsequent round halves.
-    size_t current_size = fri_length;
-    for (size_t round = 0; round <= dims_.num_fri_rounds; ++round) {
-        // Codeword: current_size × 3 (XFE) × sizeof(u64)
-        uint64_t* d_codeword;
-        size_t codeword_size = current_size * 3 * sizeof(uint64_t);
-        CUDA_ALLOC(&d_codeword, codeword_size);
-        d_fri_codewords_.push_back(d_codeword);
-        total += codeword_size;
+    // Check for JIT streaming mode
+    const char* jit_fri_env = std::getenv("TRITON_GPU_JIT_FRI_STREAMING");
+    bool jit_fri_streaming = (jit_fri_env && (strcmp(jit_fri_env, "1") == 0 || strcmp(jit_fri_env, "true") == 0));
+    
+    if (jit_fri_streaming) {
+        // JIT streaming mode: Only allocate round 0 initially, allocate other rounds on-demand during folding
+        // This saves memory by not pre-allocating all rounds upfront
+        size_t max_round_size = fri_length;
         
-        // Merkle tree: 2 × current_size × 5 × sizeof(u64)
-        uint64_t* d_merkle;
-        size_t merkle_size = 2 * current_size * 5 * sizeof(uint64_t);
-        CUDA_ALLOC(&d_merkle, merkle_size);
-        d_fri_merkles_.push_back(d_merkle);
-        total += merkle_size;
+        // Allocate round 0 (initial codeword - kept for queries)
+        uint64_t* d_codeword0;
+        size_t codeword0_size = max_round_size * 3 * sizeof(uint64_t);
+        CUDA_ALLOC(&d_codeword0, codeword0_size);
+        d_fri_codewords_.push_back(d_codeword0);
+        total += codeword0_size;
+        
+        // Reserve space for other rounds (will be allocated on-demand during folding)
+        // Initialize with nullptr, will be allocated as needed
+        for (size_t round = 1; round <= dims_.num_fri_rounds; ++round) {
+            d_fri_codewords_.push_back(nullptr);
+        }
+        
+        // Allocate Merkle trees for all rounds (needed for auth paths - these are small)
+        size_t current_size = fri_length;
+        for (size_t round = 0; round <= dims_.num_fri_rounds; ++round) {
+            uint64_t* d_merkle;
+            size_t merkle_size = 2 * current_size * 5 * sizeof(uint64_t);
+            CUDA_ALLOC(&d_merkle, merkle_size);
+            d_fri_merkles_.push_back(d_merkle);
+            total += merkle_size;
+            if (current_size > 1) current_size /= 2;
+        }
+        
+        // Allocate query values storage: [num_rounds+1][NUM_FRI_QUERIES][3]
+        // This stores query values for rounds (backup in case rounds are freed)
+        size_t query_values_size = (dims_.num_fri_rounds + 1) * NUM_FRI_QUERIES * 3 * sizeof(uint64_t);
+        CUDA_ALLOC(&d_fri_query_values_, query_values_size);
+        total += query_values_size;
+    } else {
+        // Original mode: Allocate all rounds
+        size_t current_size = fri_length;
+        for (size_t round = 0; round <= dims_.num_fri_rounds; ++round) {
+            // Codeword: current_size × 3 (XFE) × sizeof(u64)
+            uint64_t* d_codeword;
+            size_t codeword_size = current_size * 3 * sizeof(uint64_t);
+            CUDA_ALLOC(&d_codeword, codeword_size);
+            d_fri_codewords_.push_back(d_codeword);
+            total += codeword_size;
+            
+            // Merkle tree: 2 × current_size × 5 × sizeof(u64)
+            uint64_t* d_merkle;
+            size_t merkle_size = 2 * current_size * 5 * sizeof(uint64_t);
+            CUDA_ALLOC(&d_merkle, merkle_size);
+            d_fri_merkles_.push_back(d_merkle);
+            total += merkle_size;
 
-        if (current_size > 1) current_size /= 2;
+            if (current_size > 1) current_size /= 2;
+        }
     }
     
     // Challenges: MAX_CHALLENGES × 3 (XFE) × sizeof(u64)
@@ -274,6 +314,8 @@ void GpuProofContext::free_memory() {
     }
     d_fri_merkles_.clear();
     
+    if (d_fri_query_values_) cudaFree(d_fri_query_values_);
+    
     if (d_challenges_) cudaFree(d_challenges_);
     if (d_quotient_weights_) cudaFree(d_quotient_weights_);
     if (d_fri_query_indices_) cudaFree(d_fri_query_indices_);
@@ -301,6 +343,18 @@ void GpuProofContext::upload_main_table(const uint64_t* host_data, size_t num_el
     ));
 
     build_hash_limb_cache();
+}
+
+void GpuProofContext::allocate_fri_codeword(size_t round, size_t size) {
+    if (round >= d_fri_codewords_.size()) {
+        d_fri_codewords_.resize(round + 1, nullptr);
+    }
+    if (d_fri_codewords_[round] == nullptr) {
+        size_t codeword_size = size * 3 * sizeof(uint64_t);
+        uint64_t* ptr = nullptr;
+        CUDA_ALLOC(&ptr, codeword_size);
+        d_fri_codewords_[round] = ptr;
+    }
 }
 
 void GpuProofContext::build_hash_limb_cache() {
