@@ -14,6 +14,8 @@
 #include "gpu/gpu_proof_context.hpp"
 #include "gpu/cuda_common.cuh"
 #include "common/debug_control.hpp"
+#include "ntt/ntt.hpp"  // For NTT::interpolate (FriPolynomial)
+#include "proof_stream/proof_stream.hpp"  // For ProofItem encoding
 #include <fstream>
 #include <iomanip>
 
@@ -1396,11 +1398,13 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     // Automatically configure environment based on padded height
     // Always override user settings to ensure optimal configuration
     if (padded_height >= THRESHOLD_HEIGHT) {
-        // Large instances (>= 2^21): Enable RAM overflow mode
+        // Large instances (>= 2^21): Enable RAM overflow mode AND multi-GPU unified memory
         setenv("TRITON_GPU_USE_RAM_OVERFLOW", "1", 1);  // Always override
         setenv("TRITON_PAD_SCALE_MODE", "4", 1);
+        // Enable unified memory mode for multi-GPU pooling (CRITICAL for large instances!)
+        use_unified_memory() = true;
         std::cout << "[GPU] Auto-config: Padded height >= 2^21 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4, unified_memory=true" << std::endl;
     } else {
         // Small instances (<= 2^20): Use direct GPU mode
         setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);  // Always override
@@ -1897,7 +1901,15 @@ void GpuStark::step_initialize_fiat_shamir(const Claim& claim) {
     uint32_t log2_height = 0;
     size_t temp = dims_.padded_height;
     while (temp >>= 1) log2_height++;
-    // NOTE: Log2PaddedHeight is NOT included in Fiat-Shamir (matches Rust).
+    
+    // NOTE: After triton-vm.patch, Log2PaddedHeight IS included in Fiat-Shamir!
+    // Use ProofItem::encode() for correct encoding format
+    {
+        auto log2_item = ProofItem::make_log2_padded_height(log2_height);
+        auto encoding = log2_item.encode();
+        fs_cpu_.alter_fiat_shamir_state_with(encoding);
+    }
+    
     // Append to proof buffer (we store just the u32 value; main_gpu_full reconstructs the ProofItem)
     uint64_t log2_val = log2_height;
     cudaMemcpyAsync(ctx_->d_proof_buffer(), &log2_val, sizeof(uint64_t),
@@ -4765,7 +4777,7 @@ void GpuStark::step_fri_protocol() {
     if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_loop, ctx_->stream())); }
 
     // Append FriCodeword (last round codeword) as raw XFE triplets.
-    // This is not absorbed into Fiat-Shamir (matches ProofItem::include_in_fiat_shamir_heuristic()).
+    // FriCodeword is NOT absorbed into Fiat-Shamir.
     const uint64_t* d_last_codeword = ctx_->d_fri_codeword(dims_.num_fri_rounds);
     // current_size is the last domain length after folding
     CUDA_CHECK(cudaMemcpyAsync(
@@ -4776,6 +4788,78 @@ void GpuStark::step_fri_protocol() {
         ctx_->stream()
     ));
     proof_size_ += current_size * 3;
+
+    // ---------------------------------------------------------------------
+    // Update Fiat-Shamir state with FriPolynomial (interpolated last codeword)
+    // After triton-vm.patch, FriPolynomial IS absorbed into Fiat-Shamir!
+    // 
+    // IMPORTANT: The GPU sponge state has been updated during FRI rounds
+    // (absorbing round roots, sampling folding challenges). We must download
+    // the current GPU state, absorb FriPolynomial, then upload the result.
+    // We cannot use fs_cpu_ because it hasn't tracked FRI round operations.
+    // ---------------------------------------------------------------------
+    {
+        // 1. Download last codeword to CPU
+        std::vector<uint64_t> h_codeword(current_size * 3);
+        CUDA_CHECK(cudaMemcpy(h_codeword.data(), d_last_codeword, 
+            current_size * 3 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 2. Extract 3 BFieldElement components
+        std::vector<BFieldElement> comp0(current_size), comp1(current_size), comp2(current_size);
+        for (size_t i = 0; i < current_size; ++i) {
+            comp0[i] = BFieldElement(h_codeword[i * 3 + 0]);
+            comp1[i] = BFieldElement(h_codeword[i * 3 + 1]);
+            comp2[i] = BFieldElement(h_codeword[i * 3 + 2]);
+        }
+        
+        // 3. Interpolate each component (INTT)
+        auto coeffs0 = NTT::interpolate(comp0);
+        auto coeffs1 = NTT::interpolate(comp1);
+        auto coeffs2 = NTT::interpolate(comp2);
+        
+        // 4. Combine back and trim trailing zeros
+        std::vector<XFieldElement> polynomial(coeffs0.size());
+        for (size_t i = 0; i < coeffs0.size(); ++i) {
+            polynomial[i] = XFieldElement(coeffs0[i], coeffs1[i], coeffs2[i]);
+        }
+        // Trim trailing zeros (matches Rust Polynomial encoding)
+        while (!polynomial.empty() && polynomial.back() == XFieldElement::zero()) {
+            polynomial.pop_back();
+        }
+        
+        // 5. Create ProofItem and use proper encoding
+        auto poly_item = ProofItem::fri_polynomial(polynomial);
+        auto poly_encoding = poly_item.encode();
+        
+        // 6. Download current GPU sponge state (has all FRI round operations)
+        std::array<uint64_t, 16> h_sponge{};
+        CUDA_CHECK(cudaMemcpy(h_sponge.data(), ctx_->d_sponge_state(),
+            16 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 7. Create a temporary ProofStream with this state and absorb FriPolynomial
+        ProofStream temp_ps;
+        Tip5 temp_tip5;
+        for (size_t i = 0; i < 16; ++i) {
+            temp_tip5.state[i] = BFieldElement(h_sponge[i]);
+        }
+        temp_ps.set_sponge_state(temp_tip5);
+        temp_ps.alter_fiat_shamir_state_with(poly_encoding);
+        
+        // 8. Upload updated sponge state back to GPU
+        for (size_t i = 0; i < 16; ++i) {
+            h_sponge[i] = temp_ps.sponge().state[i].value();
+        }
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_sponge_state(),
+            h_sponge.data(),
+            16 * sizeof(uint64_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+        
+        // NOTE: FriPolynomial is NOT written to proof buffer; main_gpu_full.cpp
+        // will compute it from FriCodeword and enqueue to ProofStream.
+    }
 
     // ---------------------------------------------------------------------
     // Query phase: sample indices and append FriResponse items (payloads)

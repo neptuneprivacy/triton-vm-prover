@@ -138,6 +138,9 @@ pub enum VmProcessError {
 
     #[error("Triton VM failed: {0}")]
     TritonVmFailed(InstructionError),
+
+    #[error("Task was cancelled")]
+    Cancelled,
 }
 
 enum ProverProcessCompletion {
@@ -264,7 +267,11 @@ impl ProverJob {
                 Ok(r) => r,
                 Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                 Err(e) if e.is_cancelled() => {
-                    panic!("VM::run() task was cancelled unexpectedly. error: {e}")
+                    // Task was cancelled, likely due to job cancellation during select!
+                    // Return a cancellation error instead of panicking
+                    return Err(ProverJobError::TritonVmProverFailed(
+                        VmProcessError::Cancelled,
+                    ));
                 }
                 Err(e) => panic!("unexpected error from VM::run() spawn-blocking task. {e}"),
             };
@@ -393,9 +400,11 @@ impl ProverJob {
 
         // start child process
         let mut child = {
+            let claim_json = serde_json::to_string(&self.claim)?;
+            let program_json = serde_json::to_string(&self.program)?;
             let inputs = [
-                serde_json::to_string(&self.claim)?,
-                serde_json::to_string(&self.program)?,
+                claim_json,
+                program_json,
                 serde_json::to_string(&self.nondeterminism)?,
                 serde_json::to_string(&self.job_settings.max_log2_padded_height_for_proofs)?,
                 serde_json::to_string(&self.job_settings.triton_vm_env_vars)?,
@@ -443,7 +452,12 @@ impl ProverJob {
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    tracing::debug!("[triton-vm prover]: {line}");
+                    // Log at info level for important messages like errors
+                    if line.contains("ERROR") || line.contains("panic") || line.contains("Failed") {
+                        tracing::error!("[triton-vm prover]: {line}");
+                    } else {
+                        tracing::debug!("[triton-vm prover]: {line}");
+                    }
                 }
             });
         }

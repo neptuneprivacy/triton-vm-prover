@@ -267,6 +267,18 @@ impl MergeWitness {
         let right_claim = Claim::new(single_proof_program_hash)
             .with_input(self.right_kernel.mast_hash().reversed().values());
 
+        // Verify proofs are valid before extracting nondeterministic digests
+        // This check prevents panics if proofs are invalid (e.g., mock proofs in regtest)
+        let stark = Stark::default();
+        if !tasm_lib::triton_vm::verify(stark, &left_claim, &self.left_proof) {
+            tracing::warn!("Left proof in merge is invalid, skipping nondeterminism update");
+            return;
+        }
+        if !tasm_lib::triton_vm::verify(stark, &right_claim, &self.right_proof) {
+            tracing::warn!("Right proof in merge is invalid, skipping nondeterminism update");
+            return;
+        }
+
         verify_snippet.update_nondeterminism(nondeterminism, &self.left_proof, &left_claim);
         verify_snippet.update_nondeterminism(nondeterminism, &self.right_proof, &right_claim);
 
@@ -323,7 +335,7 @@ impl MergeBranch {
 }
 
 impl BasicSnippet for MergeBranch {
-    fn inputs(&self) -> Vec<(DataType, String)> {
+    fn parameters(&self) -> Vec<(DataType, String)> {
         vec![
             (DataType::Digest, "single_proof_program_digest".to_owned()),
             (DataType::Digest, "new_tx_kernel_digest".to_owned()),
@@ -332,7 +344,7 @@ impl BasicSnippet for MergeBranch {
         ]
     }
 
-    fn outputs(&self) -> Vec<(DataType, String)> {
+    fn return_values(&self) -> Vec<(DataType, String)> {
         vec![
             (DataType::Digest, "single_proof_program_digest".to_owned()),
             (DataType::Digest, "new_tx_kernel_digest".to_owned()),

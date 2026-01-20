@@ -782,6 +782,7 @@ pub unsafe extern "C" fn proof_item_encode_general(
     }
 
     // Reconstruct ProofItem based on discriminant
+    // NOTE: Discriminant order updated to match triton-vm.patch enum ordering
     let proof_item = match discriminant {
         0 => {
             // MerkleRoot(Digest)
@@ -799,7 +800,11 @@ pub unsafe extern "C" fn proof_item_encode_general(
             ProofItem::MerkleRoot(digest)
         }
         1 => {
-            // OutOfDomainMainRow(Box<MainRow<XFieldElement>>)
+            // Log2PaddedHeight(u32) - moved from 7 to 1
+            ProofItem::Log2PaddedHeight(u32_value)
+        }
+        2 => {
+            // OutOfDomainMainRow(Box<MainRow<XFieldElement>>) - moved from 1 to 2
             if xfield_data.is_null() || xfield_count != 379 {
                 return -1;
             }
@@ -817,8 +822,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             let row: MainRow<XFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
             ProofItem::OutOfDomainMainRow(Box::new(row))
         }
-        2 => {
-            // OutOfDomainAuxRow(Box<AuxiliaryRow>)
+        3 => {
+            // OutOfDomainAuxRow(Box<AuxiliaryRow>) - moved from 2 to 3
             if xfield_data.is_null() || xfield_count != 88 {
                 return -1;
             }
@@ -836,8 +841,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
             ProofItem::OutOfDomainAuxRow(Box::new(row))
         }
-        3 => {
-            // OutOfDomainQuotientSegments(QuotientSegments)
+        4 => {
+            // OutOfDomainQuotientSegments(QuotientSegments) - moved from 3 to 4
             if xfield_data.is_null() || xfield_count != 4 {
                 return -1;
             }
@@ -855,8 +860,28 @@ pub unsafe extern "C" fn proof_item_encode_general(
             let segments: QuotientSegments = segments_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
             ProofItem::OutOfDomainQuotientSegments(segments)
         }
-        4 => {
-            // AuthenticationStructure(Vec<Digest>)
+        5 => {
+            // FriPolynomial(Polynomial<'static, XFieldElement>) - moved from 10 to 5
+            if xfield_data.is_null() {
+                return -1;
+            }
+            let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
+            let mut coeffs = Vec::with_capacity(xfield_count);
+            for i in 0..xfield_count {
+                let start = i * 3;
+                let xfe = XFieldElement::new([
+                    BFieldElement::new(xfield_slice[start]),
+                    BFieldElement::new(xfield_slice[start + 1]),
+                    BFieldElement::new(xfield_slice[start + 2]),
+                ]);
+                coeffs.push(xfe);
+            }
+            // Polynomial::new trims trailing zeros, matching Rust's behavior
+            let poly = Polynomial::new(coeffs);
+            ProofItem::FriPolynomial(poly)
+        }
+        6 => {
+            // AuthenticationStructure(Vec<Digest>) - moved from 4 to 6
             if digest_data.is_null() {
                 return -1;
             }
@@ -875,8 +900,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::AuthenticationStructure(digests)
         }
-        5 => {
-            // MasterMainTableRows(Vec<MainRow<BFieldElement>>)
+        7 => {
+            // MasterMainTableRows(Vec<MainRow<BFieldElement>>) - moved from 5 to 7
             if bfield_data.is_null() || bfield_count % 379 != 0 {
                 return -1;
             }
@@ -894,8 +919,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::MasterMainTableRows(rows)
         }
-        6 => {
-            // MasterAuxTableRows(Vec<AuxiliaryRow>)
+        8 => {
+            // MasterAuxTableRows(Vec<AuxiliaryRow>) - moved from 6 to 8
             if xfield_data.is_null() || xfield_count % 88 != 0 {
                 return -1;
             }
@@ -918,12 +943,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::MasterAuxTableRows(rows)
         }
-        7 => {
-            // Log2PaddedHeight(u32)
-            ProofItem::Log2PaddedHeight(u32_value)
-        }
-        8 => {
-            // QuotientSegmentsElements(Vec<QuotientSegments>)
+        9 => {
+            // QuotientSegmentsElements(Vec<QuotientSegments>) - moved from 8 to 9
             if xfield_data.is_null() || xfield_count % 4 != 0 {
                 return -1;
             }
@@ -946,8 +967,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::QuotientSegmentsElements(segments_vec)
         }
-        9 => {
-            // FriCodeword(Vec<XFieldElement>)
+        10 => {
+            // FriCodeword(Vec<XFieldElement>) - moved from 9 to 10
             if xfield_data.is_null() {
                 return -1;
             }
@@ -964,28 +985,8 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::FriCodeword(codeword)
         }
-        10 => {
-            // FriPolynomial(Polynomial<'static, XFieldElement>)
-            if xfield_data.is_null() {
-                return -1;
-            }
-            let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-            let mut coeffs = Vec::with_capacity(xfield_count);
-            for i in 0..xfield_count {
-                let start = i * 3;
-                let xfe = XFieldElement::new([
-                    BFieldElement::new(xfield_slice[start]),
-                    BFieldElement::new(xfield_slice[start + 1]),
-                    BFieldElement::new(xfield_slice[start + 2]),
-                ]);
-                coeffs.push(xfe);
-            }
-            // Polynomial::new trims trailing zeros, matching Rust's behavior
-            let poly = Polynomial::new(coeffs);
-            ProofItem::FriPolynomial(poly)
-        }
         11 => {
-            // FriResponse(FriResponse)
+            // FriResponse(FriResponse) - unchanged
             if digest_data.is_null() || xfield_data.is_null() {
                 return -1;
             }
@@ -1236,7 +1237,7 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         };
 
         // Reconstruct ProofItem - reuse the logic from proof_item_encode_general
-        // We'll call a helper function to avoid code duplication
+        // NOTE: Discriminant order updated to match triton-vm.patch enum ordering
         let proof_item = match discriminant {
             0 => {
                 // MerkleRoot(Digest)
@@ -1254,7 +1255,11 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 ProofItem::MerkleRoot(digest)
             }
             1 => {
-                // OutOfDomainMainRow(Box<MainRow<XFieldElement>>)
+                // Log2PaddedHeight(u32) - moved from 7 to 1
+                ProofItem::Log2PaddedHeight(u32_value)
+            }
+            2 => {
+                // OutOfDomainMainRow(Box<MainRow<XFieldElement>>) - moved from 1 to 2
                 if xfield_data.is_null() || xfield_count != 379 {
                     return -1;
                 }
@@ -1272,8 +1277,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 let row: MainRow<XFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
                 ProofItem::OutOfDomainMainRow(Box::new(row))
             }
-            2 => {
-                // OutOfDomainAuxRow(Box<AuxiliaryRow>)
+            3 => {
+                // OutOfDomainAuxRow(Box<AuxiliaryRow>) - moved from 2 to 3
                 if xfield_data.is_null() || xfield_count != 88 {
                     return -1;
                 }
@@ -1291,8 +1296,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
                 ProofItem::OutOfDomainAuxRow(Box::new(row))
             }
-            3 => {
-                // OutOfDomainQuotientSegments(QuotientSegments)
+            4 => {
+                // OutOfDomainQuotientSegments(QuotientSegments) - moved from 3 to 4
                 if xfield_data.is_null() || xfield_count != 4 {
                     return -1;
                 }
@@ -1310,8 +1315,27 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 let segments: QuotientSegments = segments_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
                 ProofItem::OutOfDomainQuotientSegments(segments)
             }
-            4 => {
-                // AuthenticationStructure(Vec<Digest>)
+            5 => {
+                // FriPolynomial(Polynomial<'static, XFieldElement>) - moved from 10 to 5
+                if xfield_data.is_null() {
+                    return -1;
+                }
+                let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
+                let mut coeffs = Vec::with_capacity(xfield_count);
+                for j in 0..xfield_count {
+                    let start = j * 3;
+                    let xfe = XFieldElement::new([
+                        BFieldElement::new(xfield_slice[start]),
+                        BFieldElement::new(xfield_slice[start + 1]),
+                        BFieldElement::new(xfield_slice[start + 2]),
+                    ]);
+                    coeffs.push(xfe);
+                }
+                let poly = Polynomial::new(coeffs);
+                ProofItem::FriPolynomial(poly)
+            }
+            6 => {
+                // AuthenticationStructure(Vec<Digest>) - moved from 4 to 6
                 if digest_data.is_null() {
                     return -1;
                 }
@@ -1330,8 +1354,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::AuthenticationStructure(digests)
             }
-            5 => {
-                // MasterMainTableRows(Vec<MainRow<BFieldElement>>)
+            7 => {
+                // MasterMainTableRows(Vec<MainRow<BFieldElement>>) - moved from 5 to 7
                 if bfield_data.is_null() || bfield_count % 379 != 0 {
                     return -1;
                 }
@@ -1349,8 +1373,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::MasterMainTableRows(rows)
             }
-            6 => {
-                // MasterAuxTableRows(Vec<AuxiliaryRow>)
+            8 => {
+                // MasterAuxTableRows(Vec<AuxiliaryRow>) - moved from 6 to 8
                 if xfield_data.is_null() || xfield_count % 88 != 0 {
                     return -1;
                 }
@@ -1373,12 +1397,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::MasterAuxTableRows(rows)
             }
-            7 => {
-                // Log2PaddedHeight(u32)
-                ProofItem::Log2PaddedHeight(u32_value)
-            }
-            8 => {
-                // QuotientSegmentsElements(Vec<QuotientSegments>)
+            9 => {
+                // QuotientSegmentsElements(Vec<QuotientSegments>) - moved from 8 to 9
                 if xfield_data.is_null() || xfield_count % 4 != 0 {
                     return -1;
                 }
@@ -1401,8 +1421,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::QuotientSegmentsElements(segments_vec)
             }
-            9 => {
-                // FriCodeword(Vec<XFieldElement>)
+            10 => {
+                // FriCodeword(Vec<XFieldElement>) - moved from 9 to 10
                 if xfield_data.is_null() {
                     return -1;
                 }
@@ -1419,27 +1439,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::FriCodeword(codeword)
             }
-            10 => {
-                // FriPolynomial(Polynomial<'static, XFieldElement>)
-                if xfield_data.is_null() {
-                    return -1;
-                }
-                let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-                let mut coeffs = Vec::with_capacity(xfield_count);
-                for j in 0..xfield_count {
-                    let start = j * 3;
-                    let xfe = XFieldElement::new([
-                        BFieldElement::new(xfield_slice[start]),
-                        BFieldElement::new(xfield_slice[start + 1]),
-                        BFieldElement::new(xfield_slice[start + 2]),
-                    ]);
-                    coeffs.push(xfe);
-                }
-                let poly = Polynomial::new(coeffs);
-                ProofItem::FriPolynomial(poly)
-            }
             11 => {
-                // FriResponse(FriResponse)
+                // FriResponse(FriResponse) - unchanged
                 if digest_data.is_null() || xfield_data.is_null() {
                     return -1;
                 }
@@ -2767,7 +2768,7 @@ pub extern "C" fn debug_barycentric_weights_rust(
         .unwrap()
         .with_offset(bfe!(trace_offset));
     let z = XFieldElement::new([bfe!(z0), bfe!(z1), bfe!(z2)]);
-    let dom_vals = domain.domain_values();
+    let dom_vals = domain.values();
     let domain_shift = dom_vals.iter().map(|&d| z - d).collect::<Vec<_>>();
     let invs = XFieldElement::batch_inversion(domain_shift);
     let dom_over = dom_vals
