@@ -990,21 +990,45 @@
  // Scatter contiguous digests (coset-order) into full-domain leaves at stride = num_cosets.
  // Input: d_coset_digests[k] for k in [0, coset_len)
  // Output: d_leaves[(k*num_cosets + coset_idx)] = digest
- __global__ void qzc_scatter_digests_strided_kernel(
-     const uint64_t* __restrict__ d_coset_digests, // [coset_len * 5]
-     uint64_t* __restrict__ d_leaves,              // [full_len * 5]
-     size_t coset_len,
-     size_t coset_idx,
-     size_t num_cosets
- ) {
-     size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-     if (k >= coset_len) return;
-     size_t out_row = k * num_cosets + coset_idx;
-     #pragma unroll
-     for (int i = 0; i < 5; ++i) {
-         d_leaves[out_row * 5 + i] = d_coset_digests[k * 5 + i];
-     }
- }
+__global__ void qzc_scatter_digests_strided_kernel(
+    const uint64_t* __restrict__ d_coset_digests, // [coset_len * 5]
+    uint64_t* __restrict__ d_leaves,              // [full_len * 5]
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets
+) {
+    size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= coset_len) return;
+    size_t out_row = k * num_cosets + coset_idx;
+    #pragma unroll
+    for (int i = 0; i < 5; ++i) {
+        d_leaves[out_row * 5 + i] = d_coset_digests[k * 5 + i];
+    }
+}
+
+__global__ void qzc_extract_coset_from_full_lde_kernel(
+    const uint64_t* __restrict__ d_full_lde,      // [num_cols * fri_length] column-major
+    uint64_t* __restrict__ d_coset_lde,           // [num_cols * coset_len] column-major
+    size_t num_cols,
+    size_t fri_length,
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets
+) {
+    size_t tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_elements = num_cols * coset_len;
+    if (tid >= total_elements) return;
+    
+    size_t col = tid / coset_len;
+    size_t k = tid % coset_len;
+    
+    // Extract row k from coset coset_idx: row index in full LDE is k * num_cosets + coset_idx
+    size_t full_row = k * num_cosets + coset_idx;
+    size_t full_idx = col * fri_length + full_row;
+    size_t coset_idx_out = col * coset_len + k;
+    
+    d_coset_lde[coset_idx_out] = d_full_lde[full_idx];
+}
  
  __global__ void qzc_scatter_xfe_strided_kernel(
      const uint64_t* __restrict__ d_coset_xfe, // [coset_len * 3] row-major
@@ -2233,11 +2257,14 @@
          if (num_cosets == 0 || fri_len % trace_len != 0) {
              throw std::runtime_error("FRUGAL: invalid domains (fri_len must be multiple of trace_len)");
          }
-         if (num_cosets != 8) {
-             TRITON_PROFILE_COUT("[GPU] FRUGAL: Warning: expected 8 cosets, got " << num_cosets << std::endl);
-         }
- 
-         // Check for multi-GPU with peer access
+        if (num_cosets != 8) {
+            TRITON_PROFILE_COUT("[GPU] FRUGAL: Warning: expected 8 cosets, got " << num_cosets << std::endl);
+        }
+
+        // Initialize merkle leaves to zero (important for frugal mode scatter)
+        CUDA_CHECK(cudaMemsetAsync(ctx_->d_main_merkle(), 0, dims_.fri_length * 5 * sizeof(uint64_t), ctx_->stream()));
+
+        // Check for multi-GPU with peer access
          int num_gpus = get_effective_gpu_count();
          if (num_gpus > 2) num_gpus = 2;
          bool multi_gpu = false; // Disabled due to memory issues
@@ -2333,68 +2360,82 @@
              CUDA_CHECK(cudaSetDevice(0)); // Return to primary GPU
              
              if (profile_main) { std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (multi-GPU): " << elapsed_ms(t_stream) << " ms\n"; }
-         } else {
-             // Single-GPU path with TWO-PHASE optimization
-             // Phase 1: Compute polynomial coefficients ONCE (memcpy + INTT)
-             // Phase 2: For each coset, only evaluate at coset points (fast)
-             uint64_t* d_tmp_digests = ctx_->d_scratch_b();
-             uint64_t* d_working = ctx_->d_working_main();
-             
-             // Reuse scratch buffer for coefficients to avoid extra allocations
-             uint64_t* d_coefficients = d_trace_colmajor;
-             uint64_t* d_tail_scratch = nullptr;
-             CUDA_CHECK(cudaMalloc(&d_tail_scratch, width * trace_len * sizeof(uint64_t)));
-             
-             // Phase 1: Compute coefficients once (expensive: ~487ms)
-             if (profile_main) { std::cout << "    [Main] FRUGAL Phase 1: Computing coefficients...\n"; }
-             kernels::compute_trace_coefficients_gpu(
-                 d_trace_colmajor,
-                 width,
-                 trace_len,
-                 trace_offset,
-                 d_coefficients,
-                 ctx_->stream()
-             );
-             
-             constexpr int DIGEST_BLOCK = 256;
-             int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
- 
-             // Phase 2: Evaluate at each coset (fast: ~20ms each)
-             if (profile_main) { std::cout << "    [Main] FRUGAL Phase 2: Evaluating " << num_cosets << " cosets...\n"; }
-             for (size_t coset = 0; coset < num_cosets; ++coset) {
-                 uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
- 
-                 kernels::evaluate_coset_from_coefficients_gpu(
-                     d_coefficients,
-                     width,
-                     trace_len,
-                     d_randomizer_coeffs,
-                     num_randomizers,
-                     trace_offset,
-                     coset_offset,
-                     d_working,
-                     d_tail_scratch,
-                     ctx_->stream()
-                 );
- 
-                 kernels::hash_bfield_rows_gpu(
-                     d_working,
-                     trace_len,
-                     width,
-                     d_tmp_digests,
-                     ctx_->stream()
-                 );
- 
-                 qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
-                     d_tmp_digests,
-                     ctx_->d_main_merkle(),
-                     trace_len,
-                     coset,
-                     num_cosets
-                 );
-             }
-             
-             CUDA_CHECK(cudaFree(d_tail_scratch));
+        } else {
+            // Single-GPU path: evaluate at all FRI points, then extract coset points
+            // This ensures we use the correct FRI generator (same as non-frugal mode)
+            uint64_t* d_tmp_digests = ctx_->d_scratch_b();
+            uint64_t* d_working = ctx_->d_working_main();
+            uint64_t* d_scratch1 = ctx_->d_scratch_a();
+            // Allocate scratch2 for LDE (needs width * (trace_len + num_randomizers) elements)
+            size_t scratch2_size = width * (trace_len + num_randomizers);
+            uint64_t* d_scratch2 = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_scratch2, scratch2_size * sizeof(uint64_t)));
+            
+            // Allocate buffer for full FRI LDE (reused for each coset)
+            uint64_t* d_full_lde = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_full_lde, width * dims_.fri_length * sizeof(uint64_t)));
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+
+            // Evaluate each coset: compute full LDE, then extract and hash coset points
+            if (profile_main) { std::cout << "    [Main] FRUGAL: Evaluating " << num_cosets << " cosets from full LDE...\n"; }
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                // Evaluate at ALL FRI points (ensures correct generator usage)
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_trace_colmajor,
+                    width,
+                    trace_len,
+                    d_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    fri_offset,
+                    dims_.fri_length,
+                    d_full_lde,
+                    d_scratch1,
+                    d_scratch2,
+                    ctx_->stream()
+                );
+                
+                // Extract coset points from full LDE: copy every num_cosets-th row starting at coset
+                int grid_extract = (int)((width * trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+                qzc_extract_coset_from_full_lde_kernel<<<grid_extract, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_full_lde,
+                    d_working,
+                    width,
+                    dims_.fri_length,
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+                
+                // Ensure extraction completes before hashing
+                CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    width,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
+                
+                // Ensure hash completes before scattering
+                CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+               qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_main_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
+            
+            // Synchronize after all cosets are processed
+            CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+            CUDA_CHECK(cudaFree(d_scratch2));
+            CUDA_CHECK(cudaFree(d_full_lde));
  
              if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (2-phase): " << elapsed_ms(t_stream) << " ms\n"; }
          }
@@ -3079,11 +3120,14 @@
          // FRUGAL: 8-way coset streaming with multi-GPU support.
          const size_t fri_len = dims_.fri_length;
          const size_t num_cosets = fri_len / trace_len;
-         if (num_cosets == 0 || fri_len % trace_len != 0) {
-             throw std::runtime_error("FRUGAL AUX: invalid domains (fri_len must be multiple of trace_len)");
-         }
- 
-         const size_t num_cols_bfe = aux_width * 3;
+        if (num_cosets == 0 || fri_len % trace_len != 0) {
+            throw std::runtime_error("FRUGAL AUX: invalid domains (fri_len must be multiple of trace_len)");
+        }
+
+        // Initialize merkle leaves to zero (important for frugal mode scatter)
+        CUDA_CHECK(cudaMemsetAsync(ctx_->d_aux_merkle(), 0, dims_.fri_length * 5 * sizeof(uint64_t), ctx_->stream()));
+
+        const size_t num_cols_bfe = aux_width * 3;
  
          // Two-phase optimization: compute coefficients once (in-place on scratch_b)
          kernels::compute_trace_coefficients_gpu(
@@ -3171,49 +3215,86 @@
                  CUDA_CHECK(cudaFree(d_digests_per_gpu[gpu]));
              }
              CUDA_CHECK(cudaSetDevice(0));
-         } else {
-             // Single-GPU path
-             uint64_t* d_working = ctx_->d_working_aux();
-             // Use scratch_a for digests + tail scratch (scratch_a is large enough)
-             uint64_t* d_tmp_digests = ctx_->d_scratch_a();
-             uint64_t* d_tail_scratch = d_tmp_digests + trace_len * 5;
-             
-             constexpr int DIGEST_BLOCK = 256;
-             int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
- 
-             for (size_t coset = 0; coset < num_cosets; ++coset) {
-                 uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
- 
-                 kernels::evaluate_coset_from_coefficients_gpu(
-                     d_aux_colmajor_components,
-                     num_cols_bfe,
-                     trace_len,
-                     d_aux_randomizer_coeffs,
-                     num_randomizers,
-                     trace_offset,
-                     coset_offset,
-                     d_working,
-                     d_tail_scratch,
-                     ctx_->stream()
-                 );
- 
-                 kernels::hash_bfield_rows_gpu(
-                     d_working,
-                     trace_len,
-                     num_cols_bfe,
-                     d_tmp_digests,
-                     ctx_->stream()
-                 );
- 
-                 qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
-                     d_tmp_digests,
-                     ctx_->d_aux_merkle(),
-                     trace_len,
-                     coset,
-                     num_cosets
-                 );
-             }
-         }
+        } else {
+            // Single-GPU path: evaluate at all FRI points, then extract coset points
+            // This ensures we use the correct FRI generator (same as non-frugal mode)
+            uint64_t* d_working = ctx_->d_working_aux();
+            uint64_t* d_tmp_digests = ctx_->d_scratch_a();
+            // Allocate scratch2 for LDE (needs num_cols_bfe * (trace_len + randomizer_len) elements)
+            size_t scratch2_size = num_cols_bfe * (trace_len + num_randomizers);
+            uint64_t* d_scratch2 = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_scratch2, scratch2_size * sizeof(uint64_t)));
+            
+            // Allocate buffer for full FRI LDE (reused for each coset)
+            uint64_t* d_full_lde = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_full_lde, num_cols_bfe * dims_.fri_length * sizeof(uint64_t)));
+            
+            // Allocate separate scratch1 for LDE (can't reuse d_working since we need it for extraction output)
+            uint64_t* d_scratch1_lde = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_scratch1_lde, num_cols_bfe * trace_len * sizeof(uint64_t)));
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+
+            // Evaluate each coset: compute full LDE, then extract and hash coset points
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                // Evaluate at ALL FRI points (ensures correct generator usage)
+                kernels::randomized_lde_batch_gpu_preallocated(
+                    d_aux_colmajor_components,
+                    num_cols_bfe,
+                    trace_len,
+                    d_aux_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    fri_offset,
+                    dims_.fri_length,
+                    d_full_lde,
+                    d_scratch1_lde,  // Use separate scratch buffer
+                    d_scratch2,
+                    ctx_->stream()
+                );
+                
+                // Extract coset points from full LDE: copy every num_cosets-th row starting at coset
+                int grid_extract = (int)((num_cols_bfe * trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+                qzc_extract_coset_from_full_lde_kernel<<<grid_extract, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_full_lde,
+                    d_working,
+                    num_cols_bfe,
+                    dims_.fri_length,
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+                
+                // Ensure extraction completes before hashing
+                CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    num_cols_bfe,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
+                
+                // Ensure hash completes before scattering
+                CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+               qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_aux_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
+            
+            // Synchronize after all cosets are processed
+            CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+            CUDA_CHECK(cudaFree(d_scratch2));
+            CUDA_CHECK(cudaFree(d_full_lde));
+            CUDA_CHECK(cudaFree(d_scratch1_lde));
+        }
  
          if (aux_profile_mode) {
              cudaEventRecord(ev_lde, ctx_->stream());

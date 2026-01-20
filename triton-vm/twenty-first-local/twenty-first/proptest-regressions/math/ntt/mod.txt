@@ -1,8 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc cb0d461f83566aedfb723b8c4c7c317ccfffab05bf0741c3ad4835855a5fa17c # shrinks to input = _NttOnInputOfLengthOneArgs { bfe: BFieldElement(0) }
-cc 03300ca8d99383ac10aa9e3789cc34460a1a353272199bd9c98f7e450b7f2276 # shrinks to input = _NttThenInttIsIdentityOperationArgs { _vector_length: 1, input: [BFieldElement(1744669026435814579)] }

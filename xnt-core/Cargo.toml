@@ -121,12 +121,10 @@ inherits = "release"
 lto = "thin"
 
 [patch.crates-io]
-triton-vm = { path = "../triton-vm/triton-vm", default-features = false }
-triton-air = { path = "../triton-vm/triton-air" }
-triton-isa = { path = "../triton-vm/triton-isa" }
-triton-constraint-builder = { path = "../triton-vm/triton-constraint-builder" }
-triton-constraint-circuit = { path = "../triton-vm/triton-constraint-circuit" }
-twenty-first = { path = "../triton-vm/twenty-first-local/twenty-first" }
-bfieldcodec_derive = { path = "../triton-vm/twenty-first-local/bfieldcodec_derive" }
-tasm-lib = { path = "../tasm-lib/tasm-lib" }
-tasm-object-derive = { path = "../tasm-lib/tasm-object-derive" }
+triton-vm = { path = "../patch/triton-vm-patch/triton-vm", default-features = false }
+triton-air = { path = "../patch/triton-vm-patch/triton-air" }
+triton-isa = { path = "../patch/triton-vm-patch/triton-isa" }
+triton-constraint-builder = { path = "../patch/triton-vm-patch/triton-constraint-builder" }
+triton-constraint-circuit = { path = "../patch/triton-vm-patch/triton-constraint-circuit" }
+tasm-lib = { path = "../patch/tasm-lib-patch/tasm-lib" }
+tasm-object-derive = { path = "../patch/tasm-lib-patch/tasm-object-derive" }
