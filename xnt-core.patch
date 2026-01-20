@@ -1,0 +1,785 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a3c5c2ed..d3db5c00 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2305,6 +2305,22 @@ dependencies = [
+  "rayon",
+ ]
+ 
++[[package]]
++name = "ndarray"
++version = "0.17.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
++dependencies = [
++ "matrixmultiply",
++ "num-complex",
++ "num-integer",
++ "num-traits",
++ "portable-atomic",
++ "portable-atomic-util",
++ "rawpointer",
++ "rayon",
++]
++
+ [[package]]
+ name = "neptune-privacy"
+ version = "0.1.0"
+@@ -2365,7 +2381,7 @@ dependencies = [
+  "sysinfo",
+  "systemstat",
+  "tarpc",
+- "tasm-lib",
++ "tasm-lib 1.0.0",
+  "test-strategy 0.3.1",
+  "thiserror 1.0.69",
+  "thread-priority",
+@@ -3884,6 +3900,26 @@ dependencies = [
+  "syn 1.0.109",
+ ]
+ 
++[[package]]
++name = "tasm-lib"
++version = "1.0.0"
++dependencies = [
++ "anyhow",
++ "arbitrary",
++ "const_format",
++ "hex",
++ "itertools 0.14.0",
++ "ndarray 0.17.2",
++ "num",
++ "num-traits",
++ "rand 0.9.2",
++ "serde",
++ "serde_json",
++ "strum 0.27.2",
++ "tasm-object-derive 1.0.0",
++ "triton-vm 1.0.0",
++]
++
+ [[package]]
+ name = "tasm-lib"
+ version = "1.0.0"
+@@ -3895,15 +3931,24 @@ dependencies = [
+  "const_format",
+  "hex",
+  "itertools 0.14.0",
+- "ndarray",
++ "ndarray 0.16.1",
+  "num",
+  "num-traits",
+  "rand 0.9.2",
+  "serde",
+  "serde_json",
+  "strum 0.27.2",
+- "tasm-object-derive",
+- "triton-vm",
++ "tasm-object-derive 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-vm 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++]
++
++[[package]]
++name = "tasm-object-derive"
++version = "1.0.0"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.106",
+ ]
+ 
+ [[package]]
+@@ -4451,6 +4496,18 @@ dependencies = [
+  "syn 2.0.106",
+ ]
+ 
++[[package]]
++name = "triton-air"
++version = "1.0.0"
++dependencies = [
++ "arbitrary",
++ "itertools 0.14.0",
++ "strum 0.27.2",
++ "triton-constraint-circuit 1.0.0",
++ "triton-isa 1.0.0",
++ "twenty-first",
++]
++
+ [[package]]
+ name = "triton-air"
+ version = "1.0.0"
+@@ -4460,8 +4517,24 @@ dependencies = [
+  "arbitrary",
+  "itertools 0.14.0",
+  "strum 0.27.2",
+- "triton-constraint-circuit",
+- "triton-isa",
++ "triton-constraint-circuit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-isa 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "twenty-first",
++]
++
++[[package]]
++name = "triton-constraint-builder"
++version = "1.0.0"
++dependencies = [
++ "itertools 0.14.0",
++ "prettyplease",
++ "proc-macro2",
++ "quote",
++ "strum 0.27.2",
++ "syn 2.0.106",
++ "triton-air 1.0.0",
++ "triton-constraint-circuit 1.0.0",
++ "triton-isa 1.0.0",
+  "twenty-first",
+ ]
+ 
+@@ -4477,9 +4550,22 @@ dependencies = [
+  "quote",
+  "strum 0.27.2",
+  "syn 2.0.106",
+- "triton-air",
+- "triton-constraint-circuit",
+- "triton-isa",
++ "triton-air 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-constraint-circuit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-isa 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "twenty-first",
++]
++
++[[package]]
++name = "triton-constraint-circuit"
++version = "1.0.0"
++dependencies = [
++ "arbitrary",
++ "itertools 0.14.0",
++ "ndarray 0.17.2",
++ "num-traits",
++ "proc-macro2",
++ "quote",
+  "twenty-first",
+ ]
+ 
+@@ -4491,13 +4577,30 @@ checksum = "3107c3169544bc50599c74cb360b1f0caa38e43d4b50743bf4e7f35f66e13965"
+ dependencies = [
+  "arbitrary",
+  "itertools 0.14.0",
+- "ndarray",
++ "ndarray 0.16.1",
+  "num-traits",
+  "proc-macro2",
+  "quote",
+  "twenty-first",
+ ]
+ 
++[[package]]
++name = "triton-isa"
++version = "1.0.0"
++dependencies = [
++ "arbitrary",
++ "get-size2",
++ "itertools 0.14.0",
++ "lazy_static",
++ "nom 8.0.0",
++ "nom-language",
++ "num-traits",
++ "serde",
++ "strum 0.27.2",
++ "thiserror 2.0.16",
++ "twenty-first",
++]
++
+ [[package]]
+ name = "triton-isa"
+ version = "1.0.0"
+@@ -4517,6 +4620,35 @@ dependencies = [
+  "twenty-first",
+ ]
+ 
++[[package]]
++name = "triton-vm"
++version = "1.0.0"
++dependencies = [
++ "arbitrary",
++ "colored",
++ "get-size2",
++ "indexmap 2.11.3",
++ "itertools 0.14.0",
++ "lazy_static",
++ "memory-stats",
++ "ndarray 0.17.2",
++ "num-traits",
++ "prettyplease",
++ "proc-macro2",
++ "rand 0.9.2",
++ "rayon",
++ "serde",
++ "strum 0.27.2",
++ "syn 2.0.106",
++ "thiserror 2.0.16",
++ "triton-air 1.0.0",
++ "triton-constraint-builder 1.0.0",
++ "triton-constraint-circuit 1.0.0",
++ "triton-isa 1.0.0",
++ "twenty-first",
++ "unicode-width 0.2.0",
++]
++
+ [[package]]
+ name = "triton-vm"
+ version = "1.0.0"
+@@ -4530,7 +4662,7 @@ dependencies = [
+  "itertools 0.14.0",
+  "lazy_static",
+  "memory-stats",
+- "ndarray",
++ "ndarray 0.16.1",
+  "num-traits",
+  "prettyplease",
+  "proc-macro2",
+@@ -4540,10 +4672,10 @@ dependencies = [
+  "strum 0.27.2",
+  "syn 2.0.106",
+  "thiserror 2.0.16",
+- "triton-air",
+- "triton-constraint-builder",
+- "triton-constraint-circuit",
+- "triton-isa",
++ "triton-air 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-constraint-builder 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-constraint-circuit 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "triton-isa 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "twenty-first",
+  "unicode-width 0.2.0",
+ ]
+@@ -4556,9 +4688,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+ 
+ [[package]]
+ name = "twenty-first"
+-version = "1.0.0"
++version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d5d465fb05b5b6d8338770501973ef2b27d984ffb79fe7b0b08644926030ac0e"
++checksum = "2f2127e955aea73cc584e429c544f4a5997128fd5e4021c852cb63f309bf51ea"
+ dependencies = [
+  "arbitrary",
+  "bfieldcodec_derive",
+@@ -5305,7 +5437,7 @@ dependencies = [
+  "ratatui",
+  "strum 0.27.2",
+  "tarpc",
+- "tasm-lib",
++ "tasm-lib 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "tokio",
+  "unicode-width 0.1.14",
+ ]
+diff --git a/scripts/linux/install-bash-completions.sh b/scripts/linux/install-bash-completions.sh
+index 0ec9a74a..efbbd067 100755
+--- a/scripts/linux/install-bash-completions.sh
++++ b/scripts/linux/install-bash-completions.sh
+@@ -1,10 +1,10 @@
+ set -e
+ 
+-SCRIPT="$HOME/.bash_neptune_cli"
++SCRIPT="$HOME/.bash_xnt_cli"
+ LINE="source $SCRIPT"
+ FILE="$HOME/.bashrc"
+ 
+-cargo run --bin neptune-cli -- completions > $SCRIPT
++cargo run --bin xnt-cli -- completions > $SCRIPT
+ grep -qF -- "$LINE" "$FILE" || echo "$LINE" >> "$FILE"
+ source $SCRIPT
+ echo "completions installed to $SCRIPT and added to $FILE."
+diff --git a/xnt-core/Cargo.toml b/xnt-core/Cargo.toml
+index 6ca9c364..85282723 100644
+--- a/xnt-core/Cargo.toml
++++ b/xnt-core/Cargo.toml
+@@ -99,7 +99,7 @@ tarpc = { version = "^0.34", features = [
+     "serde-transport-json",
+     "tcp",
+ ] }
+-tasm-lib = "1.0.0"
++tasm-lib = { path = "../../tasm-lib/tasm-lib/" }
+ tiny-bip39 = "1.0"
+ tokio = { version = "1.41", features = ["full", "tracing"] }
+ tokio-serde = { version = "0.8", features = ["bincode", "json"] }
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/authenticate_txk_field.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/authenticate_txk_field.rs
+index 3c6e1905..b38d2334 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/authenticate_txk_field.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/authenticate_txk_field.rs
+@@ -13,7 +13,7 @@ use crate::protocol::proof_abstractions::mast_hash::MastHash;
+ pub(crate) struct AuthenticateTxkField(pub(crate) TransactionKernelField);
+ 
+ impl BasicSnippet for AuthenticateTxkField {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_mast_hash".to_owned()),
+             (DataType::VoidPointer, "field".to_owned()),
+@@ -21,7 +21,7 @@ impl BasicSnippet for AuthenticateTxkField {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_lock_scripts_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_lock_scripts_claim.rs
+index 15353f58..f0723e90 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_lock_scripts_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_lock_scripts_claim.rs
+@@ -14,11 +14,11 @@ use crate::protocol::proof_abstractions::tasm::program::ConsensusProgram;
+ pub(crate) struct GenerateCollectLockScriptsClaim;
+ 
+ impl BasicSnippet for GenerateCollectLockScriptsClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "proof_collection_pointer".to_owned())]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "claim".to_owned())]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_type_scripts_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_type_scripts_claim.rs
+index b15cdb85..0ca96d52 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_type_scripts_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_collect_type_scripts_claim.rs
+@@ -18,11 +18,11 @@ impl GenerateCollectTypeScriptsClaim {
+ }
+ 
+ impl BasicSnippet for GenerateCollectTypeScriptsClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "proof_collection_pointer".to_owned())]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "claim".to_owned())]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_k2o_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_k2o_claim.rs
+index 46d791a2..68200a94 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_k2o_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_k2o_claim.rs
+@@ -13,7 +13,7 @@ use crate::protocol::proof_abstractions::tasm::program::ConsensusProgram;
+ pub(crate) struct GenerateK2oClaim;
+ 
+ impl BasicSnippet for GenerateK2oClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_digest".to_owned()),
+             (DataType::Bfe, "garb0".to_string()),
+@@ -22,7 +22,7 @@ impl BasicSnippet for GenerateK2oClaim {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_digest".to_owned()),
+             (DataType::Bfe, "garb0".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_lock_script_claim_template.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_lock_script_claim_template.rs
+index d5836262..cbcd0514 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_lock_script_claim_template.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_lock_script_claim_template.rs
+@@ -10,11 +10,11 @@ use crate::protocol::consensus::transaction::validity::proof_collection::ProofCo
+ pub(crate) struct GenerateLockScriptClaimTemplate;
+ 
+ impl BasicSnippet for GenerateLockScriptClaimTemplate {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "*proof_collection".to_string())]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*claim".to_string()),
+             (DataType::VoidPointer, "*program_digest".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_rri_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_rri_claim.rs
+index 4cfb092d..ce75d2d8 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_rri_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_rri_claim.rs
+@@ -18,7 +18,7 @@ use crate::protocol::proof_abstractions::tasm::program::ConsensusProgram;
+ pub struct GenerateRriClaim;
+ 
+ impl BasicSnippet for GenerateRriClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_digest".to_owned()),
+             (DataType::Bfe, "garb1".to_string()),
+@@ -27,7 +27,7 @@ impl BasicSnippet for GenerateRriClaim {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_digest".to_owned()),
+             (DataType::Bfe, "garb1".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_single_proof_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_single_proof_claim.rs
+index 2aea6973..0eb8ddb7 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_single_proof_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_single_proof_claim.rs
+@@ -9,14 +9,14 @@ use crate::triton_vm::prelude::*;
+ pub(crate) struct GenerateSingleProofClaim;
+ 
+ impl BasicSnippet for GenerateSingleProofClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         let txk_mast_hash = (DataType::Digest, "txk_mast_hash".to_string());
+         let program_digest = (DataType::Digest, "single_proof_program_digest".to_string());
+ 
+         vec![txk_mast_hash, program_digest]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "single_proof_claim".to_string())]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_type_script_claim_template.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_type_script_claim_template.rs
+index 70dc71fd..40e2b6fc 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_type_script_claim_template.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/generate_type_script_claim_template.rs
+@@ -10,11 +10,11 @@ use crate::protocol::consensus::transaction::validity::proof_collection::ProofCo
+ pub(crate) struct GenerateTypeScriptClaimTemplate;
+ 
+ impl BasicSnippet for GenerateTypeScriptClaimTemplate {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "*proof_collection".to_string())]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*claim".to_string()),
+             (DataType::VoidPointer, "*program_digest".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/new_claim.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/new_claim.rs
+index 8dbf4fad..67ee20b4 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/new_claim.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/claims/new_claim.rs
+@@ -12,14 +12,14 @@ use tasm_lib::triton_vm::prelude::*;
+ pub struct NewClaim;
+ 
+ impl BasicSnippet for NewClaim {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U32, "input_length".to_string()),
+             (DataType::U32, "output_length".to_string()),
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*claim".to_string()),
+             (DataType::VoidPointer, "*output".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/coinbase_amount.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/coinbase_amount.rs
+index 4971b01a..edf2f19c 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/coinbase_amount.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/coinbase_amount.rs
+@@ -16,11 +16,11 @@ impl CoinbaseAmount {
+ ///
+ /// Panics if coinbase amount is negative.
+ impl BasicSnippet for CoinbaseAmount {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::VoidPointer, "*coinbase".to_owned())]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![(DataType::U128, "coinbase_amount".to_owned())]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/compute_absolute_indices.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/compute_absolute_indices.rs
+index b4b437ec..e469c2d0 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/compute_absolute_indices.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/compute_absolute_indices.rs
+@@ -15,7 +15,7 @@ const LOG2_CHUNK_SIZE: u8 = 12;
+ pub(crate) struct ComputeAbsoluteIndices;
+ 
+ impl BasicSnippet for ComputeAbsoluteIndices {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U64, "aocl_leaf".to_string()),
+             (DataType::Digest, "receiver_preimage".to_string()),
+@@ -24,7 +24,7 @@ impl BasicSnippet for ComputeAbsoluteIndices {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(tasm_lib::prelude::DataType, String)> {
++    fn return_values(&self) -> Vec<(tasm_lib::prelude::DataType, String)> {
+         let distances_array = DataType::Array(Box::new(ArrayType {
+             element_type: DataType::U32,
+             length: NUM_TRIALS as usize,
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/hash_removal_record_index_sets.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/hash_removal_record_index_sets.rs
+index 218d1e14..a522690b 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/hash_removal_record_index_sets.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/hash_removal_record_index_sets.rs
+@@ -20,12 +20,12 @@ impl<const NUM_INPUT_LISTS: usize> HashRemovalRecordIndexSets<NUM_INPUT_LISTS> {
+ }
+ 
+ impl<const NUM_INPUT_LISTS: usize> BasicSnippet for HashRemovalRecordIndexSets<NUM_INPUT_LISTS> {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         // Type of all "inputs" argument is Vec<RemovalRecord>
+         vec![(DataType::VoidPointer, "rr_list".to_owned()); NUM_INPUT_LISTS]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         let list_of_digests = DataType::List(Box::new(DataType::Digest));
+         vec![(list_of_digests, "list_of_digests".to_string())]
+     }
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_inputs_against_txk.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_inputs_against_txk.rs
+index 4ffe7299..47a922ec 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_inputs_against_txk.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_inputs_against_txk.rs
+@@ -17,7 +17,7 @@ use crate::triton_vm::prelude::*;
+ pub struct AuthenticateInputsAgainstTxk;
+ 
+ impl BasicSnippet for AuthenticateInputsAgainstTxk {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "transaction_kernel_mast_hash".to_owned()),
+             // Type of `inputs` is Vec<RemovalRecord>
+@@ -26,7 +26,7 @@ impl BasicSnippet for AuthenticateInputsAgainstTxk {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_msa_against_txk.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_msa_against_txk.rs
+index 960717eb..5c97ee1b 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_msa_against_txk.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/leaf_authentication/authenticate_msa_against_txk.rs
+@@ -17,7 +17,7 @@ use crate::triton_vm::prelude::*;
+ pub struct AuthenticateMsaAgainstTxk;
+ 
+ impl BasicSnippet for AuthenticateMsaAgainstTxk {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "aocl_mmr".to_owned()),
+             (DataType::VoidPointer, "swbfi_bagged_ptr".to_owned()),
+@@ -26,7 +26,7 @@ impl BasicSnippet for AuthenticateMsaAgainstTxk {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch.rs
+index 75561fa6..cc75c9ef 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch.rs
+@@ -323,7 +323,7 @@ impl MergeBranch {
+ }
+ 
+ impl BasicSnippet for MergeBranch {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "single_proof_program_digest".to_owned()),
+             (DataType::Digest, "new_tx_kernel_digest".to_owned()),
+@@ -332,7 +332,7 @@ impl BasicSnippet for MergeBranch {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "single_proof_program_digest".to_owned()),
+             (DataType::Digest, "new_tx_kernel_digest".to_owned()),
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch/authenticate_coinbase_fields.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch/authenticate_coinbase_fields.rs
+index 541e74a7..eab77440 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch/authenticate_coinbase_fields.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/merge_branch/authenticate_coinbase_fields.rs
+@@ -45,7 +45,7 @@ impl AuthenticateCoinbaseFields {
+ }
+ 
+ impl BasicSnippet for AuthenticateCoinbaseFields {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "left_tx_kernel".to_owned()),
+             (DataType::VoidPointer, "right_tx_kernel".to_owned()),
+@@ -53,7 +53,7 @@ impl BasicSnippet for AuthenticateCoinbaseFields {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![]
+     }
+ 
+diff --git a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/update_branch.rs b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/update_branch.rs
+index 3d647c20..5d760829 100644
+--- a/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/update_branch.rs
++++ b/xnt-core/src/protocol/consensus/transaction/validity/tasm/single_proof/update_branch.rs
+@@ -178,7 +178,7 @@ impl UpdateBranch {
+ }
+ 
+ impl BasicSnippet for UpdateBranch {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "single_proof_program_digest".to_owned()),
+             (DataType::Digest, "new_tx_kernel_digest".to_owned()),
+@@ -187,7 +187,7 @@ impl BasicSnippet for UpdateBranch {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::Digest, "single_proof_program_digest".to_owned()),
+             (DataType::Digest, "new_tx_kernel_digest".to_owned()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/add_all_amounts_and_check_time_lock.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/add_all_amounts_and_check_time_lock.rs
+index c8d20c79..d47bb819 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/add_all_amounts_and_check_time_lock.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/add_all_amounts_and_check_time_lock.rs
+@@ -35,7 +35,7 @@ impl AddAllAmountsAndCheckTimeLock {
+ }
+ 
+ impl BasicSnippet for AddAllAmountsAndCheckTimeLock {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U32, "num_coins".to_string()),
+             (DataType::U32, "index".to_string()),
+@@ -47,7 +47,7 @@ impl BasicSnippet for AddAllAmountsAndCheckTimeLock {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U32, "num_coins".to_string()),
+             (DataType::U32, "num_coins".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/add_time_locked_amount.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/add_time_locked_amount.rs
+index fc7e196b..6b77c5a1 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/add_time_locked_amount.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/add_time_locked_amount.rs
+@@ -11,14 +11,14 @@ use tasm_lib::triton_vm::prelude::LabelledInstruction;
+ pub(crate) struct AddTimelockedAmount;
+ 
+ impl BasicSnippet for AddTimelockedAmount {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U128, "timelocked_amount".to_string()),
+             (DataType::U128, "utxo_amount".to_string()),
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U128, "sum".to_string()),
+             (DataType::U128, "utxo_amount".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/get_total_and_timelocked_amounts.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/get_total_and_timelocked_amounts.rs
+index 97f94ead..d1767928 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/get_total_and_timelocked_amounts.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/get_total_and_timelocked_amounts.rs
+@@ -14,14 +14,14 @@ pub struct GetTotalAndTimeLockedAmounts {
+ }
+ 
+ impl BasicSnippet for GetTotalAndTimeLockedAmounts {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*list_of_utxos".to_string()),
+             (DataType::Bfe, "release_date".to_string()),
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U128, "total_amount".to_string()),
+             (DataType::U128, "total_timelocked".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/read_and_add_amount.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/read_and_add_amount.rs
+index 7dc7184f..06a27b53 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/read_and_add_amount.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/read_and_add_amount.rs
+@@ -16,7 +16,7 @@ use crate::protocol::consensus::type_scripts::native_currency::NativeCurrency;
+ pub(crate) struct ReadAndAddAmount;
+ 
+ impl BasicSnippet for ReadAndAddAmount {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*coin_si".to_string()),
+             (DataType::U128, "amount".to_string()),
+@@ -26,7 +26,7 @@ impl BasicSnippet for ReadAndAddAmount {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*coin_si".to_string()),
+             (DataType::U128, "amount".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/test_time_lock_and_maybe_mark.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/test_time_lock_and_maybe_mark.rs
+index dde251c8..e571e62e 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/test_time_lock_and_maybe_mark.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/test_time_lock_and_maybe_mark.rs
+@@ -17,7 +17,7 @@ pub(crate) struct TestTimeLockAndMaybeMark {
+ }
+ 
+ impl BasicSnippet for TestTimeLockAndMaybeMark {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*coin".to_string()),
+             (DataType::U128, "amount".to_string()),
+@@ -27,7 +27,7 @@ impl BasicSnippet for TestTimeLockAndMaybeMark {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::VoidPointer, "*coin".to_string()),
+             (DataType::U128, "amount".to_string()),
+diff --git a/xnt-core/src/protocol/consensus/type_scripts/amount/total_amount_main_loop.rs b/xnt-core/src/protocol/consensus/type_scripts/amount/total_amount_main_loop.rs
+index ae36673c..a5719d72 100644
+--- a/xnt-core/src/protocol/consensus/type_scripts/amount/total_amount_main_loop.rs
++++ b/xnt-core/src/protocol/consensus/type_scripts/amount/total_amount_main_loop.rs
+@@ -26,7 +26,7 @@ pub struct TotalAmountMainLoop {
+ }
+ 
+ impl BasicSnippet for TotalAmountMainLoop {
+-    fn inputs(&self) -> Vec<(DataType, String)> {
++    fn parameters(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U32, "num_utxos".to_string()),
+             (DataType::U32, "utxo_index".to_string()),
+@@ -42,7 +42,7 @@ impl BasicSnippet for TotalAmountMainLoop {
+         ]
+     }
+ 
+-    fn outputs(&self) -> Vec<(DataType, String)> {
++    fn return_values(&self) -> Vec<(DataType, String)> {
+         vec![
+             (DataType::U32, "num_utxos".to_string()),
+             (DataType::U32, "num_utxos".to_string()),

@@ -10,7 +10,6 @@
 //! program can execute at a time.
 #[cfg(not(test))]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -46,11 +45,8 @@ pub const PROOF_PADDED_HEIGHT_TOO_BIG_PROCESS_OFFSET_ERROR_CODE: i32 = 200;
 
 /// Per-GPU mutexes to serialize GPU-bound proofs.
 /// Each GPU can only handle one job at a time, so we need per-GPU mutexes.
-/// Jobs are distributed across GPUs using round-robin assignment.
+/// Jobs select the first available GPU immediately (not round-robin).
 static GPU_MUTEXES: OnceLock<Vec<Arc<Mutex<()>>>> = OnceLock::new();
-
-/// Counter for round-robin GPU assignment
-static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Get the list of available GPU IDs from CUDA_VISIBLE_DEVICES
 fn get_gpu_ids() -> Vec<String> {
@@ -81,11 +77,6 @@ fn get_gpu_mutexes() -> &'static Vec<Arc<Mutex<()>>> {
     })
 }
 
-/// Get the next GPU index using round-robin assignment
-fn get_next_gpu_index() -> usize {
-    let count = get_gpu_count();
-    GPU_COUNTER.fetch_add(1, Ordering::Relaxed) % count
-}
 
 /// represents an error running a [ProverJob]
 #[derive(Debug, thiserror::Error)]
@@ -593,24 +584,25 @@ impl Job for ProverJob {
             }
         );
 
-        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
+        // Use GPU for proofs with padded_height > 2^15 (32,768), CPU for smaller proofs
         // GPU is faster for large proofs, CPU is faster for small proofs
+        // Using > instead of >= to avoid edge cases where GPU runs out of memory
         const GPU_THRESHOLD: u32 = 32768; // 2^15
 
         // Create a mutable copy of job_settings to conditionally override force_cpu
         let mut job_settings = self.job_settings.clone();
-        if padded_height >= GPU_THRESHOLD {
+        if padded_height > GPU_THRESHOLD {
             // Use GPU for large proofs
             job_settings.force_cpu = false;
             tracing::info!(
-                "[HYBRID] Padded height {} >= 2^15, using GPU execution",
+                "[HYBRID] Padded height {} > 2^15, using GPU execution",
                 padded_height
             );
         } else {
-            // Use CPU for small proofs
+            // Use CPU for small proofs (including exactly 2^15 to avoid GPU memory issues)
             job_settings.force_cpu = true;
             tracing::info!(
-                "[HYBRID] Padded height {} < 2^15, using CPU execution",
+                "[HYBRID] Padded height {} <= 2^15, using CPU execution",
                 padded_height
             );
         }
@@ -621,30 +613,48 @@ impl Job for ProverJob {
 
         // For GPU jobs, assign a GPU and acquire its mutex to ensure only one job per GPU.
         // CPU jobs can run in parallel without any mutex.
+        // If GPU job fails, we'll retry with CPU as a fallback.
         if !prover_job.job_settings.force_cpu {
             let gpu_ids = get_gpu_ids();
             let gpu_mutexes = get_gpu_mutexes();
             
-            // Try to acquire any available GPU (non-blocking first pass)
-            let mut acquired_index = None;
-            for (idx, mutex) in gpu_mutexes.iter().enumerate() {
-                if mutex.try_lock().is_ok() {
-                    acquired_index = Some(idx);
-                    break;
+            // Try to acquire any available GPU immediately. If all GPUs are busy,
+            // wait for the first one that becomes available.
+            let (gpu_index, _gpu_guard) = {
+                // First, try to acquire any available GPU (non-blocking)
+                let mut acquired = None;
+                for (idx, mutex) in gpu_mutexes.iter().enumerate() {
+                    if let Ok(guard) = mutex.clone().try_lock_owned() {
+                        acquired = Some((idx, guard));
+                        break;
+                    }
                 }
-            }
-            
-            // If no GPU immediately available, wait for any GPU using select
-            let (gpu_index, _gpu_guard) = if let Some(idx) = acquired_index {
-                // Re-acquire properly (try_lock was just a check)
-                let guard = gpu_mutexes[idx].clone().lock_owned().await;
-                (idx, guard)
-            } else {
-                // All GPUs busy - wait for the first one that becomes available
-                // Use round-robin starting point to distribute load
-                let start_idx = get_next_gpu_index();
-                let guard = gpu_mutexes[start_idx].clone().lock_owned().await;
-                (start_idx, guard)
+                
+                // If we found an available GPU, use it immediately
+                if let Some((idx, guard)) = acquired {
+                    (idx, guard)
+                } else {
+                    // All GPUs are busy - wait for any GPU to become available
+                    // Spawn tasks for each GPU and use a channel to get the first available
+                    use tokio::sync::oneshot;
+                    let (tx, mut rx) = oneshot::channel();
+                    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+                    
+                    for (idx, mutex) in gpu_mutexes.iter().enumerate() {
+                        let mutex_clone = mutex.clone();
+                        let tx_clone = tx.clone();
+                        tokio::spawn(async move {
+                            let guard = mutex_clone.lock_owned().await;
+                            let mut sender_guard = tx_clone.lock().await;
+                            if let Some(s) = sender_guard.take() {
+                                let _ = s.send((idx, guard));
+                            }
+                        });
+                    }
+                    
+                    // Wait for the first GPU to become available
+                    rx.await.expect("At least one GPU should become available")
+                }
             };
             
             let assigned_gpu = if !gpu_ids.is_empty() {
@@ -659,12 +669,54 @@ impl Job for ProverJob {
                 assigned_gpu,
                 gpu_index
             );
-            let result = prover_job.prove(rx).await;
+            let result = prover_job.prove(rx.clone()).await;
             tracing::info!(
                 "[HYBRID] GPU {} proof complete, releasing mutex",
                 assigned_gpu
             );
-            result
+            
+            // If GPU job failed, fall back to CPU execution
+            let should_fallback = if let JobCompletion::Finished(result_box) = &result {
+                // Check if the result contains an error
+                if let Some(prover_result) = result_box.as_any().downcast_ref::<ProverJobResult>() {
+                    // ProverJobResult is JobResultWrapper<Result<Proof, ProverJobError>>
+                    // Use deref to access the inner Result
+                    match prover_result.as_ref() {
+                        Ok(_) => false,
+                        Err(e) => {
+                            // Check if it's a GPU-related error that we should retry with CPU
+                            match e {
+                                ProverJobError::TritonVmProverFailed(VmProcessError::NonZeroExitCode(_)) => {
+                                    tracing::warn!(
+                                        "[HYBRID] GPU proof failed with error: {:?}, falling back to CPU execution",
+                                        e
+                                    );
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            
+            if should_fallback && padded_height <= GPU_THRESHOLD * 2 {
+                // Only fallback for proofs that are reasonably sized for CPU
+                tracing::info!(
+                    "[HYBRID] Retrying with CPU execution (padded_height={})",
+                    padded_height
+                );
+                let mut cpu_job = self.clone();
+                cpu_job.job_settings.force_cpu = true;
+                cpu_job.job_settings.assigned_gpu = None;
+                cpu_job.prove(rx).await
+            } else {
+                result
+            }
         } else {
             // CPU jobs run without mutex - can be parallel
             prover_job.prove(rx).await

@@ -128,6 +128,57 @@ fn execute_gpu(
     eprintln!("[GPU] =========================================");
     eprintln!("[GPU] Using GPU prover: {}", gpu_prover_path);
 
+    // Run trace execution to determine padded height for environment variable configuration
+    eprintln!("[GPU] Running trace execution to determine padded height...");
+    let (aet, output) = VM::trace_execution(
+        program.clone(),
+        (&claim.input).into(),
+        non_determinism.clone(),
+    )
+    .map_err(|e| format!("Failed to run trace execution: {:?}", e))?;
+
+    // Verify output matches claim
+    if output != claim.output {
+        return Err(format!(
+            "Output mismatch: claim expects {:?}, execution produced {:?}",
+            claim.output, output
+        ));
+    }
+
+    let padded_height = aet.padded_height();
+    let log2_padded_height = padded_height.ilog2() as u8;
+    eprintln!("[GPU] actual log2 padded height for proof: {log2_padded_height}");
+
+    // Check padded height limit if specified
+    if let Some(limit) = max_log2_padded_height {
+        if log2_padded_height > limit {
+            eprintln!(
+                "[GPU] Canceling prover because padded height exceeds max value of {}",
+                limit
+            );
+            // Exit with error code indicating 1) AET padded height too big, and 2)
+            // the log2 padded height. Guaranteed to be in the range [200-232].
+            std::process::exit(
+                PROOF_PADDED_HEIGHT_TOO_BIG_PROCESS_OFFSET_ERROR_CODE + i32::from(log2_padded_height),
+            );
+        }
+    }
+
+    // Set TRITON_GPU_LDE_FRUGAL based on padded height threshold
+    // Threshold: 2^22 (log2 = 22)
+    // - If log2 >= 22: TRITON_GPU_LDE_FRUGAL=1
+    // - If log2 < 22: TRITON_GPU_LDE_FRUGAL=0
+    const LDE_FRUGAL_THRESHOLD_LOG2: u8 = 22;
+    let lde_frugal_value = if log2_padded_height >= LDE_FRUGAL_THRESHOLD_LOG2 {
+        "1"
+    } else {
+        "0"
+    };
+    eprintln!(
+        "[GPU] Setting TRITON_GPU_LDE_FRUGAL={} (log2_padded_height={}, threshold={})",
+        lde_frugal_value, log2_padded_height, LDE_FRUGAL_THRESHOLD_LOG2
+    );
+
     // Create temp directory for files
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,6 +246,9 @@ fn execute_gpu(
         cmd.arg(&program_json_path);
     }
 
+    // Set TRITON_GPU_LDE_FRUGAL environment variable for the GPU prover process
+    cmd.env("TRITON_GPU_LDE_FRUGAL", lde_frugal_value);
+
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     eprintln!(
@@ -241,13 +295,82 @@ fn execute_gpu(
     if !output.status.success() {
         // Save failure artifacts for debugging
         let failed_dir = std::env::temp_dir().join(format!("triton_vm_prover_failed_{}", ts));
-        let _ = fs::rename(&temp_dir, &failed_dir);
+        
+        // Create failed directory
+        let _ = fs::create_dir_all(&failed_dir);
+        
+        // Copy all input files to failed directory for debugging
+        // These should exist since we created them before running the prover
+        if program_json_path.exists() {
+            let _ = fs::copy(&program_json_path, failed_dir.join("program.json"));
+        }
+        if nondet_json_path.exists() {
+            let _ = fs::copy(&nondet_json_path, failed_dir.join("nondet.json"));
+        }
+        if claim_path.exists() {
+            let _ = fs::copy(&claim_path, failed_dir.join("claim.bin"));
+        }
+        
+        // Save claim as JSON for easier inspection (always available from memory)
+        let claim_json = serde_json::to_string_pretty(claim)
+            .unwrap_or_else(|e| format!("Failed to serialize claim: {:?}", e));
+        let _ = fs::write(failed_dir.join("claim.json"), claim_json);
+        
+        // Save stdout and stderr logs
         let _ = fs::write(failed_dir.join("gpu_stdout.log"), stdout.as_bytes());
         let _ = fs::write(failed_dir.join("gpu_stderr.log"), stderr.as_bytes());
+        
+        // Save debug information summary
+        let debug_info = format!(
+            "GPU Prover Failure Debug Information\n\
+            ====================================\n\n\
+            Timestamp: {}\n\
+            GPU Prover Path: {}\n\
+            Exit Code: {:?}\n\
+            Log2 Padded Height: {}\n\
+            Padded Height: {}\n\
+            TRITON_GPU_LDE_FRUGAL: {}\n\
+            Max Log2 Padded Height: {:?}\n\
+            Public Input: {}\n\
+            Has NonDeterminism: {}\n\
+            Program JSON Size: {} bytes\n\
+            NonDet JSON Size: {} bytes\n\n\
+            Command executed:\n\
+            {} {} \"{}\" {} {}{}\n\n\
+            All input files and logs are saved in this directory.",
+            ts,
+            gpu_prover_path,
+            output.status.code(),
+            log2_padded_height,
+            padded_height,
+            lde_frugal_value,
+            max_log2_padded_height,
+            if public_input_str.is_empty() { "<empty>".to_string() } else { format!("{} values", claim.input.len()) },
+            has_nondet,
+            program_json.len(),
+            nondet_json.len(),
+            gpu_prover_path,
+            program_json_path.display(),
+            if public_input_str.is_empty() { "<empty>" } else { &public_input_str },
+            claim_path.display(),
+            proof_path.display(),
+            if has_nondet {
+                format!(" {} {}", nondet_json_path.display(), program_json_path.display())
+            } else {
+                String::new()
+            }
+        );
+        let _ = fs::write(failed_dir.join("debug_info.txt"), debug_info);
 
         eprintln!(
-            "[GPU] GPU prover failed; artifacts saved to {}",
+            "[GPU] GPU prover failed; all artifacts saved to {}",
             failed_dir.display()
+        );
+        eprintln!(
+            "[GPU] Debug info: log2_padded_height={}, TRITON_GPU_LDE_FRUGAL={}, exit_code={:?}",
+            log2_padded_height,
+            lde_frugal_value,
+            output.status.code()
         );
 
         return Err(format!(
