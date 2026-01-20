@@ -1,0 +1,1593 @@
+diff --git a/tasm-lib/Cargo.toml b/tasm-lib/Cargo.toml
+index ce5348d7..b616c059 100644
+--- a/tasm-lib/Cargo.toml
++++ b/tasm-lib/Cargo.toml
+@@ -29,7 +29,7 @@ arbitrary = { version = "1", features = ["derive"] }
+ const_format = "0.2"
+ hex = "^0.4.3"
+ itertools = "0.14"
+-ndarray = { version = "0.16" }
++ndarray = { version = "0.17" }
+ num = "0.4"
+ num-traits = "0.2"
+ rand = "0.9.0"
+@@ -37,7 +37,7 @@ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ strum = { version = "0.27", features = ["derive"] }
+ tasm-object-derive.workspace = true
+-triton-vm = { version = "1.0.0", default-features = false }
++triton-vm = { path = "../../triton-vm/triton-vm/" }
+ 
+ [dev-dependencies.cargo-husky]
+ version = "1"
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_fri_verify.json b/tasm-lib/benchmarks/tasmlib_verifier_fri_verify.json
+index 27c43bca..419254ec 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_fri_verify.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_fri_verify.json
+@@ -2,22 +2,22 @@
+   {
+     "name": "tasmlib_verifier_fri_verify",
+     "benchmark_result": {
+-      "clock_cycle_count": 42734,
+-      "hash_table_height": 14664,
+-      "u32_table_height": 18423,
+-      "op_stack_table_height": 39277,
+-      "ram_table_height": 17564
++      "clock_cycle_count": 43089,
++      "hash_table_height": 14898,
++      "u32_table_height": 18421,
++      "op_stack_table_height": 39525,
++      "ram_table_height": 17953
+     },
+     "case": "CommonCase"
+   },
+   {
+     "name": "tasmlib_verifier_fri_verify",
+     "benchmark_result": {
+-      "clock_cycle_count": 42734,
+-      "hash_table_height": 14664,
+-      "u32_table_height": 18391,
+-      "op_stack_table_height": 39277,
+-      "ram_table_height": 17564
++      "clock_cycle_count": 43089,
++      "hash_table_height": 14898,
++      "u32_table_height": 18379,
++      "op_stack_table_height": 39525,
++      "ram_table_height": 17953
+     },
+     "case": "WorstCase"
+   }
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_master_table_air_constraint_evaluation.json b/tasm-lib/benchmarks/tasmlib_verifier_master_table_air_constraint_evaluation.json
+index 64c7b4ca..316466cd 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_master_table_air_constraint_evaluation.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_master_table_air_constraint_evaluation.json
+@@ -2,22 +2,22 @@
+   {
+     "name": "tasmlib_verifier_master_table_air_constraint_evaluation",
+     "benchmark_result": {
+-      "clock_cycle_count": 34094,
+-      "hash_table_height": 36432,
++      "clock_cycle_count": 33349,
++      "hash_table_height": 35676,
+       "u32_table_height": 0,
+-      "op_stack_table_height": 62891,
+-      "ram_table_height": 24996
++      "op_stack_table_height": 61505,
++      "ram_table_height": 24555
+     },
+     "case": "CommonCase"
+   },
+   {
+     "name": "tasmlib_verifier_master_table_air_constraint_evaluation",
+     "benchmark_result": {
+-      "clock_cycle_count": 34094,
+-      "hash_table_height": 36432,
++      "clock_cycle_count": 33349,
++      "hash_table_height": 35676,
+       "u32_table_height": 0,
+-      "op_stack_table_height": 62891,
+-      "ram_table_height": 24996
++      "op_stack_table_height": 61505,
++      "ram_table_height": 24555
+     },
+     "case": "WorstCase"
+   }
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_256_fri_exp_4.json b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_256_fri_exp_4.json
+index faef5ef0..2aefee7f 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_256_fri_exp_4.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_256_fri_exp_4.json
+@@ -2,11 +2,11 @@
+   {
+     "name": "tasmlib_verifier_stark_verify_dynamic_inner_padded_height_256_fri_exp_4",
+     "benchmark_result": {
+-      "clock_cycle_count": 186897,
+-      "hash_table_height": 138829,
+-      "u32_table_height": 25689,
+-      "op_stack_table_height": 164284,
+-      "ram_table_height": 289170
++      "clock_cycle_count": 186260,
++      "hash_table_height": 137881,
++      "u32_table_height": 26174,
++      "op_stack_table_height": 162994,
++      "ram_table_height": 288900
+     },
+     "case": "CommonCase"
+   }
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_512_fri_exp_4.json b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_512_fri_exp_4.json
+index 7b106627..a51ee3eb 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_512_fri_exp_4.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_dynamic_inner_padded_height_512_fri_exp_4.json
+@@ -2,11 +2,11 @@
+   {
+     "name": "tasmlib_verifier_stark_verify_dynamic_inner_padded_height_512_fri_exp_4",
+     "benchmark_result": {
+-      "clock_cycle_count": 194401,
+-      "hash_table_height": 146521,
+-      "u32_table_height": 34278,
+-      "op_stack_table_height": 168988,
+-      "ram_table_height": 290321
++      "clock_cycle_count": 193740,
++      "hash_table_height": 145549,
++      "u32_table_height": 34501,
++      "op_stack_table_height": 167682,
++      "ram_table_height": 290015
+     },
+     "case": "CommonCase"
+   }
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_256_fri_exp_4.json b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_256_fri_exp_4.json
+index dac37ec8..b94b4eda 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_256_fri_exp_4.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_256_fri_exp_4.json
+@@ -2,11 +2,11 @@
+   {
+     "name": "tasmlib_verifier_stark_verify_static_inner_padded_height_256_fri_exp_4",
+     "benchmark_result": {
+-      "clock_cycle_count": 175194,
+-      "hash_table_height": 124789,
+-      "u32_table_height": 25689,
+-      "op_stack_table_height": 156478,
+-      "ram_table_height": 285271
++      "clock_cycle_count": 174869,
++      "hash_table_height": 124213,
++      "u32_table_height": 26174,
++      "op_stack_table_height": 155396,
++      "ram_table_height": 285105
+     },
+     "case": "CommonCase"
+   }
+diff --git a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_512_fri_exp_4.json b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_512_fri_exp_4.json
+index 51b8e387..8ffcd336 100644
+--- a/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_512_fri_exp_4.json
++++ b/tasm-lib/benchmarks/tasmlib_verifier_stark_verify_static_inner_padded_height_512_fri_exp_4.json
+@@ -2,11 +2,11 @@
+   {
+     "name": "tasmlib_verifier_stark_verify_static_inner_padded_height_512_fri_exp_4",
+     "benchmark_result": {
+-      "clock_cycle_count": 182698,
+-      "hash_table_height": 132481,
+-      "u32_table_height": 34278,
+-      "op_stack_table_height": 161182,
+-      "ram_table_height": 286422
++      "clock_cycle_count": 182349,
++      "hash_table_height": 131881,
++      "u32_table_height": 34501,
++      "op_stack_table_height": 160084,
++      "ram_table_height": 286220
+     },
+     "case": "CommonCase"
+   }
+diff --git a/tasm-lib/src/arithmetic/bfe/primitive_root_of_unity.rs b/tasm-lib/src/arithmetic/bfe/primitive_root_of_unity.rs
+index 7fabd8f4..f03654b2 100644
+--- a/tasm-lib/src/arithmetic/bfe/primitive_root_of_unity.rs
++++ b/tasm-lib/src/arithmetic/bfe/primitive_root_of_unity.rs
+@@ -178,7 +178,7 @@ impl BasicSnippet for PrimitiveRootOfUnity {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xfcf839b15db0eef5.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x7e7f78606c82b7d1.into());
+ 
+         sign_offs
+     }
+diff --git a/tasm-lib/src/arithmetic/u128/lt.rs b/tasm-lib/src/arithmetic/u128/lt.rs
+index 24b25ad9..91a9163d 100644
+--- a/tasm-lib/src/arithmetic/u128/lt.rs
++++ b/tasm-lib/src/arithmetic/u128/lt.rs
+@@ -82,7 +82,7 @@ impl BasicSnippet for Lt {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x4e24d1cf57cfa49d.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xf6188121bd7f252b.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u128/overflowing_add.rs b/tasm-lib/src/arithmetic/u128/overflowing_add.rs
+index 66c55f6e..1c3a0f0e 100644
+--- a/tasm-lib/src/arithmetic/u128/overflowing_add.rs
++++ b/tasm-lib/src/arithmetic/u128/overflowing_add.rs
+@@ -84,7 +84,7 @@ impl BasicSnippet for OverflowingAdd {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x191e15314c8a5c8e.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xd5c365d6252846bd.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u128/safe_add.rs b/tasm-lib/src/arithmetic/u128/safe_add.rs
+index 1d4fb7d0..453cd5f7 100644
+--- a/tasm-lib/src/arithmetic/u128/safe_add.rs
++++ b/tasm-lib/src/arithmetic/u128/safe_add.rs
+@@ -48,9 +48,10 @@ impl BasicSnippet for SafeAdd {
+ 
+ #[cfg(test)]
+ mod tests {
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::test_prelude::*;
+-    use rand::rngs::StdRng;
+ 
+     impl SafeAdd {
+         fn assert_expected_add_behavior(&self, lhs: u128, rhs: u128) {
+diff --git a/tasm-lib/src/arithmetic/u128/safe_mul.rs b/tasm-lib/src/arithmetic/u128/safe_mul.rs
+index 80c7633d..e982d53d 100644
+--- a/tasm-lib/src/arithmetic/u128/safe_mul.rs
++++ b/tasm-lib/src/arithmetic/u128/safe_mul.rs
+@@ -185,16 +185,17 @@ impl BasicSnippet for SafeMul {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x6a6ab0928dd2f0e4.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xbba006a82c82b12f.into());
+         sign_offs
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::test_prelude::*;
+-    use rand::rngs::StdRng;
+ 
+     impl SafeMul {
+         fn test_assertion_failure(&self, left: u128, right: u128, error_ids: &[i128]) {
+diff --git a/tasm-lib/src/arithmetic/u128/shift_left.rs b/tasm-lib/src/arithmetic/u128/shift_left.rs
+index 353a1c52..f025a54e 100644
+--- a/tasm-lib/src/arithmetic/u128/shift_left.rs
++++ b/tasm-lib/src/arithmetic/u128/shift_left.rs
+@@ -121,16 +121,17 @@ impl BasicSnippet for ShiftLeft {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x4898e915d48c39b7.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x4d9d78686bfa6221.into());
+         sign_offs
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::test_prelude::*;
+-    use rand::rngs::StdRng;
+ 
+     impl Closure for ShiftLeft {
+         type Args = <ShiftRight as Closure>::Args;
+diff --git a/tasm-lib/src/arithmetic/u128/shift_left_static.rs b/tasm-lib/src/arithmetic/u128/shift_left_static.rs
+index 58598d57..5ac8beb0 100644
+--- a/tasm-lib/src/arithmetic/u128/shift_left_static.rs
++++ b/tasm-lib/src/arithmetic/u128/shift_left_static.rs
+@@ -76,9 +76,10 @@ impl<const N: u8> BasicSnippet for ShiftLeftStatic<N> {
+ 
+ #[cfg(test)]
+ pub(crate) mod tests {
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::test_prelude::*;
+-    use rand::rngs::StdRng;
+ 
+     impl<const N: u8> Closure for ShiftLeftStatic<N> {
+         type Args = u128;
+diff --git a/tasm-lib/src/arithmetic/u128/shift_right.rs b/tasm-lib/src/arithmetic/u128/shift_right.rs
+index 031202a2..2ffa9e59 100644
+--- a/tasm-lib/src/arithmetic/u128/shift_right.rs
++++ b/tasm-lib/src/arithmetic/u128/shift_right.rs
+@@ -126,16 +126,17 @@ impl BasicSnippet for ShiftRight {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x9875596d880d6dd0.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x68440e40d1aa55e9.into());
+         sign_offs
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::test_prelude::*;
+-    use rand::rngs::StdRng;
+ 
+     impl Closure for ShiftRight {
+         type Args = (u128, u32);
+diff --git a/tasm-lib/src/arithmetic/u128/sub.rs b/tasm-lib/src/arithmetic/u128/sub.rs
+index f78bb24d..74f31e36 100644
+--- a/tasm-lib/src/arithmetic/u128/sub.rs
++++ b/tasm-lib/src/arithmetic/u128/sub.rs
+@@ -106,7 +106,7 @@ impl BasicSnippet for Sub {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xcfbc5c77452584fd.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xd1effbb4a16f9979.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u160/div_mod.rs b/tasm-lib/src/arithmetic/u160/div_mod.rs
+index b7f5a870..33e088f4 100644
+--- a/tasm-lib/src/arithmetic/u160/div_mod.rs
++++ b/tasm-lib/src/arithmetic/u160/div_mod.rs
+@@ -163,6 +163,11 @@ impl BasicSnippet for DivMod {
+ 
+ #[cfg(test)]
+ mod tests {
++    use num::BigUint;
++    use num::Integer;
++    use num_traits::Zero;
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::arithmetic::u160::u128_to_u160;
+     use crate::library::STATIC_MEMORY_FIRST_ADDRESS;
+@@ -170,11 +175,6 @@ mod tests {
+     use crate::test_prelude::Algorithm;
+     use crate::test_prelude::*;
+ 
+-    use num::BigUint;
+-    use num::Integer;
+-    use num_traits::Zero;
+-    use rand::rngs::StdRng;
+-
+     #[test]
+     fn std_test() {
+         ShadowedAlgorithm::new(DivMod).test()
+diff --git a/tasm-lib/src/arithmetic/u160/safe_add.rs b/tasm-lib/src/arithmetic/u160/safe_add.rs
+index 077b053b..55048f92 100644
+--- a/tasm-lib/src/arithmetic/u160/safe_add.rs
++++ b/tasm-lib/src/arithmetic/u160/safe_add.rs
+@@ -65,14 +65,14 @@ impl BasicSnippet for SafeAdd {
+ 
+ #[cfg(test)]
+ mod tests {
++    use num::BigUint;
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::arithmetic::u160::u128_to_u160_shl_32;
+     use crate::arithmetic::u160::u128_to_u160_shl_32_lower_limb_filled;
+     use crate::test_prelude::*;
+ 
+-    use num::BigUint;
+-    use rand::rngs::StdRng;
+-
+     #[test]
+     fn rust_shadow() {
+         ShadowedClosure::new(SafeAdd).test()
+diff --git a/tasm-lib/src/arithmetic/u160/safe_mul.rs b/tasm-lib/src/arithmetic/u160/safe_mul.rs
+index a95fd83b..141da47c 100644
+--- a/tasm-lib/src/arithmetic/u160/safe_mul.rs
++++ b/tasm-lib/src/arithmetic/u160/safe_mul.rs
+@@ -234,16 +234,16 @@ impl BasicSnippet for SafeMul {
+ 
+ #[cfg(test)]
+ mod tests {
++    use num::BigUint;
++    use num::One;
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::arithmetic::u160::u128_to_u160;
+     use crate::arithmetic::u160::u128_to_u160_shl_32;
+     use crate::arithmetic::u160::u128_to_u160_shl_32_lower_limb_filled;
+     use crate::test_prelude::*;
+ 
+-    use num::BigUint;
+-    use num::One;
+-    use rand::rngs::StdRng;
+-
+     impl SafeMul {
+         fn test_assertion_failure(&self, left: [u32; 5], right: [u32; 5], error_ids: &[i128]) {
+             test_assertion_failure(
+diff --git a/tasm-lib/src/arithmetic/u192/safe_add.rs b/tasm-lib/src/arithmetic/u192/safe_add.rs
+index 14490ecb..a4aa8b61 100644
+--- a/tasm-lib/src/arithmetic/u192/safe_add.rs
++++ b/tasm-lib/src/arithmetic/u192/safe_add.rs
+@@ -65,15 +65,15 @@ impl BasicSnippet for SafeAdd {
+ 
+ #[cfg(test)]
+ mod tests {
++    use num::BigUint;
++    use rand::rngs::StdRng;
++
+     use super::*;
+     use crate::arithmetic::u192::U192;
+     use crate::arithmetic::u192::to_u192;
+     use crate::arithmetic::u192::u128_to_u192_shl64;
+     use crate::test_prelude::*;
+ 
+-    use num::BigUint;
+-    use rand::rngs::StdRng;
+-
+     #[test]
+     fn rust_shadow() {
+         ShadowedClosure::new(SafeAdd).test()
+diff --git a/tasm-lib/src/arithmetic/u32/is_odd.rs b/tasm-lib/src/arithmetic/u32/is_odd.rs
+index 66be8e45..52f2a3f5 100644
+--- a/tasm-lib/src/arithmetic/u32/is_odd.rs
++++ b/tasm-lib/src/arithmetic/u32/is_odd.rs
+@@ -1,8 +1,10 @@
+ use std::collections::HashMap;
++
+ use triton_vm::prelude::*;
+ 
+ use crate::prelude::*;
+-use crate::traits::basic_snippet::{Reviewer, SignOffFingerprint};
++use crate::traits::basic_snippet::Reviewer;
++use crate::traits::basic_snippet::SignOffFingerprint;
+ 
+ /// Is the top of the stack an odd u32?
+ ///
+@@ -52,7 +54,7 @@ impl BasicSnippet for IsOdd {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xaa871f100a4a185.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xa573894027409e47.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/is_u32.rs b/tasm-lib/src/arithmetic/u32/is_u32.rs
+index e2716a37..4ee60af0 100644
+--- a/tasm-lib/src/arithmetic/u32/is_u32.rs
++++ b/tasm-lib/src/arithmetic/u32/is_u32.rs
+@@ -1,8 +1,10 @@
+ use std::collections::HashMap;
++
+ use triton_vm::prelude::*;
+ 
+ use crate::prelude::*;
+-use crate::traits::basic_snippet::{Reviewer, SignOffFingerprint};
++use crate::traits::basic_snippet::Reviewer;
++use crate::traits::basic_snippet::SignOffFingerprint;
+ 
+ /// Is the top of the stack a u32?
+ ///
+@@ -50,7 +52,7 @@ impl BasicSnippet for IsU32 {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x95dae6d2fe11abda.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x7eeef18dd91aa7a7.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/next_power_of_two.rs b/tasm-lib/src/arithmetic/u32/next_power_of_two.rs
+index 5196d95d..b7040a49 100644
+--- a/tasm-lib/src/arithmetic/u32/next_power_of_two.rs
++++ b/tasm-lib/src/arithmetic/u32/next_power_of_two.rs
+@@ -108,7 +108,7 @@ impl BasicSnippet for NextPowerOfTwo {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x131c49afe5bf05af.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x6ee79243e0c65303.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/or.rs b/tasm-lib/src/arithmetic/u32/or.rs
+index 38a00e48..9ab3f122 100644
+--- a/tasm-lib/src/arithmetic/u32/or.rs
++++ b/tasm-lib/src/arithmetic/u32/or.rs
+@@ -60,7 +60,7 @@ impl BasicSnippet for Or {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x78bc3071bcc44a84.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x7e5a9b6cfb38b388.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/safe_add.rs b/tasm-lib/src/arithmetic/u32/safe_add.rs
+index dd9123ed..ba3b5ff9 100644
+--- a/tasm-lib/src/arithmetic/u32/safe_add.rs
++++ b/tasm-lib/src/arithmetic/u32/safe_add.rs
+@@ -62,7 +62,7 @@ impl BasicSnippet for SafeAdd {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x92d8f083ca55e1d.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xa54b9cd25d7dd941.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/safe_mul.rs b/tasm-lib/src/arithmetic/u32/safe_mul.rs
+index 6ef02480..adb13f21 100644
+--- a/tasm-lib/src/arithmetic/u32/safe_mul.rs
++++ b/tasm-lib/src/arithmetic/u32/safe_mul.rs
+@@ -64,7 +64,7 @@ impl BasicSnippet for SafeMul {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x3836d772ff7b6165.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x502e4ccfdbf1b531.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/safe_sub.rs b/tasm-lib/src/arithmetic/u32/safe_sub.rs
+index 9ec77cf2..727224b4 100644
+--- a/tasm-lib/src/arithmetic/u32/safe_sub.rs
++++ b/tasm-lib/src/arithmetic/u32/safe_sub.rs
+@@ -66,7 +66,7 @@ impl BasicSnippet for SafeSub {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x40fd42d47d3b4bf4.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x75a4191cfa996c3f.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/shift_left.rs b/tasm-lib/src/arithmetic/u32/shift_left.rs
+index e1dac38c..e67351d1 100644
+--- a/tasm-lib/src/arithmetic/u32/shift_left.rs
++++ b/tasm-lib/src/arithmetic/u32/shift_left.rs
+@@ -72,7 +72,7 @@ impl BasicSnippet for ShiftLeft {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xec49012951c99eb1.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x78cbb7a9ad26612c.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/shift_right.rs b/tasm-lib/src/arithmetic/u32/shift_right.rs
+index 28c9d796..d16e8dff 100644
+--- a/tasm-lib/src/arithmetic/u32/shift_right.rs
++++ b/tasm-lib/src/arithmetic/u32/shift_right.rs
+@@ -82,7 +82,7 @@ impl BasicSnippet for ShiftRight {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xf07f7ed3f3fe8e49.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x1b65003ff2618480.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u32/trailing_zeros.rs b/tasm-lib/src/arithmetic/u32/trailing_zeros.rs
+index 48b22f69..5a3eede0 100644
+--- a/tasm-lib/src/arithmetic/u32/trailing_zeros.rs
++++ b/tasm-lib/src/arithmetic/u32/trailing_zeros.rs
+@@ -106,7 +106,7 @@ impl BasicSnippet for TrailingZeros {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xc7e78a3074304156.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x2ec8110d7af9b4e9.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/add.rs b/tasm-lib/src/arithmetic/u64/add.rs
+index 25c9e142..4d392253 100644
+--- a/tasm-lib/src/arithmetic/u64/add.rs
++++ b/tasm-lib/src/arithmetic/u64/add.rs
+@@ -1,4 +1,5 @@
+ use std::collections::HashMap;
++
+ use tasm_lib::prelude::BasicSnippet;
+ use triton_vm::prelude::*;
+ 
+@@ -63,7 +64,7 @@ impl BasicSnippet for Add {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xb84891929efdb6cd.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xe275906c3d0c35f3.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/and.rs b/tasm-lib/src/arithmetic/u64/and.rs
+index e4b0f22e..cbcd35e8 100644
+--- a/tasm-lib/src/arithmetic/u64/and.rs
++++ b/tasm-lib/src/arithmetic/u64/and.rs
+@@ -64,7 +64,7 @@ impl BasicSnippet for And {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xfd2a6e206fb3abab.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x606b07d7252afa58.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/decr.rs b/tasm-lib/src/arithmetic/u64/decr.rs
+index e731df0a..38d6e06a 100644
+--- a/tasm-lib/src/arithmetic/u64/decr.rs
++++ b/tasm-lib/src/arithmetic/u64/decr.rs
+@@ -86,7 +86,7 @@ impl BasicSnippet for Decr {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xc7d3ab3d4996bc9c.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xc5b5d50e60281819.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/div2.rs b/tasm-lib/src/arithmetic/u64/div2.rs
+index 90e2a952..ad2f1ffa 100644
+--- a/tasm-lib/src/arithmetic/u64/div2.rs
++++ b/tasm-lib/src/arithmetic/u64/div2.rs
+@@ -73,7 +73,7 @@ impl BasicSnippet for Div2 {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xe77a12ba30ef339b.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x23322a6d8af4bb90.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/incr.rs b/tasm-lib/src/arithmetic/u64/incr.rs
+index 5811133d..05012ae0 100644
+--- a/tasm-lib/src/arithmetic/u64/incr.rs
++++ b/tasm-lib/src/arithmetic/u64/incr.rs
+@@ -75,7 +75,7 @@ impl BasicSnippet for Incr {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x786629a8064b2786.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x9b758bb656258905.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/log_2_floor.rs b/tasm-lib/src/arithmetic/u64/log_2_floor.rs
+index b551502a..ac80c429 100644
+--- a/tasm-lib/src/arithmetic/u64/log_2_floor.rs
++++ b/tasm-lib/src/arithmetic/u64/log_2_floor.rs
+@@ -94,7 +94,7 @@ impl BasicSnippet for Log2Floor {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x549a2ff4d3b45eda.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xc89c4b19e24a3ba1.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/lt.rs b/tasm-lib/src/arithmetic/u64/lt.rs
+index 473b0dd3..7057035c 100644
+--- a/tasm-lib/src/arithmetic/u64/lt.rs
++++ b/tasm-lib/src/arithmetic/u64/lt.rs
+@@ -81,7 +81,7 @@ impl BasicSnippet for Lt {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x1e4d56adb16e1520.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x18418167b2d68326.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/lt_preserve_args.rs b/tasm-lib/src/arithmetic/u64/lt_preserve_args.rs
+index 8cb79775..08891fc6 100644
+--- a/tasm-lib/src/arithmetic/u64/lt_preserve_args.rs
++++ b/tasm-lib/src/arithmetic/u64/lt_preserve_args.rs
+@@ -85,7 +85,7 @@ impl BasicSnippet for LtPreserveArgs {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x858f91bcf192c41a.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xd553ed4340f6a42d.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/or.rs b/tasm-lib/src/arithmetic/u64/or.rs
+index eb066f42..99bc4b5b 100644
+--- a/tasm-lib/src/arithmetic/u64/or.rs
++++ b/tasm-lib/src/arithmetic/u64/or.rs
+@@ -69,7 +69,7 @@ impl BasicSnippet for Or {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x9304a37ae367ed6.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x56e1a169cdc00179.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/overflowing_add.rs b/tasm-lib/src/arithmetic/u64/overflowing_add.rs
+index 717bab41..ed3d2670 100644
+--- a/tasm-lib/src/arithmetic/u64/overflowing_add.rs
++++ b/tasm-lib/src/arithmetic/u64/overflowing_add.rs
+@@ -1,4 +1,5 @@
+ use std::collections::HashMap;
++
+ use triton_vm::prelude::*;
+ 
+ use crate::prelude::*;
+@@ -82,7 +83,7 @@ impl BasicSnippet for OverflowingAdd {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x7226f66f533b188a.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x77f1dc470c2bb719.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/overflowing_sub.rs b/tasm-lib/src/arithmetic/u64/overflowing_sub.rs
+index 086334ee..9842fba7 100644
+--- a/tasm-lib/src/arithmetic/u64/overflowing_sub.rs
++++ b/tasm-lib/src/arithmetic/u64/overflowing_sub.rs
+@@ -124,7 +124,7 @@ impl BasicSnippet for OverflowingSub {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x4e4c796ae06e4400.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xad11205197978c1d.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/popcount.rs b/tasm-lib/src/arithmetic/u64/popcount.rs
+index dd79a7e3..ed96ae72 100644
+--- a/tasm-lib/src/arithmetic/u64/popcount.rs
++++ b/tasm-lib/src/arithmetic/u64/popcount.rs
+@@ -54,7 +54,7 @@ impl BasicSnippet for PopCount {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xeaae261c6df2bcbb.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xa23391ac8286ed10.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/pow2.rs b/tasm-lib/src/arithmetic/u64/pow2.rs
+index ffa63e3f..a23b2972 100644
+--- a/tasm-lib/src/arithmetic/u64/pow2.rs
++++ b/tasm-lib/src/arithmetic/u64/pow2.rs
+@@ -59,7 +59,7 @@ impl BasicSnippet for Pow2 {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x3ea5807c1e92829b.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xcb940285f823bded.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/safe_mul.rs b/tasm-lib/src/arithmetic/u64/safe_mul.rs
+index f58526c8..2d9fb77a 100644
+--- a/tasm-lib/src/arithmetic/u64/safe_mul.rs
++++ b/tasm-lib/src/arithmetic/u64/safe_mul.rs
+@@ -120,7 +120,7 @@ impl BasicSnippet for SafeMul {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xaaa2259189834687.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xe472ad0d428ed30c.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/shift_left.rs b/tasm-lib/src/arithmetic/u64/shift_left.rs
+index 1ad883bc..08137717 100644
+--- a/tasm-lib/src/arithmetic/u64/shift_left.rs
++++ b/tasm-lib/src/arithmetic/u64/shift_left.rs
+@@ -117,7 +117,7 @@ impl BasicSnippet for ShiftLeft {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x46e8b1129fe7b87c.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x4a03ab75c8546370.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/shift_right.rs b/tasm-lib/src/arithmetic/u64/shift_right.rs
+index bed4b20e..b22c2db9 100644
+--- a/tasm-lib/src/arithmetic/u64/shift_right.rs
++++ b/tasm-lib/src/arithmetic/u64/shift_right.rs
+@@ -138,7 +138,7 @@ impl BasicSnippet for ShiftRight {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xa1531b9db1f3f021.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xa7cfa746b15b2d76.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/sub.rs b/tasm-lib/src/arithmetic/u64/sub.rs
+index 10d04787..37f5e14a 100644
+--- a/tasm-lib/src/arithmetic/u64/sub.rs
++++ b/tasm-lib/src/arithmetic/u64/sub.rs
+@@ -70,7 +70,7 @@ impl BasicSnippet for Sub {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x7d887e69af21cab6.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x8dad59997cb49bd9.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/trailing_zeros.rs b/tasm-lib/src/arithmetic/u64/trailing_zeros.rs
+index a1276305..ab45ec9e 100644
+--- a/tasm-lib/src/arithmetic/u64/trailing_zeros.rs
++++ b/tasm-lib/src/arithmetic/u64/trailing_zeros.rs
+@@ -87,7 +87,7 @@ impl BasicSnippet for TrailingZeros {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x6819affeab8f551c.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xf8428d5ca58ed29f.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/wrapping_mul.rs b/tasm-lib/src/arithmetic/u64/wrapping_mul.rs
+index f670b779..c6315db3 100644
+--- a/tasm-lib/src/arithmetic/u64/wrapping_mul.rs
++++ b/tasm-lib/src/arithmetic/u64/wrapping_mul.rs
+@@ -81,7 +81,7 @@ impl BasicSnippet for WrappingMul {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x98526c7c401009ed.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xa50ce435d2381aca.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/wrapping_sub.rs b/tasm-lib/src/arithmetic/u64/wrapping_sub.rs
+index 1db30835..6b326d41 100644
+--- a/tasm-lib/src/arithmetic/u64/wrapping_sub.rs
++++ b/tasm-lib/src/arithmetic/u64/wrapping_sub.rs
+@@ -63,7 +63,7 @@ impl BasicSnippet for WrappingSub {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xe6d83d5f88c389e3.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xb2c7f4ea33410d67.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/u64/xor.rs b/tasm-lib/src/arithmetic/u64/xor.rs
+index 768e702e..c715c96b 100644
+--- a/tasm-lib/src/arithmetic/u64/xor.rs
++++ b/tasm-lib/src/arithmetic/u64/xor.rs
+@@ -63,7 +63,7 @@ impl BasicSnippet for Xor {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x7ed1b73a89177516.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x72c3fab42b063e55.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/arithmetic/xfe/to_the_power_of_power_of_2.rs b/tasm-lib/src/arithmetic/xfe/to_the_power_of_power_of_2.rs
+index 2bcf2dec..ec56ad67 100644
+--- a/tasm-lib/src/arithmetic/xfe/to_the_power_of_power_of_2.rs
++++ b/tasm-lib/src/arithmetic/xfe/to_the_power_of_power_of_2.rs
+@@ -83,7 +83,7 @@ impl BasicSnippet for ToThePowerOfPowerOf2 {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x7768250498bfbb26.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xd05170d4c435dfad.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/array/horner_evaluation.rs b/tasm-lib/src/array/horner_evaluation.rs
+index f64bcc1e..d500a5ea 100644
+--- a/tasm-lib/src/array/horner_evaluation.rs
++++ b/tasm-lib/src/array/horner_evaluation.rs
+@@ -97,7 +97,7 @@ impl BasicSnippet for HornerEvaluation {
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+         if self.num_coefficients == 4 {
+-            sign_offs.insert(Reviewer("ferdinand"), 0xec460e65f9c22a87.into());
++            sign_offs.insert(Reviewer("ferdinand"), 0xd6cdaea8d7f5385a.into());
+         }
+ 
+         sign_offs
+diff --git a/tasm-lib/src/array/inner_product_of_three_rows_with_weights.rs b/tasm-lib/src/array/inner_product_of_three_rows_with_weights.rs
+index 907f2b1d..d62997d5 100644
+--- a/tasm-lib/src/array/inner_product_of_three_rows_with_weights.rs
++++ b/tasm-lib/src/array/inner_product_of_three_rows_with_weights.rs
+@@ -150,10 +150,10 @@ impl BasicSnippet for InnerProductOfThreeRowsWithWeights {
+         let mut sign_offs = HashMap::new();
+ 
+         if self == &Self::new(379, MainElementType::Bfe, 88) {
+-            sign_offs.insert(Reviewer("ferdinand"), 0x7e46570df803d4b.into());
++            sign_offs.insert(Reviewer("ferdinand"), 0x7bf20b54fa1bbed3.into());
+         }
+         if self == &Self::new(379, MainElementType::Xfe, 88) {
+-            sign_offs.insert(Reviewer("ferdinand"), 0x1c549ac8d61e6a70.into());
++            sign_offs.insert(Reviewer("ferdinand"), 0x5996476ab229bd47.into());
+         }
+ 
+         sign_offs
+diff --git a/tasm-lib/src/array/inner_product_of_xfes.rs b/tasm-lib/src/array/inner_product_of_xfes.rs
+index 1474eadb..e51c1bb6 100644
+--- a/tasm-lib/src/array/inner_product_of_xfes.rs
++++ b/tasm-lib/src/array/inner_product_of_xfes.rs
+@@ -84,7 +84,7 @@ impl BasicSnippet for InnerProductOfXfes {
+         let mut sign_offs = HashMap::new();
+ 
+         if self.length == 4 {
+-            sign_offs.insert(Reviewer("ferdinand"), 0x154bf4aa5a53bef7.into());
++            sign_offs.insert(Reviewer("ferdinand"), 0x6c3e24944691423f.into());
+         }
+ 
+         sign_offs
+diff --git a/tasm-lib/src/hashing/absorb_multiple.rs b/tasm-lib/src/hashing/absorb_multiple.rs
+index 695e4765..fbcec7be 100644
+--- a/tasm-lib/src/hashing/absorb_multiple.rs
++++ b/tasm-lib/src/hashing/absorb_multiple.rs
+@@ -137,7 +137,7 @@ impl BasicSnippet for AbsorbMultiple {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x66d806516fc1be22.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xef7d4688cdc869ab.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/hashing/algebraic_hasher/hash_varlen.rs b/tasm-lib/src/hashing/algebraic_hasher/hash_varlen.rs
+index 48057e68..8d3b4876 100644
+--- a/tasm-lib/src/hashing/algebraic_hasher/hash_varlen.rs
++++ b/tasm-lib/src/hashing/algebraic_hasher/hash_varlen.rs
+@@ -64,7 +64,7 @@ impl BasicSnippet for HashVarlen {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xc34a81b899f207ec.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x210c72ced00922c8.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/hashing/merkle_root.rs b/tasm-lib/src/hashing/merkle_root.rs
+index 26764ca6..b68dc89c 100644
+--- a/tasm-lib/src/hashing/merkle_root.rs
++++ b/tasm-lib/src/hashing/merkle_root.rs
+@@ -198,7 +198,7 @@ impl BasicSnippet for MerkleRoot {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x1c30ac983fdca9da.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x19b073a58272366c.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/hashing/merkle_root_from_xfes.rs b/tasm-lib/src/hashing/merkle_root_from_xfes.rs
+index 56dfe6ee..f86127a0 100644
+--- a/tasm-lib/src/hashing/merkle_root_from_xfes.rs
++++ b/tasm-lib/src/hashing/merkle_root_from_xfes.rs
+@@ -201,7 +201,7 @@ impl BasicSnippet for MerkleRootFromXfes {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x850f6c4f5a62ccb5.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x57f2e812e29b71b8.into());
+ 
+         sign_offs
+     }
+diff --git a/tasm-lib/src/hashing/merkle_step_mem_u64_index.rs b/tasm-lib/src/hashing/merkle_step_mem_u64_index.rs
+index 94369855..b0b74a35 100644
+--- a/tasm-lib/src/hashing/merkle_step_mem_u64_index.rs
++++ b/tasm-lib/src/hashing/merkle_step_mem_u64_index.rs
+@@ -65,7 +65,7 @@ impl BasicSnippet for MerkleStepMemU64Index {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xd1c95ceda7a3fa88.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xb5f098c6c0c971c3.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/hashing/merkle_step_u64_index.rs b/tasm-lib/src/hashing/merkle_step_u64_index.rs
+index 42eefb5f..4b5abc8b 100644
+--- a/tasm-lib/src/hashing/merkle_step_u64_index.rs
++++ b/tasm-lib/src/hashing/merkle_step_u64_index.rs
+@@ -86,7 +86,7 @@ impl BasicSnippet for MerkleStepU64Index {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xe123f6c5f6456a8d.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x9895be8abf9a0ace.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/hashing/merkle_verify.rs b/tasm-lib/src/hashing/merkle_verify.rs
+index c573912d..ef14a965 100644
+--- a/tasm-lib/src/hashing/merkle_verify.rs
++++ b/tasm-lib/src/hashing/merkle_verify.rs
+@@ -133,7 +133,7 @@ impl BasicSnippet for MerkleVerify {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x54be0725136e609e.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xc5311e6579152b58.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/lib.rs b/tasm-lib/src/lib.rs
+index 4acdb122..89960dd0 100644
+--- a/tasm-lib/src/lib.rs
++++ b/tasm-lib/src/lib.rs
+@@ -280,7 +280,7 @@ pub fn prove_and_verify(
+     let report = profile
+         .with_cycle_count(aet.processor_trace.nrows())
+         .with_padded_height(padded_height)
+-        .with_fri_domain_len(fri.domain.length);
++        .with_fri_domain_len(fri.domain.len());
+     println!("{report}");
+ 
+     println!("Done proving. Elapsed time: {measured_time:?}");
+diff --git a/tasm-lib/src/list/length.rs b/tasm-lib/src/list/length.rs
+index da19f7f2..0ed0b74d 100644
+--- a/tasm-lib/src/list/length.rs
++++ b/tasm-lib/src/list/length.rs
+@@ -53,7 +53,7 @@ impl BasicSnippet for Length {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xe8173cec5dd4649.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x5d27afc762ace284.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/list/pop.rs b/tasm-lib/src/list/pop.rs
+index 47a52ecc..ded2a352 100644
+--- a/tasm-lib/src/list/pop.rs
++++ b/tasm-lib/src/list/pop.rs
+@@ -121,10 +121,10 @@ impl BasicSnippet for Pop {
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+         match self.element_type.stack_size() {
+-            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x52fe322ae5f58aaf.into()),
+-            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x7ef69decd22cdbb0.into()),
+-            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0xa46002a8b06f3169.into()),
+-            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x3e328d0b595bb6af.into()),
++            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x3d7287a7a71d27d0.into()),
++            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x87273e433f2d09bf.into()),
++            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0xd502e59ed7251525.into()),
++            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0xf8ed5295f3d8a9c7.into()),
+             _ => (),
+         }
+ 
+diff --git a/tasm-lib/src/list/push.rs b/tasm-lib/src/list/push.rs
+index 7ba516bd..2ed7cb67 100644
+--- a/tasm-lib/src/list/push.rs
++++ b/tasm-lib/src/list/push.rs
+@@ -124,10 +124,10 @@ impl BasicSnippet for Push {
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+         match self.element_type.stack_size() {
+-            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x292abedacc166a44.into()),
+-            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x713379aa2ec2f141.into()),
+-            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x187fb6005d7699cc.into()),
+-            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x456653f3204bda08.into()),
++            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x718981e3d21dc9d2.into()),
++            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x885f097adff5e5f6.into()),
++            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x9d962aecbcdf0a19.into()),
++            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x1774f90a0fb1c3eb.into()),
+             _ => (),
+         }
+ 
+diff --git a/tasm-lib/src/list/range.rs b/tasm-lib/src/list/range.rs
+index ee86a418..639a5683 100644
+--- a/tasm-lib/src/list/range.rs
++++ b/tasm-lib/src/list/range.rs
+@@ -93,7 +93,7 @@ impl BasicSnippet for Range {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xf536cdedd1ce0903.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x39a164b082c968d.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/list/set_length.rs b/tasm-lib/src/list/set_length.rs
+index 6f8219ed..6b890cef 100644
+--- a/tasm-lib/src/list/set_length.rs
++++ b/tasm-lib/src/list/set_length.rs
+@@ -58,7 +58,7 @@ impl BasicSnippet for SetLength {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0x8306d6fa39eba00a.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xff218b8ee1882c10.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/list/split_off.rs b/tasm-lib/src/list/split_off.rs
+index 65ce116e..ba558111 100644
+--- a/tasm-lib/src/list/split_off.rs
++++ b/tasm-lib/src/list/split_off.rs
+@@ -131,11 +131,11 @@ impl BasicSnippet for SplitOff {
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+         match self.element_type.stack_size() {
+-            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x6740c2eb354b959d.into()),
+-            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x79cb11ba6120c8eb.into()),
+-            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x4299b2493e810d49.into()),
+-            4 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x9b012d7b60022f84.into()),
+-            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x8b601b3383a3e967.into()),
++            1 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x1e0ba22af4313058.into()),
++            2 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x1213c06246c8d536.into()),
++            3 => _ = sign_offs.insert(Reviewer("ferdinand"), 0xcc176a741f258a1b.into()),
++            4 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x98b6a28ab6be5175.into()),
++            5 => _ = sign_offs.insert(Reviewer("ferdinand"), 0x60f106bea20cd03c.into()),
+             _ => (),
+         }
+ 
+diff --git a/tasm-lib/src/mmr/leaf_index_to_mt_index_and_peak_index.rs b/tasm-lib/src/mmr/leaf_index_to_mt_index_and_peak_index.rs
+index fbbf0e27..d473e0ce 100644
+--- a/tasm-lib/src/mmr/leaf_index_to_mt_index_and_peak_index.rs
++++ b/tasm-lib/src/mmr/leaf_index_to_mt_index_and_peak_index.rs
+@@ -134,7 +134,7 @@ impl BasicSnippet for MmrLeafIndexToMtIndexAndPeakIndex {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xdbc9fd10de0f2dbd.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xfaeccefe8b0b120.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/mmr/verify_from_memory.rs b/tasm-lib/src/mmr/verify_from_memory.rs
+index 7323dc41..d53efd07 100644
+--- a/tasm-lib/src/mmr/verify_from_memory.rs
++++ b/tasm-lib/src/mmr/verify_from_memory.rs
+@@ -124,7 +124,7 @@ impl BasicSnippet for MmrVerifyFromMemory {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xc35bd96dd2348c49.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x79df3fecee2c597.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/mmr/verify_mmr_successor.rs b/tasm-lib/src/mmr/verify_mmr_successor.rs
+index c401c69f..cc0306d3 100644
+--- a/tasm-lib/src/mmr/verify_mmr_successor.rs
++++ b/tasm-lib/src/mmr/verify_mmr_successor.rs
+@@ -384,8 +384,8 @@ impl BasicSnippet for VerifyMmrSuccessor {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xeb1e81bd042d7a0c.into());
+-        sign_offs.insert(Reviewer("alan"), 0xeb1e81bd042d7a0c.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0x6b56efd7dd2b9e4f.into());
++        sign_offs.insert(Reviewer("alan"), 0x6b56efd7dd2b9e4f.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/neptune/mutator_set/commit.rs b/tasm-lib/src/neptune/mutator_set/commit.rs
+index bacf7d66..797a7ad3 100644
+--- a/tasm-lib/src/neptune/mutator_set/commit.rs
++++ b/tasm-lib/src/neptune/mutator_set/commit.rs
+@@ -52,7 +52,7 @@ impl BasicSnippet for Commit {
+ 
+     fn sign_offs(&self) -> HashMap<Reviewer, SignOffFingerprint> {
+         let mut sign_offs = HashMap::new();
+-        sign_offs.insert(Reviewer("ferdinand"), 0xffeea8bfcb59f9f0.into());
++        sign_offs.insert(Reviewer("ferdinand"), 0xbe1bb66a7035660b.into());
+         sign_offs
+     }
+ }
+diff --git a/tasm-lib/src/verifier/fri.rs b/tasm-lib/src/verifier/fri.rs
+index 9477210e..17f3b208 100644
+--- a/tasm-lib/src/verifier/fri.rs
++++ b/tasm-lib/src/verifier/fri.rs
+@@ -5,6 +5,5 @@ pub mod derive_from_stark;
+ pub mod number_of_rounds;
+ #[cfg(test)]
+ mod standalone_fri_verify;
+-pub mod test_helpers;
+ pub mod verify;
+ pub mod verify_fri_authentication_paths;
+diff --git a/tasm-lib/src/verifier/fri/standalone_fri_verify.rs b/tasm-lib/src/verifier/fri/standalone_fri_verify.rs
+index 3da7b7f6..8e7c8a60 100644
+--- a/tasm-lib/src/verifier/fri/standalone_fri_verify.rs
++++ b/tasm-lib/src/verifier/fri/standalone_fri_verify.rs
+@@ -106,10 +106,6 @@ mod bench {
+     #[ignore = "Very slow, about 340s on my powerful laptop"]
+     #[test]
+     fn benchmark() {
+-        let mut seed = [0u8; 32];
+-        seed[0] = 0xa7;
+-        seed[1] = 0xf7;
+-
+         let public_input = PublicInput::default();
+         let intermediate_state = StandaloneFriVerify::singleton().pseudorandom_intermediate_state();
+ 
+diff --git a/tasm-lib/src/verifier/fri/test_helpers.rs b/tasm-lib/src/verifier/fri/test_helpers.rs
+deleted file mode 100644
+index afc0ca02..00000000
+--- a/tasm-lib/src/verifier/fri/test_helpers.rs
++++ /dev/null
+@@ -1,211 +0,0 @@
+-use itertools::Itertools;
+-use triton_vm::challenges::Challenges;
+-use triton_vm::prelude::*;
+-use triton_vm::proof_stream::ProofStream;
+-use triton_vm::table::NUM_QUOTIENT_SEGMENTS;
+-use triton_vm::table::master_table::MasterAuxTable;
+-use triton_vm::table::master_table::MasterMainTable;
+-use twenty_first::prelude::*;
+-
+-use crate::prelude::Digest;
+-
+-pub struct StarkProofExtraction {
+-    pub fri_proof_stream: ProofStream,
+-    pub main_tree_authentication_paths: Vec<Vec<Digest>>,
+-    pub aux_tree_authentication_paths: Vec<Vec<Digest>>,
+-    pub quot_tree_authentication_paths: Vec<Vec<Digest>>,
+-}
+-
+-/// Extracts a proof stream that will work for FRI verification from a proof stream that works for
+-/// the whole STARK verification.
+-pub fn extract_fri_proof(
+-    proof_stream: &ProofStream,
+-    claim: &Claim,
+-    stark: &Stark,
+-) -> StarkProofExtraction {
+-    let mut proof_stream = proof_stream.to_owned();
+-    let log2_padded_height = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_log2_padded_height()
+-        .unwrap();
+-    proof_stream.alter_fiat_shamir_state_with(claim);
+-
+-    // Main-table Merkle root
+-    let main_table_root = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_merkle_root()
+-        .unwrap();
+-
+-    // Aux challenge weights
+-    proof_stream.sample_scalars(Challenges::SAMPLE_COUNT);
+-
+-    // Aux-table Merkle root
+-    let aux_mt_root = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_merkle_root()
+-        .unwrap();
+-
+-    // Quotient codeword weights
+-    proof_stream.sample_scalars(MasterAuxTable::NUM_CONSTRAINTS);
+-
+-    // Quotient codeword Merkle root
+-    let quotient_root = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_merkle_root()
+-        .unwrap();
+-
+-    // Out-of-domain point current row
+-    proof_stream.sample_scalars(1);
+-
+-    // Five out-of-domain values
+-    proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_out_of_domain_main_row()
+-        .unwrap();
+-    proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_out_of_domain_aux_row()
+-        .unwrap();
+-    proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_out_of_domain_main_row()
+-        .unwrap();
+-    proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_out_of_domain_aux_row()
+-        .unwrap();
+-    proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_out_of_domain_quot_segments()
+-        .unwrap();
+-
+-    // `beqd_weights`
+-    const NUM_DEEP_CODEWORD_COMPONENTS: usize = 3;
+-    proof_stream.sample_scalars(
+-        MasterMainTable::NUM_COLUMNS
+-            + MasterAuxTable::NUM_COLUMNS
+-            + NUM_QUOTIENT_SEGMENTS
+-            + NUM_DEEP_CODEWORD_COMPONENTS,
+-    );
+-
+-    let padded_height = 1 << log2_padded_height;
+-    let fri = stark.fri(padded_height).unwrap();
+-    let fri_proof_stream = proof_stream.clone();
+-    let fri_verify_result = fri.verify(&mut proof_stream).unwrap();
+-    let indices = fri_verify_result.iter().map(|(i, _)| *i).collect_vec();
+-    let tree_height = fri.domain.length.ilog2();
+-
+-    // main
+-    let main_table_rows = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_master_main_table_rows()
+-        .unwrap();
+-    let main_authentication_structure = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_authentication_structure()
+-        .unwrap();
+-    let main_tree_authentication_paths = extract_paths(
+-        main_table_root,
+-        &indices,
+-        &main_table_rows,
+-        &main_authentication_structure,
+-        tree_height,
+-    );
+-
+-    // auxiliary
+-    let aux_table_rows = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_master_aux_table_rows()
+-        .unwrap();
+-    let aux_authentication_structure = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_authentication_structure()
+-        .unwrap();
+-    let aux_tree_authentication_paths = extract_paths(
+-        aux_mt_root,
+-        &indices,
+-        &aux_table_rows,
+-        &aux_authentication_structure,
+-        tree_height,
+-    );
+-
+-    // quotient
+-    let quot_table_rows = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_quot_segments_elements()
+-        .unwrap();
+-    let quot_authentication_structure = proof_stream
+-        .dequeue()
+-        .unwrap()
+-        .try_into_authentication_structure()
+-        .unwrap();
+-    let quot_tree_authentication_paths = extract_paths(
+-        quotient_root,
+-        &indices,
+-        &quot_table_rows,
+-        &quot_authentication_structure,
+-        tree_height,
+-    );
+-
+-    StarkProofExtraction {
+-        fri_proof_stream,
+-        main_tree_authentication_paths,
+-        aux_tree_authentication_paths,
+-        quot_tree_authentication_paths,
+-    }
+-}
+-
+-fn extract_paths<const N: usize, T: BFieldCodec>(
+-    root: Digest,
+-    indices: &[usize],
+-    rows: &[[T; N]],
+-    authentication_structure: &[Digest],
+-    tree_height: u32,
+-) -> Vec<Vec<Digest>> {
+-    let leafs = rows.iter().map(Tip5::hash).collect_vec();
+-    let inclusion_proof = MerkleTreeInclusionProof {
+-        tree_height,
+-        indexed_leafs: indices.iter().cloned().zip(leafs).collect_vec(),
+-        authentication_structure: authentication_structure.to_vec(),
+-    };
+-    assert!(inclusion_proof.clone().verify(root));
+-    inclusion_proof.into_authentication_paths().unwrap()
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn extract_fri_proof_works() {
+-        let simple_program = triton_program!(halt);
+-        let public_input = [];
+-        let non_determinism = NonDeterminism::default();
+-        let (stark, claim, proof) =
+-            triton_vm::prove_program(simple_program, public_input.into(), non_determinism).unwrap();
+-        let padded_height = proof.padded_height().unwrap();
+-        let fri = stark.fri(padded_height).unwrap();
+-
+-        let proof_stream = ProofStream::try_from(&proof).unwrap();
+-        let mut fri_proof_stream =
+-            extract_fri_proof(&proof_stream, &claim, &stark).fri_proof_stream;
+-        assert!(
+-            fri.verify(&mut fri_proof_stream).is_ok(),
+-            "Extracted proof must verify"
+-        );
+-    }
+-}
+diff --git a/tasm-lib/src/verifier/fri/verify.rs b/tasm-lib/src/verifier/fri/verify.rs
+index 77938b08..ebdf96ca 100644
+--- a/tasm-lib/src/verifier/fri/verify.rs
++++ b/tasm-lib/src/verifier/fri/verify.rs
+@@ -59,11 +59,11 @@ pub struct FriVerify {
+ impl From<Fri> for FriVerify {
+     fn from(fri: Fri) -> Self {
+         Self {
+-            domain_generator: fri.domain.generator,
++            domain_generator: fri.domain.generator(),
+ 
+             // This runtime type-conversion prevents a FRI domain of length 2^32 from being created.
+-            domain_length: fri.domain.length.try_into().unwrap(),
+-            domain_offset: fri.domain.offset,
++            domain_length: fri.domain.len().try_into().unwrap(),
++            domain_offset: fri.domain.offset(),
+             expansion_factor: fri.expansion_factor.try_into().unwrap(),
+             num_collinearity_checks: fri.num_collinearity_checks.try_into().unwrap(),
+         }
+@@ -1154,6 +1154,7 @@ mod tests {
+     use num_traits::Zero;
+     use proptest::collection::vec;
+     use rayon::prelude::*;
++    use test_strategy::proptest;
+     use triton_vm::proof_item::ProofItem;
+     use twenty_first::math::ntt::ntt;
+     use twenty_first::util_types::sponge::Sponge;
+@@ -1182,8 +1183,8 @@ mod tests {
+                 expansion_factor,
+                 num_collinearity_checks,
+                 domain_length,
+-                domain_offset: domain.offset,
+-                domain_generator: domain.generator,
++                domain_offset: domain.offset(),
++                domain_generator: domain.generator(),
+             }
+         }
+ 
+diff --git a/tasm-lib/src/verifier/stark_verify.rs b/tasm-lib/src/verifier/stark_verify.rs
+index bfcb55e7..b13e4a80 100644
+--- a/tasm-lib/src/verifier/stark_verify.rs
++++ b/tasm-lib/src/verifier/stark_verify.rs
+@@ -55,6 +55,8 @@ pub struct StarkVerify {
+ }
+ 
+ impl StarkVerify {
++    const LOG2_PADDED_HEIGHT_TOO_LARGE: i128 = 238;
++
+     pub fn new_with_static_layout(stark: Stark) -> Self {
+         Self {
+             stark,
+@@ -79,7 +81,7 @@ impl StarkVerify {
+         let num_fri_rounds = fri_params.num_rounds();
+ 
+         let mut j = 0;
+-        let mut tree_height: usize = fri_params.domain.length.ilog2().try_into().unwrap();
++        let mut tree_height: usize = fri_params.domain.len().ilog2().try_into().unwrap();
+ 
+         let mut acc = NUM_FULL_DOMAIN_AUTH_PATHS * tree_height * fri_params.num_collinearity_checks;
+         while j < num_fri_rounds {
+@@ -142,12 +144,12 @@ impl StarkVerify {
+         // we end up sampling indices that generate different authentication
+         // paths.
+         let mut proof_stream = ProofStream::try_from(proof).unwrap();
++        proof_stream.alter_fiat_shamir_state_with(claim);
+         let log2_padded_height = proof_stream
+             .dequeue()
+             .unwrap()
+             .try_into_log2_padded_height()
+             .unwrap();
+-        proof_stream.alter_fiat_shamir_state_with(claim);
+ 
+         // Main-table Merkle root
+         let _main_table_root = proof_stream
+@@ -220,7 +222,7 @@ impl StarkVerify {
+         let fri_proof_stream = proof_stream.clone();
+         let fri_verify_result = fri.verify(&mut proof_stream).unwrap();
+         let indices = fri_verify_result.iter().map(|(i, _)| *i).collect_vec();
+-        let tree_height = fri.domain.length.ilog2();
++        let tree_height = fri.domain.len().ilog2();
+         let fri_digests =
+             FriVerify::from(fri).extract_digests_required_for_proving(&fri_proof_stream);
+ 
+@@ -744,6 +746,15 @@ impl BasicSnippet for StarkVerify {
+                 pop 1
+                 // _ *clm *p_iter log_2_padded_height
+ 
++                /* Verify log_2_padded_height <= 31 */
++                push 32
++                dup 1
++                lt
++                // _ *clm *p_iter log_2_padded_height (32 > log_2_padded_height)
++
++                assert error_id {Self::LOG2_PADDED_HEIGHT_TOO_LARGE}
++                // _ *clm *p_iter log_2_padded_height
++
+                 push 2
+                 pow
+                 hint padded_height = stack[0]
+@@ -1192,6 +1203,7 @@ pub mod tests {
+ 
+     use num_traits::ConstZero;
+     use tasm_object_derive::TasmObject;
++    use triton_vm::proof_item::ProofItem;
+ 
+     use super::*;
+     use crate::execute_test;
+@@ -1241,6 +1253,50 @@ pub mod tests {
+         );
+     }
+ 
++    #[test]
++    fn fail_on_too_big_log2_padded_height() {
++        let mut proof_stream = ProofStream::new();
++        proof_stream.enqueue(ProofItem::Log2PaddedHeight(32));
++        let proof: Proof = proof_stream.into();
++
++        let mut nondeterminism = NonDeterminism::new(vec![]);
++        encode_to_memory(
++            &mut nondeterminism.ram,
++            FIRST_NON_DETERMINISTICALLY_INITIALIZED_MEMORY_ADDRESS,
++            &proof,
++        );
++        let (claim_pointer, claim_size) = insert_claim_into_static_memory(
++            &mut nondeterminism.ram,
++            &Claim::new(Digest::default()),
++        );
++
++        let snippet = StarkVerify {
++            stark: Stark::default(),
++            memory_layout: MemoryLayout::conventional_static(),
++        };
++        let default_proof_pointer = bfe!(0);
++        let init_stack = [
++            snippet.init_stack_for_isolated_run(),
++            vec![claim_pointer, default_proof_pointer],
++        ]
++        .concat();
++
++        let program =
++            Program::new(&snippet.link_for_isolated_run_populated_static_memory(claim_size));
++        let mut vm_state = VMState::new(program, [].into(), nondeterminism.clone());
++        vm_state.op_stack.stack = init_stack.clone();
++        let error = vm_state.run().unwrap_err();
++        match error {
++            InstructionError::AssertionFailed(assertion_error) => {
++                assert_eq!(
++                    StarkVerify::LOG2_PADDED_HEIGHT_TOO_LARGE,
++                    assertion_error.id.unwrap()
++                );
++            }
++            _ => panic!(),
++        }
++    }
++
+     /// Run the verifier, and return the cycle count and inner padded
+     /// height for crude benchmarking.
+     fn test_verify_and_report_basic_features(
+@@ -1421,7 +1477,7 @@ pub mod tests {
+         let report = profile
+             .with_cycle_count(aet.processor_trace.nrows())
+             .with_padded_height(padded_height)
+-            .with_fri_domain_len(stark.fri(padded_height).unwrap().domain.length);
++            .with_fri_domain_len(stark.fri(padded_height).unwrap().domain.len());
+         println!("Done generating proof for non-determinism");
+         println!("{report}");
+ 
