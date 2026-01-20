@@ -60,6 +60,10 @@ ENV/
 
 # Rust target directories
 rust/*/target/
+target/release/
+**/target/release/
+triton-vm/target/
+**/triton-vm/target/
 
 # OS files
 Thumbs.db
