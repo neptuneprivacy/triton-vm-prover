@@ -3,6 +3,7 @@ build/
 cmake-build-*/
 _build/
 out/
+built_kernels/
 
 # CMake generated files
 CMakeCache.txt
@@ -75,6 +76,9 @@ Thumbs.db
 *.bak
 *.backup
 *~
+
+# Patch files
+*.patch
 
 # Log files
 *.log

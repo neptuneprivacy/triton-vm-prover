@@ -3283,8 +3283,9 @@ int main(int argc, char* argv[]) {
         TRITON_PROFILE_COUT("  Phase 1 Total: " << phase1_time << " ms" << std::endl);
         
         // Build claim (pure C++)
+        // Note: CURRENT_VERSION was updated to 1 in triton-vm.patch
         Claim claim;
-        claim.version = 0;
+        claim.version = 1;
         claim.program_digest = program.hash();
         claim.input = public_input_bfe;
         claim.output = trace_result.output;
@@ -4033,13 +4034,7 @@ int main(int argc, char* argv[]) {
             }
         };
 
-        // Enqueue log2_padded_height before claim absorption (matches tasm-lib verifier order)
-        // See: tasm-lib/src/verifier/stark_verify.rs lines 145-150
-        need(1);
-        uint32_t log2_height = static_cast<uint32_t>(proof.elements[idx++].value());
-        ps.enqueue(ProofItem::make_log2_padded_height(log2_height));
-        
-        // Absorb claim into ProofStream using Rust FFI to ensure exact BFieldCodec encoding
+        // Absorb claim into ProofStream FIRST (matches Rust stark.rs line 250)
         std::vector<uint64_t> program_digest_u64(5);
         for (size_t i = 0; i < 5; ++i) {
             program_digest_u64[i] = claim.program_digest[i].value();
@@ -4080,6 +4075,11 @@ int main(int argc, char* argv[]) {
         
         claim_encode_free(encoded_ptr, encoded_len);
         ps.alter_fiat_shamir_state_with(claim_encoding);
+        
+        // Enqueue log2_padded_height AFTER claim absorption (matches Rust stark.rs line 262)
+        need(1);
+        uint32_t log2_height = static_cast<uint32_t>(proof.elements[idx++].value());
+        ps.enqueue(ProofItem::make_log2_padded_height(log2_height));
 
         auto read_digest = [&]() -> Digest {
             need(5);

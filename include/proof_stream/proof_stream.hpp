@@ -20,17 +20,18 @@ struct FriResponse;
  * Discriminants match Rust's BFieldCodec derive order exactly
  */
 enum class ProofItemType {
+    // Updated to match triton-vm.patch enum order
     MerkleRoot = 0,
-    OutOfDomainMainRow = 1,
-    OutOfDomainAuxRow = 2,
-    OutOfDomainQuotientSegments = 3,
-    AuthenticationStructure = 4,
-    MasterMainTableRows = 5,
-    MasterAuxTableRows = 6,
-    Log2PaddedHeight = 7,
-    QuotientSegmentsElements = 8,
-    FriCodeword = 9,
-    FriPolynomial = 10,
+    Log2PaddedHeight = 1,            // Moved from 7 to 1
+    OutOfDomainMainRow = 2,
+    OutOfDomainAuxRow = 3,
+    OutOfDomainQuotientSegments = 4,
+    FriPolynomial = 5,               // Moved from 10 to 5
+    AuthenticationStructure = 6,
+    MasterMainTableRows = 7,
+    MasterAuxTableRows = 8,
+    QuotientSegmentsElements = 9,
+    FriCodeword = 10,
     FriResponse = 11
 };
 

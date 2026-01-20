@@ -121,7 +121,7 @@ inherits = "release"
 lto = "thin"
 
 [patch.crates-io]
-triton-vm = { path = "../triton-vm/triton-vm" }
+triton-vm = { path = "../triton-vm/triton-vm", default-features = false }
 triton-air = { path = "../triton-vm/triton-air" }
 triton-isa = { path = "../triton-vm/triton-isa" }
 triton-constraint-builder = { path = "../triton-vm/triton-constraint-builder" }

@@ -290,22 +290,23 @@ ProofItem ProofItem::decode(const std::vector<BFieldElement>& data) {
 }
 
 bool ProofItem::include_in_fiat_shamir_heuristic() const {
-    // Matches Rust's proof_items! macro exactly
+    // Matches Rust's proof_items! macro exactly (after triton-vm.patch)
     switch (type) {
         case ProofItemType::MerkleRoot:
+        case ProofItemType::Log2PaddedHeight:        // Added in patch
         case ProofItemType::OutOfDomainMainRow:
         case ProofItemType::OutOfDomainAuxRow:
         case ProofItemType::OutOfDomainQuotientSegments:
+        case ProofItemType::FriPolynomial:           // Added in patch
             return true;
         
         // Items implied by Merkle roots don't need to be hashed
+        // (prover is already committed via Merkle root)
         case ProofItemType::AuthenticationStructure:
         case ProofItemType::MasterMainTableRows:
         case ProofItemType::MasterAuxTableRows:
-        case ProofItemType::Log2PaddedHeight:
         case ProofItemType::QuotientSegmentsElements:
         case ProofItemType::FriCodeword:
-        case ProofItemType::FriPolynomial:
         case ProofItemType::FriResponse:
             return false;
     }
