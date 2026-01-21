@@ -318,6 +318,7 @@ if(ENABLE_CUDA)
         src/gpu/kernels/poly_mul_kernel.cu    # 18. GPU polynomial multiplication
         src/gpu/kernels/degree_lowering_main_kernel.cu  # 19. GPU degree lowering for main table
         src/gpu/kernels/u32_table_kernel.cu     # 20. GPU U32 table fill
+        src/gpu/kernels/streaming_lde_kernel.cu  # 21. Streaming LDE for frugal mode
     )
     
     # Create placeholder files if they don't exist (for initial build)
