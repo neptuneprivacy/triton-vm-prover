@@ -2340,10 +2340,9 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
             uint64_t* d_tmp_digests = ctx_->d_scratch_b();
             uint64_t* d_working = ctx_->d_working_main();
             
-            // Allocate buffers for coefficients (reused for all cosets)
-            uint64_t* d_coefficients = nullptr;
+            // Reuse scratch buffer for coefficients to avoid extra allocations
+            uint64_t* d_coefficients = d_trace_colmajor;
             uint64_t* d_tail_scratch = nullptr;
-            CUDA_CHECK(cudaMalloc(&d_coefficients, width * trace_len * sizeof(uint64_t)));
             CUDA_CHECK(cudaMalloc(&d_tail_scratch, width * trace_len * sizeof(uint64_t)));
             
             // Phase 1: Compute coefficients once (expensive: ~487ms)
@@ -2395,7 +2394,6 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
                 );
             }
             
-            CUDA_CHECK(cudaFree(d_coefficients));
             CUDA_CHECK(cudaFree(d_tail_scratch));
 
             if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (2-phase): " << elapsed_ms(t_stream) << " ms\n"; }
@@ -3099,10 +3097,21 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
         // Multi-GPU disabled due to memory access issues; use concurrent streams instead
         multi_gpu = false;
         
+        const size_t num_cols_bfe = aux_width * 3;
+
+        // Two-phase optimization: compute coefficients once (in-place on scratch_b)
+        kernels::compute_trace_coefficients_gpu(
+            d_aux_colmajor_components,
+            num_cols_bfe,
+            trace_len,
+            trace_offset,
+            d_aux_colmajor_components,
+            ctx_->stream()
+        );
+        
         if (multi_gpu) {
             // Multi-GPU: distribute cosets across GPUs
             const size_t cosets_per_gpu = num_cosets / num_gpus;
-            const size_t num_cols_bfe = aux_width * 3;
             
             // Create per-GPU resources
             cudaStream_t streams[2];
@@ -3175,17 +3184,18 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
             }
         } else {
             // Single-GPU path
-            const size_t num_cols_bfe = aux_width * 3; // component columns
-            uint64_t* d_working = ctx_->d_working_aux();   // [num_cols_bfe * trace_len]
-            uint64_t* d_tmp_digests = ctx_->d_scratch_a(); // [trace_len * 5]
-
+            uint64_t* d_working = ctx_->d_working_aux();
+            // Use scratch_a for digests + tail scratch (scratch_a is large enough)
+            uint64_t* d_tmp_digests = ctx_->d_scratch_a();
+            uint64_t* d_tail_scratch = d_tmp_digests + trace_len * 5;
+            
             constexpr int DIGEST_BLOCK = 256;
             int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
 
             for (size_t coset = 0; coset < num_cosets; ++coset) {
                 uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
 
-                kernels::randomized_lde_batch_gpu_preallocated(
+                kernels::evaluate_coset_from_coefficients_gpu(
                     d_aux_colmajor_components,
                     num_cols_bfe,
                     trace_len,
@@ -3193,10 +3203,8 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
                     num_randomizers,
                     trace_offset,
                     coset_offset,
-                    trace_len,
                     d_working,
-                    d_working, // scratch1
-                    nullptr,
+                    d_tail_scratch,
                     ctx_->stream()
                 );
 
@@ -4223,9 +4231,33 @@ void GpuStark::step_quotient_commitment_frugal() {
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
     if (profile_quot) { std::cout << "    [Quot FRUGAL] transpose main+aux: " << elapsed_ms() << " ms\n"; }
 
+    // Two-phase optimization: compute coefficients once (in-place on scratch buffers)
+    kernels::compute_trace_coefficients_gpu(
+        d_main_colmajor,
+        main_width,
+        trace_len,
+        dims_.trace_offset,
+        d_main_colmajor,
+        ctx_->stream()
+    );
+    kernels::compute_trace_coefficients_gpu(
+        d_aux_colmajor_components,
+        aux_width * 3,
+        trace_len,
+        dims_.trace_offset,
+        d_aux_colmajor_components,
+        ctx_->stream()
+    );
+
     // Allocate full quotient codeword on quotient domain: [quotient_len * 3]
     uint64_t* d_quotient_full = nullptr;
     CUDA_CHECK(cudaMalloc(&d_quotient_full, quotient_len * 3 * sizeof(uint64_t)));
+
+    // Tail scratch buffers for coset evaluation (freed at end of step)
+    uint64_t* d_main_tail = nullptr;
+    uint64_t* d_aux_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
 
     // Per-coset buffers (reused each coset)
     uint64_t* d_domain_x = nullptr;
@@ -4289,8 +4321,8 @@ void GpuStark::step_quotient_commitment_frugal() {
             d_term_inv
         );
 
-        // Compute main/aux LDE on this coset into working buffers (device memory, no UM paging).
-        kernels::randomized_lde_batch_gpu_preallocated(
+        // Evaluate main/aux on this coset from pre-computed coefficients.
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_main_colmajor,
             main_width,
             trace_len,
@@ -4298,14 +4330,12 @@ void GpuStark::step_quotient_commitment_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_main(),
-            ctx_->d_working_main(), // scratch1
-            nullptr,
+            d_main_tail,
             ctx_->stream()
         );
 
-        kernels::randomized_lde_batch_gpu_preallocated(
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_aux_colmajor_components,
             aux_width * 3,
             trace_len,
@@ -4313,10 +4343,8 @@ void GpuStark::step_quotient_commitment_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_aux(),
-            ctx_->d_working_aux(), // scratch1
-            nullptr,
+            d_aux_tail,
             ctx_->stream()
         );
 
@@ -4509,6 +4537,8 @@ void GpuStark::step_quotient_commitment_frugal() {
 
     // Cleanup
     CUDA_CHECK(cudaFree(d_quotient_full));
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
     CUDA_CHECK(cudaFree(d_domain_x));
     CUDA_CHECK(cudaFree(d_init_inv));
     CUDA_CHECK(cudaFree(d_cons_inv));
@@ -6195,9 +6225,33 @@ void GpuStark::step_fri_protocol_frugal() {
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
 
+    // Two-phase optimization: compute coefficients once (in-place on scratch buffers)
+    kernels::compute_trace_coefficients_gpu(
+        d_main_colmajor,
+        dims_.main_width,
+        trace_len,
+        dims_.trace_offset,
+        d_main_colmajor,
+        ctx_->stream()
+    );
+    kernels::compute_trace_coefficients_gpu(
+        d_aux_colmajor_components,
+        dims_.aux_width * 3,
+        trace_len,
+        dims_.trace_offset,
+        d_aux_colmajor_components,
+        ctx_->stream()
+    );
+
+    // Allocate tail scratch buffers for coset evaluation
+    uint64_t* d_main_tail = nullptr;
+    uint64_t* d_aux_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
+
     for (size_t coset = 0; coset < num_cosets; ++coset) {
         uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::randomized_lde_batch_gpu_preallocated(
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_main_colmajor,
             main_width,
             trace_len,
@@ -6205,13 +6259,11 @@ void GpuStark::step_fri_protocol_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_main(),
-            ctx_->d_working_main(), // scratch1
-            nullptr,
+            d_main_tail,
             ctx_->stream()
         );
-        kernels::randomized_lde_batch_gpu_preallocated(
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_aux_colmajor_components,
             aux_width * 3,
             trace_len,
@@ -6219,10 +6271,8 @@ void GpuStark::step_fri_protocol_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_aux(),
-            ctx_->d_working_aux(), // scratch1
-            nullptr,
+            d_aux_tail,
             ctx_->stream()
         );
         qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
@@ -6581,6 +6631,8 @@ void GpuStark::step_fri_protocol_frugal() {
         CUDA_CHECK(cudaEventDestroy(ev_end));
     }
 
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
     CUDA_CHECK(cudaFree(d_build));
 }
 
