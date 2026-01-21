@@ -5865,7 +5865,13 @@
 
      // Compute and absorb FriPolynomial into Fiat-Shamir state.
      // FriPolynomial is now included in Fiat-Shamir (xnt-core patch), so we must absorb it
-     // BEFORE sampling query indices. We use the CPU transcript for gold-standard matching.
+     // BEFORE sampling query indices.
+     // 
+     // Strategy: The GPU sponge has been used for FRI rounds (absorbing roots, sampling challenges).
+     // We need to:
+     // 1. Download GPU sponge state to a temporary ProofStream
+     // 2. Compute and enqueue FriPolynomial (which absorbs it)
+     // 3. Upload the updated sponge state back to GPU for query sampling
      {
          // Download last codeword to host
          std::vector<uint64_t> h_last_codeword(current_size * 3);
@@ -5873,6 +5879,16 @@
              h_last_codeword.data(),
              d_last_codeword,
              current_size * 3 * sizeof(uint64_t),
+             cudaMemcpyDeviceToHost,
+             ctx_->stream()
+         ));
+         
+         // Download current GPU sponge state
+         std::array<uint64_t, 16> h_state{};
+         CUDA_CHECK(cudaMemcpyAsync(
+             h_state.data(),
+             ctx_->d_sponge_state(),
+             16 * sizeof(uint64_t),
              cudaMemcpyDeviceToHost,
              ctx_->stream()
          ));
@@ -5903,13 +5919,21 @@
          }
          fri_interpolate_last_polynomial_free(poly_ptr, poly_len);
 
-         // Enqueue FriPolynomial into CPU transcript (this absorbs it into sponge)
-         fs_cpu_.enqueue(ProofItem::fri_polynomial(poly_coeffs));
-
-         // Sync GPU sponge state from CPU transcript (so GPU sampling matches)
-         std::array<uint64_t, 16> h_state{};
+         // Create a temporary ProofStream with the GPU's current sponge state
+         ProofStream temp_ps;
+         // Set temp_ps sponge state to match GPU state
+         Tip5 temp_sponge = Tip5::init();
          for (size_t i = 0; i < 16; ++i) {
-             h_state[i] = fs_cpu_.sponge().state[i].value();
+             temp_sponge.state[i] = BFieldElement(h_state[i]);
+         }
+         temp_ps.set_sponge_state(temp_sponge);
+         
+         // Enqueue FriPolynomial (this absorbs it into sponge)
+         temp_ps.enqueue(ProofItem::fri_polynomial(poly_coeffs));
+
+         // Upload updated sponge state back to GPU
+         for (size_t i = 0; i < 16; ++i) {
+             h_state[i] = temp_ps.sponge().state[i].value();
          }
          CUDA_CHECK(cudaMemcpyAsync(
              ctx_->d_sponge_state(),
@@ -6475,7 +6499,13 @@
 
      // Compute and absorb FriPolynomial into Fiat-Shamir state.
      // FriPolynomial is now included in Fiat-Shamir (xnt-core patch), so we must absorb it
-     // BEFORE sampling query indices. We use the CPU transcript for gold-standard matching.
+     // BEFORE sampling query indices.
+     // 
+     // Strategy: The GPU sponge has been used for FRI rounds (absorbing roots, sampling challenges).
+     // We need to:
+     // 1. Download GPU sponge state to a temporary ProofStream
+     // 2. Compute and enqueue FriPolynomial (which absorbs it)
+     // 3. Upload the updated sponge state back to GPU for query sampling
      {
          // Download last codeword to host
          std::vector<uint64_t> h_last_codeword(current_size * 3);
@@ -6483,6 +6513,16 @@
              h_last_codeword.data(),
              d_last_codeword,
              current_size * 3 * sizeof(uint64_t),
+             cudaMemcpyDeviceToHost,
+             ctx_->stream()
+         ));
+         
+         // Download current GPU sponge state
+         std::array<uint64_t, 16> h_state{};
+         CUDA_CHECK(cudaMemcpyAsync(
+             h_state.data(),
+             ctx_->d_sponge_state(),
+             16 * sizeof(uint64_t),
              cudaMemcpyDeviceToHost,
              ctx_->stream()
          ));
@@ -6513,13 +6553,21 @@
          }
          fri_interpolate_last_polynomial_free(poly_ptr, poly_len);
 
-         // Enqueue FriPolynomial into CPU transcript (this absorbs it into sponge)
-         fs_cpu_.enqueue(ProofItem::fri_polynomial(poly_coeffs));
-
-         // Sync GPU sponge state from CPU transcript (so GPU sampling matches)
-         std::array<uint64_t, 16> h_state{};
+         // Create a temporary ProofStream with the GPU's current sponge state
+         ProofStream temp_ps;
+         // Set temp_ps sponge state to match GPU state
+         Tip5 temp_sponge = Tip5::init();
          for (size_t i = 0; i < 16; ++i) {
-             h_state[i] = fs_cpu_.sponge().state[i].value();
+             temp_sponge.state[i] = BFieldElement(h_state[i]);
+         }
+         temp_ps.set_sponge_state(temp_sponge);
+         
+         // Enqueue FriPolynomial (this absorbs it into sponge)
+         temp_ps.enqueue(ProofItem::fri_polynomial(poly_coeffs));
+
+         // Upload updated sponge state back to GPU
+         for (size_t i = 0; i < 16; ++i) {
+             h_state[i] = temp_ps.sponge().state[i].value();
          }
          CUDA_CHECK(cudaMemcpyAsync(
              ctx_->d_sponge_state(),
