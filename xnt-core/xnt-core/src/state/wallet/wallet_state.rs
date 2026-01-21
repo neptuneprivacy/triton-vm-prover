@@ -9,6 +9,7 @@ use anyhow::Result;
 use itertools::Itertools;
 use num_traits::CheckedAdd;
 use num_traits::CheckedSub;
+use num_traits::ConstZero;
 use num_traits::Zero;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
@@ -394,6 +395,7 @@ impl WalletState {
                                 Block::premine_sender_randomness(configuration.network()),
                                 premine_key.privacy_preimage(),
                                 UtxoNotifier::Premine,
+                                BFieldElement::ZERO,
                             ))
                             .await;
                     }
@@ -479,6 +481,7 @@ impl WalletState {
                     tx_output.sender_randomness(),
                     spending_key.privacy_preimage(),
                     notifier,
+                    BFieldElement::ZERO,
                 )
             })
             .collect_vec()
@@ -699,6 +702,7 @@ impl WalletState {
                 expected_utxo.sender_randomness,
                 expected_utxo.receiver_preimage,
                 expected_utxo.received_from,
+                expected_utxo.payment_id,
             ))
             .await;
         }
@@ -834,6 +838,7 @@ impl WalletState {
                     sender_randomness,
                     receiver_preimage: own_guesser_key.receiver_preimage(),
                     is_guesser_fee: true,
+                    payment_id: BFieldElement::ZERO,
                 })
                 .collect_vec()
         } else {
@@ -1224,6 +1229,7 @@ impl WalletState {
                         sender_randomness: composer_output.sender_randomness(),
                         receiver_preimage,
                         is_guesser_fee: false,
+                        payment_id: BFieldElement::ZERO,
                     };
                     let addition_record = incoming_utxo.addition_record();
 
@@ -1398,13 +1404,15 @@ impl WalletState {
                     sender_randomness,
                     receiver_preimage,
                     is_guesser_fee,
+                    payment_id,
                 } = incoming_utxo.to_owned();
                 info!(
                     "Received UTXO in block {:x}, height {}\nvalue = {}\n\
-                    is guesser fee: {is_guesser_fee}\ntime-lock: {}\n\n",
+                    is guesser fee: {is_guesser_fee}\npayment_id: {}\ntime-lock: {}\n\n",
                     block.hash(),
                     block.kernel.header.height,
                     utxo.get_native_currency_amount(),
+                    payment_id.value(),
                     utxo.release_date()
                         .map(|t| t.standard_format())
                         .unwrap_or_else(|| "none".into()),
@@ -1421,6 +1429,7 @@ impl WalletState {
                     aocl_index,
                     new_own_membership_proof.sender_randomness,
                     new_own_membership_proof.receiver_preimage,
+                    payment_id,
                     block,
                 );
 
@@ -1561,6 +1570,7 @@ impl WalletState {
                     utxo,
                     sender_randomness,
                     receiver_preimage,
+                    payment_id,
                     ..
                 } = incoming_utxo.to_owned();
                 let aocl_index = aocl_leaf_count;
@@ -1570,6 +1580,7 @@ impl WalletState {
                     aocl_index,
                     sender_randomness,
                     receiver_preimage,
+                    payment_id,
                     block,
                 );
                 let strong_key = mutxo.strong_utxo_key();
@@ -3880,6 +3891,7 @@ pub(crate) mod tests {
                     sender_randomness,
                     receiver_preimage,
                     UtxoNotifier::Myself,
+                    BFieldElement::ZERO,
                 ))
                 .await;
             assert!(!wallet.wallet_db.expected_utxos().is_empty().await);
@@ -3930,6 +3942,7 @@ pub(crate) mod tests {
                     rand::random(),
                     rand::random(),
                     UtxoNotifier::Myself,
+                    BFieldElement::ZERO,
                 );
                 addition_records.push(eutxo.addition_record);
                 wallet.add_expected_utxo(eutxo).await;
@@ -4608,6 +4621,7 @@ pub(crate) mod tests {
                     sender_randomness,
                     receiver_preimage,
                     is_guesser_fee: false,
+                    payment_id: BFieldElement::ZERO,
                 };
 
                 let addition_record = incoming_utxo.addition_record();

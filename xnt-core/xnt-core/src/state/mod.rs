@@ -1304,6 +1304,7 @@ impl GlobalState {
                 incoming_utxo.aocl_index,
                 restored_msmp.sender_randomness,
                 restored_msmp.receiver_preimage,
+                num_traits::ConstZero::ZERO,
                 (
                     confirming_block_digest,
                     confirming_block_header.timestamp,

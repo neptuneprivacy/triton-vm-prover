@@ -2176,6 +2176,7 @@ impl NeptuneRPCServer {
                     msmp.aocl_leaf_index,
                     msmp.sender_randomness,
                     msmp.receiver_preimage,
+                    incoming_utxo.payment_id,
                     &block,
                 );
                 monitored_utxo.add_membership_proof_for_tip(tip_digest, msmp.clone());

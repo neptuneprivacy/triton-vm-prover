@@ -9,6 +9,8 @@ use serde::Serialize;
 use super::utxo_notification::UtxoNotificationMethod;
 use crate::application::config::network::Network;
 use crate::prelude::twenty_first::prelude::Digest;
+use num_traits::ConstZero;
+use tasm_lib::triton_vm::prelude::BFieldElement;
 use crate::protocol::consensus::transaction::announcement::Announcement;
 use crate::protocol::consensus::transaction::utxo::Utxo;
 use crate::protocol::consensus::transaction::utxo_triple::UtxoTriple;
@@ -420,7 +422,7 @@ impl TxOutput {
         );
         let utxo = self.utxo();
         let sender_randomness = self.sender_randomness();
-        ExpectedUtxo::new(utxo, sender_randomness, receiver_preimage, notifier)
+        ExpectedUtxo::new(utxo, sender_randomness, receiver_preimage, notifier, BFieldElement::ZERO)
     }
 
     pub(crate) fn utxo_triple(&self) -> UtxoTriple {
