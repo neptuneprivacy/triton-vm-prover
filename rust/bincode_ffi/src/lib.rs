@@ -1,14 +1,14 @@
-use std::os::raw::{c_char, c_int, c_ulonglong};
 use std::alloc::{alloc, dealloc, Layout};
-use triton_vm::prelude::*;
+use std::os::raw::{c_char, c_int, c_ulonglong};
 use triton_vm::arithmetic_domain::ArithmeticDomain;
-use triton_vm::proof_item::{ProofItem, FriResponse};
-use triton_vm::table::{MainRow, AuxiliaryRow, QuotientSegments};
+use triton_vm::prelude::*;
+use triton_vm::proof_item::{FriResponse, ProofItem};
+use triton_vm::stark::ProverDomains;
 use triton_vm::table::auxiliary_table::Evaluable;
 use triton_vm::table::master_table::MasterAuxTable;
 use triton_vm::table::master_table::MasterMainTable;
-use triton_vm::stark::ProverDomains;
-use twenty_first::prelude::{Polynomial, ModPowU32};
+use triton_vm::table::{AuxiliaryRow, MainRow, QuotientSegments};
+use twenty_first::prelude::{ModPowU32, Polynomial};
 
 // FFI function for degree lowering (from degree_lowering_ffi crate)
 extern "C" {
@@ -16,18 +16,18 @@ extern "C" {
 }
 
 /// FFI function to serialize a Vec<u64> to bincode format and write to file
-/// 
+///
 /// This ensures the bincode format exactly matches Rust's bincode::serialize_into
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `data` points to a valid array of `len` u64 values
 /// - `file_path` is a valid null-terminated C string
 /// - The file path is writable
-/// 
+///
 /// # Returns
-/// 
+///
 /// - 0 on success
 /// - -1 on error (check errno for details)
 #[no_mangle]
@@ -49,41 +49,39 @@ pub unsafe extern "C" fn bincode_serialize_vec_u64_to_file(
     // Convert C array to Rust Vec<u64>
     let slice = std::slice::from_raw_parts(data, len);
     let vec_u64: Vec<u64> = slice.to_vec();
-    
+
     // When bincode serializes Proof using serde, it serializes the tuple struct
     // as just the inner value (Vec<BFieldElement>). So we serialize Vec<u64> directly.
     // The verifier will deserialize this as Proof, then decode ProofStream from proof.0
     // using BFieldCodec, which expects the proof stream encoding (not Proof's BFieldCodec encoding).
-    
+
     // So we just serialize the Vec<u64> directly - no BFieldCodec encoding needed!
     let proof_u64 = vec_u64;
 
     // Serialize to bincode and write to file
     match std::fs::File::create(path_cstr) {
-        Ok(file) => {
-            match bincode::serialize_into(file, &proof_u64) {
-                Ok(_) => 0,
-                Err(_) => -1,
-            }
-        }
+        Ok(file) => match bincode::serialize_into(file, &proof_u64) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        },
         Err(_) => -1,
     }
 }
 
 /// FFI function to deserialize a Vec<u64> from bincode file
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `file_path` is a valid null-terminated C string
 /// - `out_data` points to a buffer large enough to hold the deserialized data
 /// - `out_len` points to a valid usize that will be set to the length
-/// 
+///
 /// # Returns
-/// 
+///
 /// - 0 on success
 /// - -1 on error
-/// 
+///
 /// Note: The caller is responsible for freeing the memory allocated for `out_data`
 #[no_mangle]
 pub unsafe extern "C" fn bincode_deserialize_vec_u64_from_file(
@@ -108,14 +106,21 @@ pub unsafe extern "C" fn bincode_deserialize_vec_u64_from_file(
                 Ok(vec) => {
                     let len = vec.len();
                     // Allocate memory for the data (caller must free this)
-                    let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-                        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+                    let layout = Layout::from_size_align(
+                        len * std::mem::size_of::<c_ulonglong>(),
+                        std::mem::align_of::<c_ulonglong>(),
+                    )
+                    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
                     let data_ptr = unsafe { alloc(layout) as *mut c_ulonglong };
                     if data_ptr.is_null() {
                         return -1;
                     }
                     // Copy data
-                    std::ptr::copy_nonoverlapping(vec.as_ptr() as *const c_ulonglong, data_ptr, len);
+                    std::ptr::copy_nonoverlapping(
+                        vec.as_ptr() as *const c_ulonglong,
+                        data_ptr,
+                        len,
+                    );
                     *out_data = data_ptr;
                     *out_len = len;
                     0
@@ -128,23 +133,23 @@ pub unsafe extern "C" fn bincode_deserialize_vec_u64_from_file(
 }
 
 /// FFI function to encode FriResponse ProofItem
-/// 
+///
 /// Takes auth_structure (Vec<Digest>) and revealed_leaves (Vec<XFieldElement>)
 /// and returns the encoded ProofItem as Vec<u64> (BFieldElement values)
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `auth_data` points to a valid array of `num_auth * 5` u64 values (each Digest is 5 BFieldElements)
 /// - `leaves_data` points to a valid array of `num_leaves * 3` u64 values (each XFieldElement is 3 BFieldElements)
 /// - `out_data` points to a pointer that will be set to allocated memory (caller must free)
 /// - `out_len` points to a valid usize that will be set to the length
-/// 
+///
 /// # Returns
-/// 
+///
 /// - 0 on success
 /// - -1 on error
-/// 
+///
 /// Note: The caller is responsible for freeing the memory allocated for `out_data` using proof_item_free_encoding
 #[no_mangle]
 pub unsafe extern "C" fn proof_item_encode_fri_response(
@@ -194,7 +199,7 @@ pub unsafe extern "C" fn proof_item_encode_fri_response(
     };
     let proof_item = ProofItem::FriResponse(fri_response);
     let encoding = proof_item.encode();
-    
+
     // Debug: Print encoding info
     if std::env::var("TVM_DEBUG_FFI_ENCODE").is_ok() {
         eprintln!("[FFI DEBUG] FriResponse encoding:");
@@ -212,8 +217,11 @@ pub unsafe extern "C" fn proof_item_encode_fri_response(
 
     // Convert Vec<BFieldElement> to Vec<u64> and allocate
     let len = encoding.len();
-    let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    let layout = Layout::from_size_align(
+        len * std::mem::size_of::<c_ulonglong>(),
+        std::mem::align_of::<c_ulonglong>(),
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let data_ptr = unsafe { alloc(layout) as *mut c_ulonglong };
     if data_ptr.is_null() {
         return -1;
@@ -259,10 +267,10 @@ pub unsafe extern "C" fn tvm_trace_and_pad_main_table_from_tasm_file(
     out_claim_output_data: *mut *mut c_ulonglong,
     out_claim_output_len: *mut usize,
     // domains out: each is (length, offset, generator)
-    out_trace_domain_3: *mut c_ulonglong,    // caller provides array len 3
+    out_trace_domain_3: *mut c_ulonglong, // caller provides array len 3
     out_quotient_domain_3: *mut c_ulonglong, // caller provides array len 3
-    out_fri_domain_3: *mut c_ulonglong,      // caller provides array len 3
-    out_randomness_seed_32: *mut u8,         // caller provides array len 32
+    out_fri_domain_3: *mut c_ulonglong,   // caller provides array len 3
+    out_randomness_seed_32: *mut u8,      // caller provides array len 32
 ) -> c_int {
     if program_path.is_null()
         || public_input_data.is_null()
@@ -337,12 +345,8 @@ pub unsafe extern "C" fn tvm_trace_and_pad_main_table_from_tasm_file(
         return -1;
     }
 
-    let mut master_main_table = MasterMainTable::new(
-        &aet,
-        domains,
-        stark.num_trace_randomizers,
-        randomness_seed,
-    );
+    let mut master_main_table =
+        MasterMainTable::new(&aet, domains, stark.num_trace_randomizers, randomness_seed);
     master_main_table.pad();
 
     let trace_table = master_main_table.trace_table();
@@ -471,10 +475,7 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
 ) -> i32 {
     // All types should be available through triton_vm::prelude::*
 
-    if program_path.is_null()
-        || randomness_seed_32.is_null()
-        || cpp_main_table_data.is_null()
-    {
+    if program_path.is_null() || randomness_seed_32.is_null() || cpp_main_table_data.is_null() {
         eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: null pointer arguments");
         return -1;
     }
@@ -488,7 +489,10 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
     let program_path_str = match std::ffi::CStr::from_ptr(program_path).to_str() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: invalid program path: {}", e);
+            eprintln!(
+                "[FFI ERROR] verify_main_table_creation_rust_ffi: invalid program path: {}",
+                e
+            );
             return -1;
         }
     };
@@ -515,24 +519,45 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
         // Step 1: Load program and run trace execution (same as C++)
         let code = match std::fs::read_to_string(program_path_str) {
             Ok(c) => c,
-            Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "program file not found"))),
+            Err(_) => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "program file not found",
+                )))
+            }
         };
         let program = match Program::from_code(&code) {
             Ok(p) => p,
-            Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "program parsing failed"))),
+            Err(_) => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "program parsing failed",
+                )))
+            }
         };
 
-        let (aet, _output) = match VM::trace_execution(program, public_input, NonDeterminism::default()) {
-            Ok(res) => res,
-            Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "trace execution failed"))),
-        };
+        let (aet, _output) =
+            match VM::trace_execution(program, public_input, NonDeterminism::default()) {
+                Ok(res) => res,
+                Err(_) => {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "trace execution failed",
+                    )))
+                }
+            };
 
         // Step 2: Derive domains (same as C++)
         let stark = Stark::default();
         let padded_height = aet.padded_height();
         let fri = match stark.fri(padded_height) {
             Ok(f) => f,
-            Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "fri setup failed"))),
+            Err(_) => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "fri setup failed",
+                )))
+            }
         };
         let domains = ProverDomains::derive(
             padded_height,
@@ -542,12 +567,8 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
         );
 
         // Step 3: Create MasterMainTable (equivalent to C++ from_aet)
-        let mut master_main_table = MasterMainTable::new(
-            &aet,
-            domains,
-            stark.num_trace_randomizers,
-            seed_array,
-        );
+        let mut master_main_table =
+            MasterMainTable::new(&aet, domains, stark.num_trace_randomizers, seed_array);
 
         // Step 4: Pad table (same as C++)
         master_main_table.pad();
@@ -579,7 +600,10 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
             eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: dimension mismatch!");
             eprintln!("  Expected: {} x {}", num_rows, num_cols);
             eprintln!("  Got: {} x {}", rust_rows, rust_cols);
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "dimension mismatch")));
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "dimension mismatch",
+            )));
         }
 
         // Use the flat_data after FFI processing as the final table data
@@ -591,11 +615,17 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
     let rust_table_data = match rust_result {
         Ok(Ok(data)) => data,
         Ok(Err(e)) => {
-            eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: Rust pipeline failed: {:?}", e);
+            eprintln!(
+                "[FFI ERROR] verify_main_table_creation_rust_ffi: Rust pipeline failed: {:?}",
+                e
+            );
             return -1;
         }
         Err(panic) => {
-            eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: Rust panicked: {:?}", panic);
+            eprintln!(
+                "[FFI ERROR] verify_main_table_creation_rust_ffi: Rust panicked: {:?}",
+                panic
+            );
             return -1;
         }
     };
@@ -626,7 +656,10 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
     }
 
     if mismatches > 0 {
-        eprintln!("[FFI ERROR] verify_main_table_creation_rust_ffi: {} total mismatches found!", mismatches);
+        eprintln!(
+            "[FFI ERROR] verify_main_table_creation_rust_ffi: {} total mismatches found!",
+            mismatches
+        );
         return -1;
     }
 
@@ -635,21 +668,21 @@ pub unsafe extern "C" fn verify_main_table_creation_rust_ffi(
 }
 
 /// FFI function to encode FriCodeword ProofItem
-/// 
+///
 /// Takes Vec<XFieldElement> and returns the encoded ProofItem as Vec<u64> (BFieldElement values)
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `codeword_data` points to a valid array of `num_elements * 3` u64 values (each XFieldElement is 3 BFieldElements)
 /// - `out_data` points to a pointer that will be set to allocated memory (caller must free)
 /// - `out_len` points to a valid usize that will be set to the length
-/// 
+///
 /// # Returns
-/// 
+///
 /// - 0 on success
 /// - -1 on error
-/// 
+///
 /// Note: The caller is responsible for freeing the memory allocated for `out_data` using proof_item_free_encoding
 #[no_mangle]
 pub unsafe extern "C" fn proof_item_encode_fri_codeword(
@@ -678,7 +711,7 @@ pub unsafe extern "C" fn proof_item_encode_fri_codeword(
     // Create ProofItem and encode
     let proof_item = ProofItem::FriCodeword(codeword.clone());
     let encoding = proof_item.encode();
-    
+
     // CRITICAL: Verify encoding length matches expected format
     // Format: [discriminant, vec_encoding_length, vec_encoding]
     // vec_encoding = [vec_length, ...elements] where elements = codeword.len() * 3
@@ -693,7 +726,7 @@ pub unsafe extern "C" fn proof_item_encode_fri_codeword(
         eprintln!("  This will cause proof verification to fail!");
         // Don't return error, but log it
     }
-    
+
     // Debug: Print encoding info
     if std::env::var("TVM_DEBUG_FFI_ENCODE").is_ok() {
         eprintln!("[FFI DEBUG] FriCodeword encoding:");
@@ -706,28 +739,43 @@ pub unsafe extern "C" fn proof_item_encode_fri_codeword(
             eprintln!("  [1] Vec encoding length: {}", encoding[1].value());
             let vec_encoding_len = encoding[1].value() as usize;
             let expected_total = 1 + 1 + vec_encoding_len;
-            eprintln!("  Expected total: 1 (disc) + 1 (vec_enc_len) + {} (vec_enc) = {}", vec_encoding_len, expected_total);
+            eprintln!(
+                "  Expected total: 1 (disc) + 1 (vec_enc_len) + {} (vec_enc) = {}",
+                vec_encoding_len, expected_total
+            );
             if encoding.len() != expected_total {
                 eprintln!("  ⚠️  MISMATCH: {} != {}", encoding.len(), expected_total);
             }
         }
         if encoding.len() > 2 {
-            eprintln!("  [2] Vec length (in vec_encoding): {}", encoding[2].value());
+            eprintln!(
+                "  [2] Vec length (in vec_encoding): {}",
+                encoding[2].value()
+            );
         }
         if encoding.len() > 5 {
-            eprintln!("  [3-5] First XFieldElement: [{}, {}, {}]", 
-                     encoding[3].value(), encoding[4].value(), encoding[5].value());
+            eprintln!(
+                "  [3-5] First XFieldElement: [{}, {}, {}]",
+                encoding[3].value(),
+                encoding[4].value(),
+                encoding[5].value()
+            );
         }
-        eprintln!("  Last few elements: [{}, {}, {}]", 
-                 encoding[encoding.len().saturating_sub(3)].value(),
-                 encoding[encoding.len().saturating_sub(2)].value(),
-                 encoding[encoding.len().saturating_sub(1)].value());
+        eprintln!(
+            "  Last few elements: [{}, {}, {}]",
+            encoding[encoding.len().saturating_sub(3)].value(),
+            encoding[encoding.len().saturating_sub(2)].value(),
+            encoding[encoding.len().saturating_sub(1)].value()
+        );
     }
 
     // Convert Vec<BFieldElement> to Vec<u64> and allocate
     let len = encoding.len();
-    let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    let layout = Layout::from_size_align(
+        len * std::mem::size_of::<c_ulonglong>(),
+        std::mem::align_of::<c_ulonglong>(),
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let data_ptr = unsafe { alloc(layout) as *mut c_ulonglong };
     if data_ptr.is_null() {
         return -1;
@@ -746,10 +794,10 @@ pub unsafe extern "C" fn proof_item_encode_fri_codeword(
 }
 
 /// General FFI function to encode any ProofItem
-/// 
+///
 /// Takes the discriminant and raw data arrays, reconstructs the ProofItem in Rust,
 /// and returns the encoded ProofItem as Vec<u64> (BFieldElement values)
-/// 
+///
 /// # Safety
 /// The caller must ensure:
 /// - `discriminant` is a valid ProofItem variant discriminant
@@ -758,11 +806,11 @@ pub unsafe extern "C" fn proof_item_encode_fri_codeword(
 /// - For types requiring digest_data: `digest_data` points to `digest_count * 5` valid u64 values (each Digest is 5 BFieldElements)
 /// - `out_data` points to a pointer that will be set to allocated memory (caller must free)
 /// - `out_len` points to a valid usize that will be set to the length
-/// 
+///
 /// # Returns
 /// - 0 on success
 /// - -1 on error
-/// 
+///
 /// Note: The caller is responsible for freeing the memory allocated for `out_data` using proof_item_free_encoding
 #[no_mangle]
 pub unsafe extern "C" fn proof_item_encode_general(
@@ -782,6 +830,11 @@ pub unsafe extern "C" fn proof_item_encode_general(
     }
 
     // Reconstruct ProofItem based on discriminant
+    // New discriminant order (after xnt-core update):
+    // 0: MerkleRoot, 1: Log2PaddedHeight, 2: OutOfDomainMainRow, 3: OutOfDomainAuxRow,
+    // 4: OutOfDomainQuotientSegments, 5: FriPolynomial, 6: AuthenticationStructure,
+    // 7: MasterMainTableRows, 8: MasterAuxTableRows, 9: QuotientSegmentsElements,
+    // 10: FriCodeword, 11: FriResponse
     let proof_item = match discriminant {
         0 => {
             // MerkleRoot(Digest)
@@ -799,12 +852,23 @@ pub unsafe extern "C" fn proof_item_encode_general(
             ProofItem::MerkleRoot(digest)
         }
         1 => {
+            // Log2PaddedHeight(u32)
+            ProofItem::Log2PaddedHeight(u32_value)
+        }
+        2 => {
             // OutOfDomainMainRow(Box<MainRow<XFieldElement>>)
             if xfield_data.is_null() || xfield_count != 379 {
                 return -1;
             }
             let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-            let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 379];
+            let mut row_vec = vec![
+                XFieldElement::new([
+                    BFieldElement::new(0),
+                    BFieldElement::new(0),
+                    BFieldElement::new(0)
+                ]);
+                379
+            ];
             for i in 0..xfield_count {
                 let start = i * 3;
                 let xfe = XFieldElement::new([
@@ -814,16 +878,25 @@ pub unsafe extern "C" fn proof_item_encode_general(
                 ]);
                 row_vec[i] = xfe;
             }
-            let row: MainRow<XFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
+            let row: MainRow<XFieldElement> = row_vec
+                .try_into()
+                .unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
             ProofItem::OutOfDomainMainRow(Box::new(row))
         }
-        2 => {
+        3 => {
             // OutOfDomainAuxRow(Box<AuxiliaryRow>)
             if xfield_data.is_null() || xfield_count != 88 {
                 return -1;
             }
             let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-            let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 88];
+            let mut row_vec = vec![
+                XFieldElement::new([
+                    BFieldElement::new(0),
+                    BFieldElement::new(0),
+                    BFieldElement::new(0)
+                ]);
+                88
+            ];
             for i in 0..xfield_count {
                 let start = i * 3;
                 let xfe = XFieldElement::new([
@@ -833,16 +906,25 @@ pub unsafe extern "C" fn proof_item_encode_general(
                 ]);
                 row_vec[i] = xfe;
             }
-            let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
+            let row: AuxiliaryRow = row_vec
+                .try_into()
+                .unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
             ProofItem::OutOfDomainAuxRow(Box::new(row))
         }
-        3 => {
+        4 => {
             // OutOfDomainQuotientSegments(QuotientSegments)
             if xfield_data.is_null() || xfield_count != 4 {
                 return -1;
             }
             let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-            let mut segments_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 4];
+            let mut segments_vec = vec![
+                XFieldElement::new([
+                    BFieldElement::new(0),
+                    BFieldElement::new(0),
+                    BFieldElement::new(0)
+                ]);
+                4
+            ];
             for i in 0..xfield_count {
                 let start = i * 3;
                 let xfe = XFieldElement::new([
@@ -852,10 +934,32 @@ pub unsafe extern "C" fn proof_item_encode_general(
                 ]);
                 segments_vec[i] = xfe;
             }
-            let segments: QuotientSegments = segments_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
+            let segments: QuotientSegments = segments_vec
+                .try_into()
+                .unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
             ProofItem::OutOfDomainQuotientSegments(segments)
         }
-        4 => {
+        5 => {
+            // FriPolynomial(Polynomial<'static, XFieldElement>)
+            if xfield_data.is_null() {
+                return -1;
+            }
+            let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
+            let mut coeffs = Vec::with_capacity(xfield_count);
+            for i in 0..xfield_count {
+                let start = i * 3;
+                let xfe = XFieldElement::new([
+                    BFieldElement::new(xfield_slice[start]),
+                    BFieldElement::new(xfield_slice[start + 1]),
+                    BFieldElement::new(xfield_slice[start + 2]),
+                ]);
+                coeffs.push(xfe);
+            }
+            // Polynomial::new trims trailing zeros, matching Rust's behavior
+            let poly = Polynomial::new(coeffs);
+            ProofItem::FriPolynomial(poly)
+        }
+        6 => {
             // AuthenticationStructure(Vec<Digest>)
             if digest_data.is_null() {
                 return -1;
@@ -875,7 +979,7 @@ pub unsafe extern "C" fn proof_item_encode_general(
             }
             ProofItem::AuthenticationStructure(digests)
         }
-        5 => {
+        7 => {
             // MasterMainTableRows(Vec<MainRow<BFieldElement>>)
             if bfield_data.is_null() || bfield_count % 379 != 0 {
                 return -1;
@@ -889,12 +993,14 @@ pub unsafe extern "C" fn proof_item_encode_general(
                 for j in 0..379 {
                     row_vec[j] = BFieldElement::new(bfield_slice[start + j]);
                 }
-                let row: MainRow<BFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
+                let row: MainRow<BFieldElement> = row_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
                 rows.push(row);
             }
             ProofItem::MasterMainTableRows(rows)
         }
-        6 => {
+        8 => {
             // MasterAuxTableRows(Vec<AuxiliaryRow>)
             if xfield_data.is_null() || xfield_count % 88 != 0 {
                 return -1;
@@ -903,7 +1009,14 @@ pub unsafe extern "C" fn proof_item_encode_general(
             let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
             let mut rows = Vec::with_capacity(num_rows);
             for i in 0..num_rows {
-                let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 88];
+                let mut row_vec = vec![
+                    XFieldElement::new([
+                        BFieldElement::new(0),
+                        BFieldElement::new(0),
+                        BFieldElement::new(0)
+                    ]);
+                    88
+                ];
                 for j in 0..88 {
                     let start = (i * 88 + j) * 3;
                     let xfe = XFieldElement::new([
@@ -913,16 +1026,14 @@ pub unsafe extern "C" fn proof_item_encode_general(
                     ]);
                     row_vec[j] = xfe;
                 }
-                let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
+                let row: AuxiliaryRow = row_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
                 rows.push(row);
             }
             ProofItem::MasterAuxTableRows(rows)
         }
-        7 => {
-            // Log2PaddedHeight(u32)
-            ProofItem::Log2PaddedHeight(u32_value)
-        }
-        8 => {
+        9 => {
             // QuotientSegmentsElements(Vec<QuotientSegments>)
             if xfield_data.is_null() || xfield_count % 4 != 0 {
                 return -1;
@@ -931,7 +1042,14 @@ pub unsafe extern "C" fn proof_item_encode_general(
             let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
             let mut segments_vec = Vec::with_capacity(num_segments);
             for i in 0..num_segments {
-                let mut seg_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 4];
+                let mut seg_vec = vec![
+                    XFieldElement::new([
+                        BFieldElement::new(0),
+                        BFieldElement::new(0),
+                        BFieldElement::new(0)
+                    ]);
+                    4
+                ];
                 for j in 0..4 {
                     let start = (i * 4 + j) * 3;
                     let xfe = XFieldElement::new([
@@ -941,12 +1059,14 @@ pub unsafe extern "C" fn proof_item_encode_general(
                     ]);
                     seg_vec[j] = xfe;
                 }
-                let segments: QuotientSegments = seg_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
+                let segments: QuotientSegments = seg_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
                 segments_vec.push(segments);
             }
             ProofItem::QuotientSegmentsElements(segments_vec)
         }
-        9 => {
+        10 => {
             // FriCodeword(Vec<XFieldElement>)
             if xfield_data.is_null() {
                 return -1;
@@ -963,26 +1083,6 @@ pub unsafe extern "C" fn proof_item_encode_general(
                 codeword.push(xfe);
             }
             ProofItem::FriCodeword(codeword)
-        }
-        10 => {
-            // FriPolynomial(Polynomial<'static, XFieldElement>)
-            if xfield_data.is_null() {
-                return -1;
-            }
-            let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-            let mut coeffs = Vec::with_capacity(xfield_count);
-            for i in 0..xfield_count {
-                let start = i * 3;
-                let xfe = XFieldElement::new([
-                    BFieldElement::new(xfield_slice[start]),
-                    BFieldElement::new(xfield_slice[start + 1]),
-                    BFieldElement::new(xfield_slice[start + 2]),
-                ]);
-                coeffs.push(xfe);
-            }
-            // Polynomial::new trims trailing zeros, matching Rust's behavior
-            let poly = Polynomial::new(coeffs);
-            ProofItem::FriPolynomial(poly)
         }
         11 => {
             // FriResponse(FriResponse)
@@ -1029,8 +1129,11 @@ pub unsafe extern "C" fn proof_item_encode_general(
 
     // Allocate memory and copy encoded data
     let len = encoding.len();
-    let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    let layout = Layout::from_size_align(
+        len * std::mem::size_of::<c_ulonglong>(),
+        std::mem::align_of::<c_ulonglong>(),
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let data_ptr = unsafe { alloc(layout) as *mut c_ulonglong };
     if data_ptr.is_null() {
         return -1;
@@ -1049,33 +1152,39 @@ pub unsafe extern "C" fn proof_item_encode_general(
 }
 
 /// Free memory allocated by proof_item_encode_* functions
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `ptr` was allocated by a proof_item_encode_* function
 /// - `ptr` is not null
 #[no_mangle]
 pub unsafe extern "C" fn proof_item_free_encoding(ptr: *mut c_ulonglong, len: usize) {
     if !ptr.is_null() && len > 0 {
-        let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-            .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        let layout = Layout::from_size_align(
+            len * std::mem::size_of::<c_ulonglong>(),
+            std::mem::align_of::<c_ulonglong>(),
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(ptr as *mut u8, layout);
     }
 }
 
 /// Free memory allocated by bincode_deserialize_vec_u64_from_file
-/// 
+///
 /// # Safety
-/// 
+///
 /// The caller must ensure:
 /// - `ptr` was allocated by bincode_deserialize_vec_u64_from_file
 /// - `ptr` is not null
 #[no_mangle]
 pub unsafe extern "C" fn bincode_free_vec_u64(ptr: *mut c_ulonglong, len: usize) {
     if !ptr.is_null() && len > 0 {
-        let layout = Layout::from_size_align(len * std::mem::size_of::<c_ulonglong>(), std::mem::align_of::<c_ulonglong>())
-            .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        let layout = Layout::from_size_align(
+            len * std::mem::size_of::<c_ulonglong>(),
+            std::mem::align_of::<c_ulonglong>(),
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(ptr as *mut u8, layout);
     }
 }
@@ -1091,10 +1200,10 @@ mod tests {
     fn test_serialize_deserialize() {
         let test_data = vec![1u64, 2, 3, 4, 5];
         let test_path = "/tmp/test_bincode_ffi.bin";
-        
+
         // Clean up if exists
         let _ = fs::remove_file(test_path);
-        
+
         // Serialize
         let path_cstr = CString::new(test_path).unwrap();
         let result = unsafe {
@@ -1105,49 +1214,45 @@ mod tests {
             )
         };
         assert_eq!(result, 0);
-        
+
         // Deserialize
         let mut out_data: *mut c_ulonglong = ptr::null_mut();
         let mut out_len: usize = 0;
         let result = unsafe {
-            bincode_deserialize_vec_u64_from_file(
-                path_cstr.as_ptr(),
-                &mut out_data,
-                &mut out_len,
-            )
+            bincode_deserialize_vec_u64_from_file(path_cstr.as_ptr(), &mut out_data, &mut out_len)
         };
         assert_eq!(result, 0);
         assert_eq!(out_len, test_data.len());
-        
+
         // Verify data
         unsafe {
             let slice = std::slice::from_raw_parts(out_data, out_len);
             assert_eq!(slice, test_data.as_slice());
             bincode_free_vec_u64(out_data, out_len);
         }
-        
+
         // Clean up
         let _ = fs::remove_file(test_path);
     }
 }
 
 /// FFI function to encode proof stream and serialize to file entirely in Rust
-/// 
+///
 /// Takes all proof items as raw data arrays, reconstructs ProofStream in Rust,
 /// encodes it, serializes to bincode, and writes to file.
-/// 
+///
 /// This ensures 100% compatibility with Rust's proof format.
-/// 
+///
 /// # Safety
 /// The caller must ensure:
 /// - `discriminants` points to `num_items` valid u32 values
 /// - For each item, the corresponding data arrays are valid (or nullptr if not needed)
 /// - `file_path` is a valid null-terminated C string
-/// 
+///
 /// # Returns
 /// - 0 on success
 /// - -1 on error
-/// 
+///
 /// Note: This function handles steps 12 and 13 entirely in Rust:
 ///   Step 12: Proof Stream Construction (ProofStream::encode())
 ///   Step 13: Bincode Serialization (bincode::serialize_into)
@@ -1170,8 +1275,8 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         return -1;
     }
 
-    use triton_vm::proof_stream::ProofStream;
     use triton_vm::proof::Proof;
+    use triton_vm::proof_stream::ProofStream;
 
     // Convert C string to Rust string
     let path_cstr = match std::ffi::CStr::from_ptr(file_path).to_str() {
@@ -1184,10 +1289,10 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
 
     // Reconstruct all ProofItems using the same logic as proof_item_encode_general
     let mut proof_items = Vec::with_capacity(num_items);
-    
+
     for i in 0..num_items {
         let discriminant = disc_slice[i];
-        
+
         // Get item data (if provided)
         let bfield_data = if !bfield_data_array.is_null() {
             let ptr_array = std::slice::from_raw_parts(bfield_data_array, num_items);
@@ -1201,7 +1306,7 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         } else {
             0
         };
-        
+
         let xfield_data = if !xfield_data_array.is_null() {
             let ptr_array = std::slice::from_raw_parts(xfield_data_array, num_items);
             ptr_array[i]
@@ -1214,7 +1319,7 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         } else {
             0
         };
-        
+
         let digest_data = if !digest_data_array.is_null() {
             let ptr_array = std::slice::from_raw_parts(digest_data_array, num_items);
             ptr_array[i]
@@ -1227,7 +1332,7 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         } else {
             0
         };
-        
+
         let u32_value = if !u32_value_array.is_null() {
             let value_array = std::slice::from_raw_parts(u32_value_array, num_items);
             value_array[i]
@@ -1236,7 +1341,11 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
         };
 
         // Reconstruct ProofItem - reuse the logic from proof_item_encode_general
-        // We'll call a helper function to avoid code duplication
+        // New discriminant order (after xnt-core update):
+        // 0: MerkleRoot, 1: Log2PaddedHeight, 2: OutOfDomainMainRow, 3: OutOfDomainAuxRow,
+        // 4: OutOfDomainQuotientSegments, 5: FriPolynomial, 6: AuthenticationStructure,
+        // 7: MasterMainTableRows, 8: MasterAuxTableRows, 9: QuotientSegmentsElements,
+        // 10: FriCodeword, 11: FriResponse
         let proof_item = match discriminant {
             0 => {
                 // MerkleRoot(Digest)
@@ -1254,12 +1363,23 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 ProofItem::MerkleRoot(digest)
             }
             1 => {
+                // Log2PaddedHeight(u32)
+                ProofItem::Log2PaddedHeight(u32_value)
+            }
+            2 => {
                 // OutOfDomainMainRow(Box<MainRow<XFieldElement>>)
                 if xfield_data.is_null() || xfield_count != 379 {
                     return -1;
                 }
                 let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-                let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 379];
+                let mut row_vec = vec![
+                    XFieldElement::new([
+                        BFieldElement::new(0),
+                        BFieldElement::new(0),
+                        BFieldElement::new(0)
+                    ]);
+                    379
+                ];
                 for j in 0..xfield_count {
                     let start = j * 3;
                     let xfe = XFieldElement::new([
@@ -1269,16 +1389,25 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                     ]);
                     row_vec[j] = xfe;
                 }
-                let row: MainRow<XFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
+                let row: MainRow<XFieldElement> = row_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
                 ProofItem::OutOfDomainMainRow(Box::new(row))
             }
-            2 => {
+            3 => {
                 // OutOfDomainAuxRow(Box<AuxiliaryRow>)
                 if xfield_data.is_null() || xfield_count != 88 {
                     return -1;
                 }
                 let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-                let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 88];
+                let mut row_vec = vec![
+                    XFieldElement::new([
+                        BFieldElement::new(0),
+                        BFieldElement::new(0),
+                        BFieldElement::new(0)
+                    ]);
+                    88
+                ];
                 for j in 0..xfield_count {
                     let start = j * 3;
                     let xfe = XFieldElement::new([
@@ -1288,16 +1417,25 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                     ]);
                     row_vec[j] = xfe;
                 }
-                let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
+                let row: AuxiliaryRow = row_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
                 ProofItem::OutOfDomainAuxRow(Box::new(row))
             }
-            3 => {
+            4 => {
                 // OutOfDomainQuotientSegments(QuotientSegments)
                 if xfield_data.is_null() || xfield_count != 4 {
                     return -1;
                 }
                 let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-                let mut segments_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 4];
+                let mut segments_vec = vec![
+                    XFieldElement::new([
+                        BFieldElement::new(0),
+                        BFieldElement::new(0),
+                        BFieldElement::new(0)
+                    ]);
+                    4
+                ];
                 for j in 0..xfield_count {
                     let start = j * 3;
                     let xfe = XFieldElement::new([
@@ -1307,10 +1445,31 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                     ]);
                     segments_vec[j] = xfe;
                 }
-                let segments: QuotientSegments = segments_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
+                let segments: QuotientSegments = segments_vec
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
                 ProofItem::OutOfDomainQuotientSegments(segments)
             }
-            4 => {
+            5 => {
+                // FriPolynomial(Polynomial<'static, XFieldElement>)
+                if xfield_data.is_null() {
+                    return -1;
+                }
+                let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
+                let mut coeffs = Vec::with_capacity(xfield_count);
+                for j in 0..xfield_count {
+                    let start = j * 3;
+                    let xfe = XFieldElement::new([
+                        BFieldElement::new(xfield_slice[start]),
+                        BFieldElement::new(xfield_slice[start + 1]),
+                        BFieldElement::new(xfield_slice[start + 2]),
+                    ]);
+                    coeffs.push(xfe);
+                }
+                let poly = Polynomial::new(coeffs);
+                ProofItem::FriPolynomial(poly)
+            }
+            6 => {
                 // AuthenticationStructure(Vec<Digest>)
                 if digest_data.is_null() {
                     return -1;
@@ -1330,7 +1489,7 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 }
                 ProofItem::AuthenticationStructure(digests)
             }
-            5 => {
+            7 => {
                 // MasterMainTableRows(Vec<MainRow<BFieldElement>>)
                 if bfield_data.is_null() || bfield_count % 379 != 0 {
                     return -1;
@@ -1344,12 +1503,14 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                     for k in 0..379 {
                         row_vec[k] = BFieldElement::new(bfield_slice[start + k]);
                     }
-                    let row: MainRow<BFieldElement> = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
+                    let row: MainRow<BFieldElement> = row_vec
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("Failed to convert Vec to MainRow"));
                     rows.push(row);
                 }
                 ProofItem::MasterMainTableRows(rows)
             }
-            6 => {
+            8 => {
                 // MasterAuxTableRows(Vec<AuxiliaryRow>)
                 if xfield_data.is_null() || xfield_count % 88 != 0 {
                     return -1;
@@ -1358,7 +1519,14 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
                 let mut rows = Vec::with_capacity(num_rows);
                 for j in 0..num_rows {
-                    let mut row_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 88];
+                    let mut row_vec = vec![
+                        XFieldElement::new([
+                            BFieldElement::new(0),
+                            BFieldElement::new(0),
+                            BFieldElement::new(0)
+                        ]);
+                        88
+                    ];
                     for k in 0..88 {
                         let start = (j * 88 + k) * 3;
                         let xfe = XFieldElement::new([
@@ -1368,16 +1536,14 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                         ]);
                         row_vec[k] = xfe;
                     }
-                    let row: AuxiliaryRow = row_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
+                    let row: AuxiliaryRow = row_vec
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("Failed to convert Vec to AuxiliaryRow"));
                     rows.push(row);
                 }
                 ProofItem::MasterAuxTableRows(rows)
             }
-            7 => {
-                // Log2PaddedHeight(u32)
-                ProofItem::Log2PaddedHeight(u32_value)
-            }
-            8 => {
+            9 => {
                 // QuotientSegmentsElements(Vec<QuotientSegments>)
                 if xfield_data.is_null() || xfield_count % 4 != 0 {
                     return -1;
@@ -1386,7 +1552,14 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
                 let mut segments_vec = Vec::with_capacity(num_segments);
                 for j in 0..num_segments {
-                    let mut seg_vec = vec![XFieldElement::new([BFieldElement::new(0), BFieldElement::new(0), BFieldElement::new(0)]); 4];
+                    let mut seg_vec = vec![
+                        XFieldElement::new([
+                            BFieldElement::new(0),
+                            BFieldElement::new(0),
+                            BFieldElement::new(0)
+                        ]);
+                        4
+                    ];
                     for k in 0..4 {
                         let start = (j * 4 + k) * 3;
                         let xfe = XFieldElement::new([
@@ -1396,12 +1569,14 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                         ]);
                         seg_vec[k] = xfe;
                     }
-                    let segments: QuotientSegments = seg_vec.try_into().unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
+                    let segments: QuotientSegments = seg_vec
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("Failed to convert Vec to QuotientSegments"));
                     segments_vec.push(segments);
                 }
                 ProofItem::QuotientSegmentsElements(segments_vec)
             }
-            9 => {
+            10 => {
                 // FriCodeword(Vec<XFieldElement>)
                 if xfield_data.is_null() {
                     return -1;
@@ -1418,25 +1593,6 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                     codeword.push(xfe);
                 }
                 ProofItem::FriCodeword(codeword)
-            }
-            10 => {
-                // FriPolynomial(Polynomial<'static, XFieldElement>)
-                if xfield_data.is_null() {
-                    return -1;
-                }
-                let xfield_slice = std::slice::from_raw_parts(xfield_data, xfield_count * 3);
-                let mut coeffs = Vec::with_capacity(xfield_count);
-                for j in 0..xfield_count {
-                    let start = j * 3;
-                    let xfe = XFieldElement::new([
-                        BFieldElement::new(xfield_slice[start]),
-                        BFieldElement::new(xfield_slice[start + 1]),
-                        BFieldElement::new(xfield_slice[start + 2]),
-                    ]);
-                    coeffs.push(xfe);
-                }
-                let poly = Polynomial::new(coeffs);
-                ProofItem::FriPolynomial(poly)
             }
             11 => {
                 // FriResponse(FriResponse)
@@ -1477,25 +1633,23 @@ pub unsafe extern "C" fn proof_stream_encode_and_serialize(
                 return -1; // Invalid discriminant
             }
         };
-        
+
         proof_items.push(proof_item);
     }
 
     // Create ProofStream and encode
     let mut proof_stream = ProofStream::new();
     proof_stream.items = proof_items;
-    
+
     // Encode ProofStream to Vec<BFieldElement> and convert to Proof
     let proof: Proof = (&proof_stream).into();
-    
+
     // Serialize to bincode and write to file
     match std::fs::File::create(path_cstr) {
-        Ok(file) => {
-            match bincode::serialize_into(file, &proof) {
-                Ok(_) => 0,
-                Err(_) => -1,
-            }
-        }
+        Ok(file) => match bincode::serialize_into(file, &proof) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        },
         Err(_) => -1,
     }
 }
@@ -1589,8 +1743,12 @@ pub extern "C" fn evaluate_initial_constraints_rust(
     out_constraints: *mut *mut u64,
     out_len: *mut usize,
 ) -> c_int {
-    if main_row.is_null() || aux_row.is_null() || challenges.is_null()
-        || out_constraints.is_null() || out_len.is_null() {
+    if main_row.is_null()
+        || aux_row.is_null()
+        || challenges.is_null()
+        || out_constraints.is_null()
+        || out_len.is_null()
+    {
         return -1;
     }
 
@@ -1635,12 +1793,12 @@ pub extern "C" fn evaluate_initial_constraints_rust(
         let challenges = triton_vm::challenges::Challenges::new(challenges_scalars, &dummy_claim);
 
         // Evaluate constraints
-        let constraints = triton_vm::table::master_table::MasterAuxTable::evaluate_initial_constraints(
-            main_row.as_slice().into(),
-            aux_row.as_slice().into(),
-            &challenges,
-        );
-
+        let constraints =
+            triton_vm::table::master_table::MasterAuxTable::evaluate_initial_constraints(
+                main_row.as_slice().into(),
+                aux_row.as_slice().into(),
+                &challenges,
+            );
 
         // Convert to flat array (each XFieldElement becomes 3 u64s)
         let mut flat_constraints: Vec<u64> = Vec::new();
@@ -1677,8 +1835,12 @@ pub extern "C" fn evaluate_consistency_constraints_rust(
     out_constraints: *mut *mut u64,
     out_len: *mut usize,
 ) -> c_int {
-    if main_row.is_null() || aux_row.is_null() || challenges.is_null()
-        || out_constraints.is_null() || out_len.is_null() {
+    if main_row.is_null()
+        || aux_row.is_null()
+        || challenges.is_null()
+        || out_constraints.is_null()
+        || out_len.is_null()
+    {
         return -1;
     }
 
@@ -1720,11 +1882,12 @@ pub extern "C" fn evaluate_consistency_constraints_rust(
         let challenges = triton_vm::challenges::Challenges::new(challenges_scalars, &dummy_claim);
 
         // Evaluate constraints
-        let constraints = triton_vm::table::master_table::MasterAuxTable::evaluate_consistency_constraints(
-            main_row.as_slice().into(),
-            aux_row.as_slice().into(),
-            &challenges,
-        );
+        let constraints =
+            triton_vm::table::master_table::MasterAuxTable::evaluate_consistency_constraints(
+                main_row.as_slice().into(),
+                aux_row.as_slice().into(),
+                &challenges,
+            );
 
         // Convert to flat array
         let mut flat_constraints: Vec<u64> = Vec::new();
@@ -1763,9 +1926,14 @@ pub extern "C" fn evaluate_transition_constraints_rust(
     out_constraints: *mut *mut u64,
     out_len: *mut usize,
 ) -> c_int {
-    if current_main_row.is_null() || current_aux_row.is_null() ||
-        next_main_row.is_null() || next_aux_row.is_null() || challenges.is_null()
-        || out_constraints.is_null() || out_len.is_null() {
+    if current_main_row.is_null()
+        || current_aux_row.is_null()
+        || next_main_row.is_null()
+        || next_aux_row.is_null()
+        || challenges.is_null()
+        || out_constraints.is_null()
+        || out_len.is_null()
+    {
         return -1;
     }
 
@@ -1776,7 +1944,8 @@ pub extern "C" fn evaluate_transition_constraints_rust(
         let next_main_slice = std::slice::from_raw_parts(next_main_row, 379);
         let next_aux_slice = std::slice::from_raw_parts(next_aux_row, 88 * 3);
 
-        let current_main_bfes: Vec<BFieldElement> = current_main_slice.iter().map(|&x| bfe!(x)).collect();
+        let current_main_bfes: Vec<BFieldElement> =
+            current_main_slice.iter().map(|&x| bfe!(x)).collect();
         let current_main_row: [BFieldElement; 379] = current_main_bfes.try_into().unwrap();
 
         let current_aux_xfes: Vec<XFieldElement> = (0..88)
@@ -1822,13 +1991,14 @@ pub extern "C" fn evaluate_transition_constraints_rust(
         let challenges = triton_vm::challenges::Challenges::new(challenges_scalars, &dummy_claim);
 
         // Evaluate constraints
-        let constraints = triton_vm::table::master_table::MasterAuxTable::evaluate_transition_constraints(
-            current_main_row.as_slice().into(),
-            current_aux_row.as_slice().into(),
-            next_main_row.as_slice().into(),
-            next_aux_row.as_slice().into(),
-            &challenges,
-        );
+        let constraints =
+            triton_vm::table::master_table::MasterAuxTable::evaluate_transition_constraints(
+                current_main_row.as_slice().into(),
+                current_aux_row.as_slice().into(),
+                next_main_row.as_slice().into(),
+                next_aux_row.as_slice().into(),
+                &challenges,
+            );
 
         // Convert to flat array
         let mut flat_constraints: Vec<u64> = Vec::new();
@@ -1865,8 +2035,12 @@ pub extern "C" fn evaluate_terminal_constraints_rust(
     out_constraints: *mut *mut u64,
     out_len: *mut usize,
 ) -> c_int {
-    if main_row.is_null() || aux_row.is_null() || challenges.is_null()
-        || out_constraints.is_null() || out_len.is_null() {
+    if main_row.is_null()
+        || aux_row.is_null()
+        || challenges.is_null()
+        || out_constraints.is_null()
+        || out_len.is_null()
+    {
         return -1;
     }
 
@@ -1908,11 +2082,12 @@ pub extern "C" fn evaluate_terminal_constraints_rust(
         let challenges = triton_vm::challenges::Challenges::new(challenges_scalars, &dummy_claim);
 
         // Evaluate constraints
-        let constraints = triton_vm::table::master_table::MasterAuxTable::evaluate_terminal_constraints(
-            main_row.as_slice().into(),
-            aux_row.as_slice().into(),
-            &challenges,
-        );
+        let constraints =
+            triton_vm::table::master_table::MasterAuxTable::evaluate_terminal_constraints(
+                main_row.as_slice().into(),
+                aux_row.as_slice().into(),
+                &challenges,
+            );
 
         // Convert to flat array
         let mut flat_constraints: Vec<u64> = Vec::new();
@@ -1948,7 +2123,7 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
     main_row_next: *const u64,
     aux_row_next: *const u64,
     challenges: *const u64,
-    weights: *const u64,  // XFieldElement coefficients flattened
+    weights: *const u64, // XFieldElement coefficients flattened
     num_weights: usize,
     trace_domain_length: u64,
     trace_domain_generator_inverse: u64,
@@ -1958,15 +2133,24 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
     out_quotient_value: *mut *mut u64,
     out_len: *mut usize,
 ) -> c_int {
-    if main_row_curr.is_null() || aux_row_curr.is_null() || main_row_next.is_null() ||
-        aux_row_next.is_null() || challenges.is_null() || weights.is_null() ||
-        out_quotient_value.is_null() || out_len.is_null() {
+    if main_row_curr.is_null()
+        || aux_row_curr.is_null()
+        || main_row_next.is_null()
+        || aux_row_next.is_null()
+        || challenges.is_null()
+        || weights.is_null()
+        || out_quotient_value.is_null()
+        || out_len.is_null()
+    {
         return -1;
     }
 
     unsafe {
         // Convert inputs
-        let main_curr_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_curr, 379).iter().map(|&x| bfe!(x)).collect();
+        let main_curr_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_curr, 379)
+            .iter()
+            .map(|&x| bfe!(x))
+            .collect();
         let main_curr_row: [BFieldElement; 379] = main_curr_bfes.try_into().unwrap();
 
         let aux_curr_xfes: Vec<XFieldElement> = (0..88)
@@ -1979,7 +2163,10 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
             .collect();
         let aux_curr_row: [XFieldElement; 88] = aux_curr_xfes.try_into().unwrap();
 
-        let main_next_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_next, 379).iter().map(|&x| bfe!(x)).collect();
+        let main_next_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_next, 379)
+            .iter()
+            .map(|&x| bfe!(x))
+            .collect();
         let main_next_row: [BFieldElement; 379] = main_next_bfes.try_into().unwrap();
 
         let aux_next_xfes: Vec<XFieldElement> = (0..88)
@@ -2023,14 +2210,15 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
         let out_of_domain_point = XFieldElement::new([
             bfe!(out_of_domain_point_c0),
             bfe!(out_of_domain_point_c1),
-            bfe!(out_of_domain_point_c2)
+            bfe!(out_of_domain_point_c2),
         ]);
 
         let trace_domain_generator_inv = bfe!(trace_domain_generator_inverse);
 
         // Compute zerofier inverses (exactly like Rust verifier)
         let initial_zerofier_inv = (out_of_domain_point - bfe!(1)).inverse();
-        let consistency_zerofier_inv = (out_of_domain_point.mod_pow_u32(trace_domain_length as u32) - bfe!(1)).inverse();
+        let consistency_zerofier_inv =
+            (out_of_domain_point.mod_pow_u32(trace_domain_length as u32) - bfe!(1)).inverse();
         let except_last_row = out_of_domain_point - trace_domain_generator_inv;
         let transition_zerofier_inv = except_last_row * consistency_zerofier_inv;
         let terminal_zerofier_inv = except_last_row.inverse();
@@ -2062,8 +2250,10 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
         // Divide by zerofiers (exactly like Rust verifier)
         let divide = |constraints: Vec<_>, z_inv| constraints.into_iter().map(move |c| c * z_inv);
         let initial_quotients = divide(evaluated_initial_constraints, initial_zerofier_inv);
-        let consistency_quotients = divide(evaluated_consistency_constraints, consistency_zerofier_inv);
-        let transition_quotients = divide(evaluated_transition_constraints, transition_zerofier_inv);
+        let consistency_quotients =
+            divide(evaluated_consistency_constraints, consistency_zerofier_inv);
+        let transition_quotients =
+            divide(evaluated_transition_constraints, transition_zerofier_inv);
         let terminal_quotients = divide(evaluated_terminal_constraints, terminal_zerofier_inv);
 
         let quotient_summands = initial_quotients
@@ -2073,7 +2263,8 @@ pub extern "C" fn compute_out_of_domain_quotient_rust(
             .collect::<Vec<_>>();
 
         // Inner product with weights (exactly like Rust verifier)
-        let out_of_domain_quotient_value = quotient_summands.iter()
+        let out_of_domain_quotient_value = quotient_summands
+            .iter()
             .zip(quot_codeword_weights.iter())
             .map(|(constraint, weight)| *constraint * *weight)
             .sum::<XFieldElement>();
@@ -2239,8 +2430,10 @@ pub extern "C" fn compute_out_of_domain_quotient_xfe_main_challenges63_rust(
 
         let divide = |constraints: Vec<_>, z_inv| constraints.into_iter().map(move |c| c * z_inv);
         let initial_quotients = divide(evaluated_initial_constraints, initial_zerofier_inv);
-        let consistency_quotients = divide(evaluated_consistency_constraints, consistency_zerofier_inv);
-        let transition_quotients = divide(evaluated_transition_constraints, transition_zerofier_inv);
+        let consistency_quotients =
+            divide(evaluated_consistency_constraints, consistency_zerofier_inv);
+        let transition_quotients =
+            divide(evaluated_transition_constraints, transition_zerofier_inv);
         let terminal_quotients = divide(evaluated_terminal_constraints, terminal_zerofier_inv);
 
         let quotient_summands = initial_quotients
@@ -2256,7 +2449,9 @@ pub extern "C" fn compute_out_of_domain_quotient_xfe_main_challenges63_rust(
         let out_of_domain_quotient_value = quot_codeword_weights
             .iter()
             .zip(quotient_summands.iter())
-            .fold(XFieldElement::new_const(bfe!(0)), |acc, (w, s)| acc + (*w) * (*s));
+            .fold(XFieldElement::new_const(bfe!(0)), |acc, (w, s)| {
+                acc + (*w) * (*s)
+            });
 
         // Return as 3 u64s
         let out_vals = vec![
@@ -2284,7 +2479,7 @@ pub extern "C" fn compute_out_of_domain_quotient_xfe_main_challenges63_rust(
 /// randomized trace construction: `p(x) + zerofier_trace(x) * r(x)`, where `r` is a randomizer polynomial.
 #[no_mangle]
 pub extern "C" fn eval_randomized_bfe_column_at_point_rust(
-    trace_values: *const u64,      // [trace_len]
+    trace_values: *const u64, // [trace_len]
     trace_len: usize,
     trace_offset: u64,
     randomizer_coeffs: *const u64, // [rand_len]
@@ -2479,14 +2674,14 @@ pub extern "C" fn compute_quotient_value_at_bfe_point_rust(
     x: u64,
     trace_domain_length: u64,
     trace_domain_generator_inverse: u64,
-    main_row_curr: *const u64,      // [379]
-    aux_row_curr: *const u64,       // [88*3]
-    main_row_next: *const u64,      // [379]
-    aux_row_next: *const u64,       // [88*3]
-    challenges_63_xfe: *const u64,  // [63*3]
-    weights: *const u64,            // [num_weights*3]
+    main_row_curr: *const u64,     // [379]
+    aux_row_curr: *const u64,      // [88*3]
+    main_row_next: *const u64,     // [379]
+    aux_row_next: *const u64,      // [88*3]
+    challenges_63_xfe: *const u64, // [63*3]
+    weights: *const u64,           // [num_weights*3]
     num_weights: usize,
-    out_xfe3: *mut u64,             // [3]
+    out_xfe3: *mut u64, // [3]
 ) -> c_int {
     if main_row_curr.is_null()
         || aux_row_curr.is_null()
@@ -2500,11 +2695,15 @@ pub extern "C" fn compute_quotient_value_at_bfe_point_rust(
     }
 
     unsafe {
-        let main_curr_bfes: Vec<BFieldElement> =
-            std::slice::from_raw_parts(main_row_curr, 379).iter().map(|&v| bfe!(v)).collect();
+        let main_curr_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_curr, 379)
+            .iter()
+            .map(|&v| bfe!(v))
+            .collect();
         let main_curr_row: [BFieldElement; 379] = main_curr_bfes.try_into().unwrap();
-        let main_next_bfes: Vec<BFieldElement> =
-            std::slice::from_raw_parts(main_row_next, 379).iter().map(|&v| bfe!(v)).collect();
+        let main_next_bfes: Vec<BFieldElement> = std::slice::from_raw_parts(main_row_next, 379)
+            .iter()
+            .map(|&v| bfe!(v))
+            .collect();
         let main_next_row: [BFieldElement; 379] = main_next_bfes.try_into().unwrap();
 
         let aux_curr_xfes: Vec<XFieldElement> = (0..88)
@@ -2537,7 +2736,9 @@ pub extern "C" fn compute_quotient_value_at_bfe_point_rust(
         }
         let challenges_arr: [XFieldElement; triton_vm::challenges::Challenges::COUNT] =
             ch_vec.try_into().unwrap();
-        let challenges = triton_vm::challenges::Challenges { challenges: challenges_arr };
+        let challenges = triton_vm::challenges::Challenges {
+            challenges: challenges_arr,
+        };
 
         let w_slice = std::slice::from_raw_parts(weights, num_weights * 3);
         let ws: Vec<XFieldElement> = (0..num_weights)
@@ -2593,7 +2794,9 @@ pub extern "C" fn compute_quotient_value_at_bfe_point_rust(
         let q = ws
             .iter()
             .zip(summands.iter())
-            .fold(XFieldElement::new_const(bfe!(0)), |acc, (w, s)| acc + (*w) * (*s));
+            .fold(XFieldElement::new_const(bfe!(0)), |acc, (w, s)| {
+                acc + (*w) * (*s)
+            });
 
         *out_xfe3.add(0) = q.coefficients[0].value();
         *out_xfe3.add(1) = q.coefficients[1].value();
@@ -2606,7 +2809,7 @@ pub extern "C" fn compute_quotient_value_at_bfe_point_rust(
 /// using Rust's interpolation+zerofier construction.
 #[no_mangle]
 pub extern "C" fn eval_randomized_main_column_at_xfe_point_rust(
-    trace_values: *const u64,      // [trace_len]
+    trace_values: *const u64, // [trace_len]
     trace_len: usize,
     trace_offset: u64,
     randomizer_coeffs: *const u64, // [rand_len]
@@ -2614,7 +2817,7 @@ pub extern "C" fn eval_randomized_main_column_at_xfe_point_rust(
     z0: u64,
     z1: u64,
     z2: u64,
-    out_xfe3: *mut u64,            // [3]
+    out_xfe3: *mut u64, // [3]
 ) -> c_int {
     if trace_values.is_null() || randomizer_coeffs.is_null() || out_xfe3.is_null() {
         return -1;
@@ -2652,15 +2855,15 @@ pub extern "C" fn eval_randomized_main_column_at_xfe_point_rust(
 /// purely for debugging parity between the GPU/C++ prover and the Rust verifier/prover.
 #[no_mangle]
 pub extern "C" fn eval_randomized_aux_column_at_xfe_point_rust(
-    trace_values_xfe: *const u64,       // [trace_len*3]
+    trace_values_xfe: *const u64, // [trace_len*3]
     trace_len: usize,
     trace_offset: u64,
-    randomizer_coeffs_xfe: *const u64,  // [rand_len*3]
+    randomizer_coeffs_xfe: *const u64, // [rand_len*3]
     rand_len: usize,
     z0: u64,
     z1: u64,
     z2: u64,
-    out_xfe3: *mut u64,                // [3]
+    out_xfe3: *mut u64, // [3]
 ) -> c_int {
     if trace_values_xfe.is_null() || randomizer_coeffs_xfe.is_null() || out_xfe3.is_null() {
         return -1;
@@ -2818,7 +3021,7 @@ pub extern "C" fn constraint_evaluation_free(ptr: *mut u64, len: usize) {
 /// FFI function to encode a Claim using Rust's BFieldCodec (ensures exact compatibility)
 #[no_mangle]
 pub extern "C" fn claim_encode_rust(
-    program_digest: *const u64,  // 5 elements
+    program_digest: *const u64, // 5 elements
     version: u32,
     input: *const u64,
     input_len: usize,
@@ -2900,9 +3103,9 @@ pub extern "C" fn claim_encode_free(ptr: *mut u64, len: usize) {
 
 /// Run Rust trace execution only (no table creation).
 /// Returns AET data for C++ to use.
-/// 
+///
 /// This is faster than C++ trace execution for large programs.
-/// 
+///
 /// # Safety
 /// Caller must ensure all pointers are valid and provide sufficient buffers.
 #[no_mangle]
@@ -3010,26 +3213,28 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let public_input = PublicInput::new(input_vec.clone());
 
     // Run VM trace execution.
-    let (aet, output) = match VM::trace_execution(program.clone(), public_input, NonDeterminism::default()) {
-        Ok(res) => res,
-        Err(_) => return -1,
-    };
+    let (aet, output) =
+        match VM::trace_execution(program.clone(), public_input, NonDeterminism::default()) {
+            Ok(res) => res,
+            Err(_) => return -1,
+        };
 
     // Extract processor trace (flat, row-major)
     let proc_trace = &aet.processor_trace;
     let proc_rows = proc_trace.nrows();
     let proc_cols = proc_trace.ncols();
     let proc_flat_len = proc_rows * proc_cols;
-    
+
     let proc_layout = Layout::from_size_align(
         proc_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let proc_ptr = alloc(proc_layout) as *mut c_ulonglong;
     if proc_ptr.is_null() {
         return -1;
     }
-    
+
     // Copy processor trace (row-major)
     for i in 0..proc_rows {
         for j in 0..proc_cols {
@@ -3037,7 +3242,7 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
             *proc_ptr.add(i * proc_cols + j) = bfe.value();
         }
     }
-    
+
     *out_processor_trace_data = proc_ptr;
     *out_processor_trace_rows = proc_rows;
     *out_processor_trace_cols = proc_cols;
@@ -3048,7 +3253,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let bwords_layout = Layout::from_size_align(
         bwords_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let bwords_ptr = alloc(bwords_layout) as *mut c_ulonglong;
     if bwords_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3066,7 +3272,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let mults_layout = Layout::from_size_align(
         mults_len * std::mem::size_of::<u32>(),
         std::mem::align_of::<u32>(),
-    ).unwrap_or_else(|_| Layout::new::<u32>());
+    )
+    .unwrap_or_else(|_| Layout::new::<u32>());
     let mults_ptr = alloc(mults_layout) as *mut u32;
     if mults_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3084,7 +3291,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let out_layout = Layout::from_size_align(
         out_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let out_ptr = alloc(out_layout) as *mut c_ulonglong;
     if out_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3106,7 +3314,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let op_stack_layout = Layout::from_size_align(
         op_stack_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let op_stack_ptr = alloc(op_stack_layout) as *mut c_ulonglong;
     if op_stack_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3133,7 +3342,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let ram_layout = Layout::from_size_align(
         ram_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let ram_ptr = alloc(ram_layout) as *mut c_ulonglong;
     if ram_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3161,7 +3371,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let prog_hash_layout = Layout::from_size_align(
         prog_hash_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let prog_hash_ptr = alloc(prog_hash_layout) as *mut c_ulonglong;
     if prog_hash_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3190,7 +3401,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let hash_layout = Layout::from_size_align(
         hash_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let hash_ptr = alloc(hash_layout) as *mut c_ulonglong;
     if hash_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3220,7 +3432,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let sponge_layout = Layout::from_size_align(
         sponge_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let sponge_ptr = alloc(sponge_layout) as *mut c_ulonglong;
     if sponge_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3250,7 +3463,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let u32_layout = Layout::from_size_align(
         u32_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let u32_ptr = alloc(u32_layout) as *mut c_ulonglong;
     if u32_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3280,7 +3494,8 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
     let cascade_layout = Layout::from_size_align(
         cascade_flat_len * std::mem::size_of::<c_ulonglong>(),
         std::mem::align_of::<c_ulonglong>(),
-    ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+    )
+    .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
     let cascade_ptr = alloc(cascade_layout) as *mut c_ulonglong;
     if cascade_ptr.is_null() {
         dealloc(proc_ptr as *mut u8, proc_layout);
@@ -3327,10 +3542,10 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi(
 }
 
 /// Rust FFI: Execute VM trace with NonDeterminism JSON support
-/// 
+///
 /// This is a variant of tvm_trace_execution_rust_ffi that accepts NonDeterminism
 /// as a JSON string, allowing programs that need RAM/secret input to execute correctly.
-/// 
+///
 /// # Safety
 /// Caller must ensure all pointers are valid and provide sufficient buffers.
 #[no_mangle]
@@ -3426,7 +3641,7 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
             return -1;
         }
     };
-    
+
     let program: Program = match serde_json::from_str(program_str) {
         Ok(p) => p,
         Err(e) => {
@@ -3434,7 +3649,7 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
             return -1;
         }
     };
-    
+
     // Parse NonDeterminism JSON
     let nondet_str = match std::ffi::CStr::from_ptr(nondet_json).to_str() {
         Ok(s) => s,
@@ -3443,7 +3658,7 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
             return -1;
         }
     };
-    
+
     let non_determinism: NonDeterminism = match serde_json::from_str(nondet_str) {
         Ok(n) => n,
         Err(e) => {
@@ -3451,7 +3666,7 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
             return -1;
         }
     };
-    
+
     // Convert public input
     let input_slice = std::slice::from_raw_parts(public_input_data, public_input_len);
     let input_vec: Vec<BFieldElement> = input_slice
@@ -3460,10 +3675,13 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
         .map(BFieldElement::new)
         .collect();
     let public_input = PublicInput::new(input_vec);
-    
-    eprintln!("[FFI] Running trace execution with NonDeterminism (ram_len={}, individual_tokens_len={})", 
-              non_determinism.ram.len(), non_determinism.individual_tokens.len());
-    
+
+    eprintln!(
+        "[FFI] Running trace execution with NonDeterminism (ram_len={}, individual_tokens_len={})",
+        non_determinism.ram.len(),
+        non_determinism.individual_tokens.len()
+    );
+
     // Run VM trace execution WITH NonDeterminism
     let (aet, output) = match VM::trace_execution(program.clone(), public_input, non_determinism) {
         Ok(res) => res,
@@ -3472,21 +3690,25 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
             return -1;
         }
     };
-    
-    eprintln!("[FFI] Trace execution succeeded, padded_height={}", aet.padded_height());
+
+    eprintln!(
+        "[FFI] Trace execution succeeded, padded_height={}",
+        aet.padded_height()
+    );
 
     // Extract processor trace (flat, row-major)
     let proc_trace = &aet.processor_trace;
     let proc_rows = proc_trace.nrows();
     let proc_cols = proc_trace.ncols();
     let proc_flat_len = proc_rows * proc_cols;
-    
+
     let proc_layout = Layout::from_size_align(
         proc_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let proc_ptr = std::alloc::alloc(proc_layout) as *mut c_ulonglong;
-    
+
     for row in 0..proc_rows {
         for col in 0..proc_cols {
             let val = proc_trace[(row, col)].value();
@@ -3502,8 +3724,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let bwords_len = program_bwords.len();
     let bwords_layout = Layout::from_size_align(
         bwords_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let bwords_ptr = std::alloc::alloc(bwords_layout) as *mut c_ulonglong;
     for (i, bw) in program_bwords.iter().enumerate() {
         *bwords_ptr.add(i) = bw.value();
@@ -3516,8 +3739,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let inst_mults_len = inst_mults.len();
     let inst_mults_layout = Layout::from_size_align(
         inst_mults_len * std::mem::size_of::<u32>(),
-        std::mem::align_of::<u32>()
-    ).unwrap();
+        std::mem::align_of::<u32>(),
+    )
+    .unwrap();
     let inst_mults_ptr = std::alloc::alloc(inst_mults_layout) as *mut u32;
     std::ptr::copy_nonoverlapping(inst_mults.as_ptr(), inst_mults_ptr, inst_mults_len);
     *out_instruction_multiplicities_data = inst_mults_ptr;
@@ -3527,8 +3751,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let output_len = output.len();
     let output_layout = Layout::from_size_align(
         output_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let output_ptr = std::alloc::alloc(output_layout) as *mut c_ulonglong;
     for (i, o) in output.iter().enumerate() {
         *output_ptr.add(i) = o.value();
@@ -3543,8 +3768,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let op_flat_len = op_rows * op_cols;
     let op_layout = Layout::from_size_align(
         op_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let op_ptr = std::alloc::alloc(op_layout) as *mut c_ulonglong;
     for row in 0..op_rows {
         for col in 0..op_cols {
@@ -3563,8 +3789,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let ram_flat_len = ram_rows * ram_cols;
     let ram_layout = Layout::from_size_align(
         ram_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let ram_ptr = std::alloc::alloc(ram_layout) as *mut c_ulonglong;
     for row in 0..ram_rows {
         for col in 0..ram_cols {
@@ -3583,8 +3810,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let ph_flat_len = ph_rows * ph_cols;
     let ph_layout = Layout::from_size_align(
         ph_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let ph_ptr = std::alloc::alloc(ph_layout) as *mut c_ulonglong;
     for row in 0..ph_rows {
         for col in 0..ph_cols {
@@ -3603,8 +3831,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let hash_flat_len = hash_rows * hash_cols;
     let hash_layout = Layout::from_size_align(
         hash_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let hash_ptr = std::alloc::alloc(hash_layout) as *mut c_ulonglong;
     for row in 0..hash_rows {
         for col in 0..hash_cols {
@@ -3623,8 +3852,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let sponge_flat_len = sponge_rows * sponge_cols;
     let sponge_layout = Layout::from_size_align(
         sponge_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let sponge_ptr = std::alloc::alloc(sponge_layout) as *mut c_ulonglong;
     for row in 0..sponge_rows {
         for col in 0..sponge_cols {
@@ -3642,8 +3872,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let u32_flat_len = u32_len * 4;
     let u32_layout = Layout::from_size_align(
         u32_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let u32_ptr = std::alloc::alloc(u32_layout) as *mut c_ulonglong;
     for (idx, (entry, mult)) in u32_entries.iter().enumerate() {
         *u32_ptr.add(idx * 4 + 0) = entry.instruction.opcode_b().value();
@@ -3660,8 +3891,9 @@ pub unsafe extern "C" fn tvm_trace_execution_with_nondet(
     let cascade_flat_len = cascade_len * 2;
     let cascade_layout = Layout::from_size_align(
         cascade_flat_len * std::mem::size_of::<u64>(),
-        std::mem::align_of::<u64>()
-    ).unwrap();
+        std::mem::align_of::<u64>(),
+    )
+    .unwrap();
     let cascade_ptr = std::alloc::alloc(cascade_layout) as *mut c_ulonglong;
     for (idx, (limb, mult)) in cascade_mults.iter().enumerate() {
         *cascade_ptr.add(idx * 2 + 0) = *limb as u64;
@@ -3729,77 +3961,88 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi_free(
         let layout = Layout::from_size_align(
             processor_trace_rows * processor_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(processor_trace_data as *mut u8, layout);
     }
     if !program_bwords_data.is_null() {
         let layout = Layout::from_size_align(
             program_bwords_len * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(program_bwords_data as *mut u8, layout);
     }
     if !instruction_multiplicities_data.is_null() {
         let layout = Layout::from_size_align(
             instruction_multiplicities_len * std::mem::size_of::<u32>(),
             std::mem::align_of::<u32>(),
-        ).unwrap_or_else(|_| Layout::new::<u32>());
+        )
+        .unwrap_or_else(|_| Layout::new::<u32>());
         dealloc(instruction_multiplicities_data as *mut u8, layout);
     }
     if !public_output_data.is_null() {
         let layout = Layout::from_size_align(
             public_output_len * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(public_output_data as *mut u8, layout);
     }
     if !op_stack_trace_data.is_null() {
         let layout = Layout::from_size_align(
             op_stack_trace_rows * op_stack_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(op_stack_trace_data as *mut u8, layout);
     }
     if !ram_trace_data.is_null() {
         let layout = Layout::from_size_align(
             ram_trace_rows * ram_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(ram_trace_data as *mut u8, layout);
     }
     if !program_hash_trace_data.is_null() {
         let layout = Layout::from_size_align(
             program_hash_trace_rows * program_hash_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(program_hash_trace_data as *mut u8, layout);
     }
     if !hash_trace_data.is_null() {
         let layout = Layout::from_size_align(
             hash_trace_rows * hash_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(hash_trace_data as *mut u8, layout);
     }
     if !sponge_trace_data.is_null() {
         let layout = Layout::from_size_align(
             sponge_trace_rows * sponge_trace_cols * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(sponge_trace_data as *mut u8, layout);
     }
     if !u32_entries_data.is_null() {
         let layout = Layout::from_size_align(
             u32_entries_len * 4 * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(u32_entries_data as *mut u8, layout);
     }
     if !cascade_multiplicities_data.is_null() {
         let layout = Layout::from_size_align(
             cascade_multiplicities_len * 2 * std::mem::size_of::<c_ulonglong>(),
             std::mem::align_of::<c_ulonglong>(),
-        ).unwrap_or_else(|_| Layout::new::<c_ulonglong>());
+        )
+        .unwrap_or_else(|_| Layout::new::<c_ulonglong>());
         dealloc(cascade_multiplicities_data as *mut u8, layout);
     }
 }
@@ -3809,15 +4052,15 @@ pub unsafe extern "C" fn tvm_trace_execution_rust_ffi_free(
 // ============================================================================
 
 /// Prove from Neptune's JSON format and return bincode-serialized proof
-/// 
+///
 /// This is the main entry point for GPU prover server integration.
 /// Takes the same JSON inputs that Neptune sends to triton-vm-prover.
-/// 
+///
 /// # Safety
 /// - All string parameters must be valid null-terminated UTF-8 C strings
 /// - Output pointers must be valid
 /// - Caller must free output using tvm_prove_from_json_free
-/// 
+///
 /// # Returns
 /// - 0 on success
 /// - 1 if padded height exceeds max_log2 (check out_observed_log2)
@@ -3833,7 +4076,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
     out_observed_log2: *mut u8,
 ) -> c_int {
     use triton_vm::stark::Stark;
-    
+
     // Parse inputs
     let claim_str = match std::ffi::CStr::from_ptr(claim_json).to_str() {
         Ok(s) => s,
@@ -3842,7 +4085,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let program_str = match std::ffi::CStr::from_ptr(program_json).to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -3850,7 +4093,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let nondet_str = match std::ffi::CStr::from_ptr(nondet_json).to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -3858,7 +4101,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let max_log2_str = match std::ffi::CStr::from_ptr(max_log2_json).to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -3866,7 +4109,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     // Parse JSON
     let claim: triton_vm::proof::Claim = match serde_json::from_str(claim_str) {
         Ok(c) => c,
@@ -3875,7 +4118,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let program: Program = match serde_json::from_str(program_str) {
         Ok(p) => p,
         Err(e) => {
@@ -3883,7 +4126,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let non_determinism: NonDeterminism = match serde_json::from_str(nondet_str) {
         Ok(n) => n,
         Err(e) => {
@@ -3891,7 +4134,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let max_log2_padded_height: Option<u8> = match serde_json::from_str(max_log2_str) {
         Ok(m) => m,
         Err(e) => {
@@ -3899,11 +4142,15 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     eprintln!("[FFI] Parsed inputs successfully");
-    eprintln!("[FFI] Claim: digest={}, input_len={}, output_len={}", 
-              claim.program_digest, claim.input.len(), claim.output.len());
-    
+    eprintln!(
+        "[FFI] Claim: digest={}, input_len={}, output_len={}",
+        claim.program_digest,
+        claim.input.len(),
+        claim.output.len()
+    );
+
     // Verify program digest
     let computed_digest = program.hash();
     if computed_digest != claim.program_digest {
@@ -3912,7 +4159,7 @@ pub unsafe extern "C" fn tvm_prove_from_json(
         eprintln!("[FFI]   Computed: {}", computed_digest);
         return -1;
     }
-    
+
     // Run trace execution
     eprintln!("[FFI] Running trace execution...");
     let public_input = PublicInput::new(claim.input.clone());
@@ -3923,31 +4170,37 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     // Verify output
     if output != claim.output {
         eprintln!("[FFI] Output mismatch!");
         return -1;
     }
-    
+
     // Check padded height
     let padded_height = aet.padded_height();
     let log2_padded_height = padded_height.ilog2() as u8;
     *out_observed_log2 = log2_padded_height;
-    
-    eprintln!("[FFI] Padded height: {} (log2={})", padded_height, log2_padded_height);
-    
+
+    eprintln!(
+        "[FFI] Padded height: {} (log2={})",
+        padded_height, log2_padded_height
+    );
+
     if let Some(limit) = max_log2_padded_height {
         if log2_padded_height > limit {
-            eprintln!("[FFI] Padded height {} exceeds limit {}", log2_padded_height, limit);
+            eprintln!(
+                "[FFI] Padded height {} exceeds limit {}",
+                log2_padded_height, limit
+            );
             return 1; // Special return code for padded height too big
         }
     }
-    
+
     // Run STARK prover
     eprintln!("[FFI] Running STARK prover...");
     let start = std::time::Instant::now();
-    
+
     let stark = Stark::default();
     let proof = match stark.prove(&claim, &aet) {
         Ok(p) => p,
@@ -3956,11 +4209,11 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     let prove_duration = start.elapsed();
     eprintln!("[FFI] STARK proof generated in {:?}", prove_duration);
     eprintln!("[FFI] Proof has {} BFieldElements", proof.0.len());
-    
+
     // Serialize to bincode
     eprintln!("[FFI] Serializing proof to bincode...");
     let proof_bincode = match bincode::serialize(&proof) {
@@ -3970,42 +4223,34 @@ pub unsafe extern "C" fn tvm_prove_from_json(
             return -1;
         }
     };
-    
+
     eprintln!("[FFI] Proof serialized: {} bytes", proof_bincode.len());
-    
+
     // Allocate output buffer
-    let layout = Layout::from_size_align(
-        proof_bincode.len(),
-        std::mem::align_of::<u8>(),
-    ).unwrap_or_else(|_| Layout::new::<u8>());
-    
+    let layout = Layout::from_size_align(proof_bincode.len(), std::mem::align_of::<u8>())
+        .unwrap_or_else(|_| Layout::new::<u8>());
+
     let proof_ptr = alloc(layout);
     if proof_ptr.is_null() {
         eprintln!("[FFI] Failed to allocate output buffer");
         return -1;
     }
-    
+
     std::ptr::copy_nonoverlapping(proof_bincode.as_ptr(), proof_ptr, proof_bincode.len());
-    
+
     *out_proof_bincode = proof_ptr;
     *out_proof_len = proof_bincode.len();
-    
+
     eprintln!("[FFI] Proof ready to return");
     0
 }
 
 /// Free proof buffer allocated by tvm_prove_from_json
 #[no_mangle]
-pub unsafe extern "C" fn tvm_prove_from_json_free(
-    proof_bincode: *mut u8,
-    proof_len: usize,
-) {
+pub unsafe extern "C" fn tvm_prove_from_json_free(proof_bincode: *mut u8, proof_len: usize) {
     if !proof_bincode.is_null() && proof_len > 0 {
-        let layout = Layout::from_size_align(
-            proof_len,
-            std::mem::align_of::<u8>(),
-        ).unwrap_or_else(|_| Layout::new::<u8>());
+        let layout = Layout::from_size_align(proof_len, std::mem::align_of::<u8>())
+            .unwrap_or_else(|_| Layout::new::<u8>());
         dealloc(proof_bincode, layout);
     }
 }
-

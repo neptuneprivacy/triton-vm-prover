@@ -18,19 +18,22 @@ struct FriResponse;
 /**
  * ProofItem - Variant type for items in the proof stream
  * Discriminants match Rust's BFieldCodec derive order exactly
+ * 
+ * Updated for xnt-core patch (2024): Log2PaddedHeight and FriPolynomial
+ * moved to be included in Fiat-Shamir heuristic.
  */
 enum class ProofItemType {
     MerkleRoot = 0,
-    OutOfDomainMainRow = 1,
-    OutOfDomainAuxRow = 2,
-    OutOfDomainQuotientSegments = 3,
-    AuthenticationStructure = 4,
-    MasterMainTableRows = 5,
-    MasterAuxTableRows = 6,
-    Log2PaddedHeight = 7,
-    QuotientSegmentsElements = 8,
-    FriCodeword = 9,
-    FriPolynomial = 10,
+    Log2PaddedHeight = 1,
+    OutOfDomainMainRow = 2,
+    OutOfDomainAuxRow = 3,
+    OutOfDomainQuotientSegments = 4,
+    FriPolynomial = 5,
+    AuthenticationStructure = 6,
+    MasterMainTableRows = 7,
+    MasterAuxTableRows = 8,
+    QuotientSegmentsElements = 9,
+    FriCodeword = 10,
     FriResponse = 11
 };
 

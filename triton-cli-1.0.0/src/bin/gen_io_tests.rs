@@ -1,5 +1,5 @@
 //! Generate complete input/output test data for C++ verification.
-//! 
+//!
 //! This generates focused test cases where C++ can:
 //! 1. Load the inputs
 //! 2. Compute the output
@@ -18,52 +18,52 @@ use serde_json;
 fn main() -> Result<()> {
     let output_dir = PathBuf::from("test_data_io");
     fs::create_dir_all(&output_dir)?;
-    
+
     println!("Generating I/O test data for C++ verification...\n");
-    
+
     // 1. Tip5 hash tests
     generate_tip5_tests(&output_dir)?;
-    
+
     // 2. Domain computation tests
     generate_domain_tests(&output_dir)?;
-    
+
     // 3. Merkle tree tests
     generate_merkle_tests(&output_dir)?;
-    
-    // 4. FRI folding tests  
+
+    // 4. FRI folding tests
     generate_fri_tests(&output_dir)?;
-    
+
     // 5. BFieldElement arithmetic tests
     generate_bfield_tests(&output_dir)?;
-    
+
     // 6. XFieldElement arithmetic tests
     generate_xfield_tests(&output_dir)?;
-    
+
     println!("\n✅ All I/O test data generated in: {}", output_dir.display());
     Ok(())
 }
 
 fn generate_tip5_tests(dir: &PathBuf) -> Result<()> {
     println!("[1/6] Generating Tip5 hash tests...");
-    
+
     let tip5_dir = dir.join("tip5");
     fs::create_dir_all(&tip5_dir)?;
-    
+
     // Test 1: Hash empty
     let empty: Vec<BFieldElement> = vec![];
     let hash_empty = Tip5::hash_varlen(&empty);
     dump_tip5_test(&tip5_dir, "hash_empty", &empty, hash_empty)?;
-    
+
     // Test 2: Hash single element
     let single = vec![BFieldElement::new(12345)];
     let hash_single = Tip5::hash_varlen(&single);
     dump_tip5_test(&tip5_dir, "hash_single", &single, hash_single)?;
-    
+
     // Test 3: Hash 10 elements
     let ten: Vec<BFieldElement> = (0..10).map(|i| BFieldElement::new(i * 7 + 3)).collect();
     let hash_ten = Tip5::hash_varlen(&ten);
     dump_tip5_test(&tip5_dir, "hash_ten", &ten, hash_ten)?;
-    
+
     // Test 4: Hash pair of digests
     let d1 = Digest::new([
         BFieldElement::new(1),
@@ -81,35 +81,35 @@ fn generate_tip5_tests(dir: &PathBuf) -> Result<()> {
     ]);
     let hash_pair = Tip5::hash_pair(d1, d2);
     dump_tip5_pair_test(&tip5_dir, "hash_pair", d1, d2, hash_pair)?;
-    
+
     // Test 5: Hash 379 elements (main table row size)
     let row_379: Vec<BFieldElement> = (0..379).map(|i| BFieldElement::new(i * 13 + 7)).collect();
     let hash_row = Tip5::hash_varlen(&row_379);
     dump_tip5_test(&tip5_dir, "hash_row_379", &row_379, hash_row)?;
-    
+
     println!("   ✓ Generated 5 Tip5 tests");
     Ok(())
 }
 
 fn generate_domain_tests(dir: &PathBuf) -> Result<()> {
     println!("[2/6] Generating domain computation tests...");
-    
+
     let domain_dir = dir.join("domain");
     fs::create_dir_all(&domain_dir)?;
-    
+
     // Test various domain sizes
     for log2_len in [8, 9, 10, 12] {
         let len = 1usize << log2_len;
         let domain = ArithmeticDomain::of_length(len)?;
         dump_domain_test(&domain_dir, len, domain)?;
     }
-    
+
     // Test domain with offset (use generator() as FRI does)
     let domain_4096 = ArithmeticDomain::of_length(4096)?;
     let offset = BFieldElement::generator();
     let domain_with_offset = domain_4096.with_offset(offset);
     dump_domain_with_offset_test(&domain_dir, 4096, offset, domain_with_offset)?;
-    
+
     // Test ProverDomains
     let padded_height = 512;
     let num_trace_randomizers = 2;
@@ -117,25 +117,25 @@ fn generate_domain_tests(dir: &PathBuf) -> Result<()> {
     let fri_offset = BFieldElement::generator();
     let fri_domain = fri_domain.with_offset(fri_offset);
     let _stark = Stark::default();
-    
+
     // Note: ProverDomains::derive is private, so we'll compute the expected values
     let trace_domain = ArithmeticDomain::of_length(padded_height)?;
     let randomized_trace_len = padded_height + num_trace_randomizers;
     let randomized_trace_domain = ArithmeticDomain::of_length(randomized_trace_len.next_power_of_two())?;
-    
-    dump_prover_domains_test(&domain_dir, padded_height, num_trace_randomizers, 
+
+    dump_prover_domains_test(&domain_dir, padded_height, num_trace_randomizers,
                              trace_domain, randomized_trace_domain, fri_domain)?;
-    
+
     println!("   ✓ Generated domain computation tests");
     Ok(())
 }
 
 fn generate_merkle_tests(dir: &PathBuf) -> Result<()> {
     println!("[3/6] Generating Merkle tree tests...");
-    
+
     let merkle_dir = dir.join("merkle");
     fs::create_dir_all(&merkle_dir)?;
-    
+
     // Test 1: 4 leaves
     let leaves_4: Vec<Digest> = (0..4).map(|i| {
         Digest::new([
@@ -148,7 +148,7 @@ fn generate_merkle_tests(dir: &PathBuf) -> Result<()> {
     }).collect();
     let tree_4 = MerkleTree::par_new(&leaves_4)?;
     dump_merkle_test(&merkle_dir, "tree_4_leaves", &leaves_4, tree_4.root())?;
-    
+
     // Test 2: 8 leaves
     let leaves_8: Vec<Digest> = (0..8).map(|i| {
         Digest::new([
@@ -161,20 +161,20 @@ fn generate_merkle_tests(dir: &PathBuf) -> Result<()> {
     }).collect();
     let tree_8 = MerkleTree::par_new(&leaves_8)?;
     dump_merkle_test(&merkle_dir, "tree_8_leaves", &leaves_8, tree_8.root())?;
-    
+
     // Test 3: Authentication path
     dump_merkle_auth_path(&merkle_dir, &tree_8, 3)?;
-    
+
     println!("   ✓ Generated Merkle tree tests");
     Ok(())
 }
 
 fn generate_fri_tests(dir: &PathBuf) -> Result<()> {
     println!("[4/6] Generating FRI folding tests...");
-    
+
     let fri_dir = dir.join("fri");
     fs::create_dir_all(&fri_dir)?;
-    
+
     // Create a simple codeword and fold it
     let codeword: Vec<XFieldElement> = (0..16).map(|i| {
         XFieldElement::new([
@@ -183,24 +183,24 @@ fn generate_fri_tests(dir: &PathBuf) -> Result<()> {
             BFieldElement::new(i * 11 + 3),
         ])
     }).collect();
-    
+
     let challenge = XFieldElement::new([
         BFieldElement::new(12345),
         BFieldElement::new(67890),
         BFieldElement::new(11111),
     ]);
-    
+
     // Manual FRI fold (split and fold)
     let domain = ArithmeticDomain::of_length(16)?;
     let half_n = 8;
-    
+
     // Compute folded codeword
     let mut folded = Vec::with_capacity(half_n);
     for i in 0..half_n {
         let omega_i = domain.domain_value(i as u32);
         let left = codeword[i];
         let right = codeword[i + half_n];
-        
+
         // FRI fold formula: (left + right + challenge * omega_i^(-1) * (left - right)) / 2
         let omega_inv = omega_i.inverse();
         let sum = left + right;
@@ -209,24 +209,24 @@ fn generate_fri_tests(dir: &PathBuf) -> Result<()> {
         let folded_val = (sum + scaled_diff) * XFieldElement::from(BFieldElement::new(2)).inverse();
         folded.push(folded_val);
     }
-    
+
     dump_fri_fold_test(&fri_dir, &codeword, challenge, &folded)?;
-    
+
     println!("   ✓ Generated FRI folding tests");
     Ok(())
 }
 
 fn generate_bfield_tests(dir: &PathBuf) -> Result<()> {
     println!("[5/6] Generating BFieldElement arithmetic tests...");
-    
+
     let bfield_dir = dir.join("bfield");
     fs::create_dir_all(&bfield_dir)?;
-    
+
     // Test values
     let a = BFieldElement::new(12345678901234567890);
     let b = BFieldElement::new(9876543210987654321);
     let c = BFieldElement::new(42);
-    
+
     let data = serde_json::json!({
         "modulus": BFieldElement::P,
         "tests": {
@@ -268,19 +268,19 @@ fn generate_bfield_tests(dir: &PathBuf) -> Result<()> {
             },
         }
     });
-    
+
     fs::write(bfield_dir.join("arithmetic.json"), serde_json::to_string_pretty(&data)?)?;
-    
+
     println!("   ✓ Generated BFieldElement arithmetic tests");
     Ok(())
 }
 
 fn generate_xfield_tests(dir: &PathBuf) -> Result<()> {
     println!("[6/6] Generating XFieldElement arithmetic tests...");
-    
+
     let xfield_dir = dir.join("xfield");
     fs::create_dir_all(&xfield_dir)?;
-    
+
     let a = XFieldElement::new([
         BFieldElement::new(123456),
         BFieldElement::new(789012),
@@ -291,7 +291,7 @@ fn generate_xfield_tests(dir: &PathBuf) -> Result<()> {
         BFieldElement::new(222222),
         BFieldElement::new(333333),
     ]);
-    
+
     let data = serde_json::json!({
         "shah_polynomial": "x^3 - x + 1 = 0, so x^3 = x - 1",
         "tests": {
@@ -334,9 +334,9 @@ fn generate_xfield_tests(dir: &PathBuf) -> Result<()> {
             },
         }
     });
-    
+
     fs::write(xfield_dir.join("arithmetic.json"), serde_json::to_string_pretty(&data)?)?;
-    
+
     println!("   ✓ Generated XFieldElement arithmetic tests");
     Ok(())
 }
@@ -475,7 +475,7 @@ fn dump_merkle_test(dir: &PathBuf, name: &str, leaves: &[Digest], root: Digest) 
 
 fn dump_merkle_auth_path(dir: &PathBuf, tree: &MerkleTree, leaf_index: usize) -> Result<()> {
     let auth_path = tree.authentication_structure(&[leaf_index])?;
-    
+
     let data = serde_json::json!({
         "test": format!("auth_path_leaf_{}", leaf_index),
         "input": {
@@ -532,4 +532,3 @@ fn dump_fri_fold_test(
     fs::write(dir.join("fri_fold.json"), serde_json::to_string_pretty(&data)?)?;
     Ok(())
 }
-

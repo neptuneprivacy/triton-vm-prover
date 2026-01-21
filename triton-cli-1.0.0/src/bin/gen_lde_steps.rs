@@ -1,53 +1,60 @@
 //! Generate LDE step-by-step I/O data for C++ verification.
-//! 
+//!
 //! This dumps:
 //! 1. Padded main table (after create + pad)
 //! 2. Each LDE step's input and output
 
-use std::fs;
-use std::path::PathBuf;
-use anyhow::{anyhow, Result};
-use rand::rngs::StdRng;
+use anyhow::{Result, anyhow};
 use rand::Rng;
 use rand::SeedableRng;
-use triton_vm::prelude::*;
-use triton_vm::table::master_table::MasterMainTable;
-use triton_vm::arithmetic_domain::ArithmeticDomain;
-use triton_vm::stark::{Stark, ProverDomains};
+use rand::rngs::StdRng;
 use serde_json;
+use std::fs;
+use std::path::PathBuf;
+use triton_vm::arithmetic_domain::ArithmeticDomain;
+use triton_vm::prelude::*;
+use triton_vm::stark::{ProverDomains, Stark};
+use triton_vm::table::master_table::MasterMainTable;
 
 fn main() -> Result<()> {
     let output_dir = PathBuf::from("test_data_lde");
     fs::create_dir_all(&output_dir)?;
-    
+
     println!("Generating LDE step-by-step I/O data for C++ verification...\n");
-    
+
     // Load and execute the spin.tasm program with input 8
     let program_path = "spin.tasm";
-    let program_source = fs::read_to_string(program_path)
-        .map_err(|e| anyhow!("Failed to read program: {}", e))?;
-    
+    let program_source =
+        fs::read_to_string(program_path).map_err(|e| anyhow!("Failed to read program: {}", e))?;
+
     let program = Program::from_code(&program_source)
         .map_err(|e| anyhow!("Failed to parse program: {}", e))?;
-    
+
     let public_input = PublicInput::new(vec![8_u64.into()]);
     let non_determinism = NonDeterminism::default();
-    
+
     println!("[1/7] Executing program...");
-    let (aet, public_output) = VM::trace_execution(program.clone(), public_input.clone(), non_determinism.clone())
-        .map_err(|e| anyhow!("Execution failed: {}", e))?;
-    
+    let (aet, public_output) = VM::trace_execution(
+        program.clone(),
+        public_input.clone(),
+        non_determinism.clone(),
+    )
+    .map_err(|e| anyhow!("Execution failed: {}", e))?;
+
     let padded_height = aet.padded_height();
     println!("   Padded height: {}", padded_height);
-    println!("   Processor trace: {} rows x {} cols", 
-             aet.processor_trace.nrows(), aet.processor_trace.ncols());
-    
+    println!(
+        "   Processor trace: {} rows x {} cols",
+        aet.processor_trace.nrows(),
+        aet.processor_trace.ncols()
+    );
+
     // Create Stark and derive domains
     let stark = Stark::default();
     let claim = Claim::about_program(&program)
         .with_input(public_input.individual_tokens.clone())
         .with_output(public_output.clone());
-    
+
     let fri = stark.fri(padded_height)?;
     let domains = ProverDomains::derive(
         padded_height,
@@ -55,7 +62,7 @@ fn main() -> Result<()> {
         fri.domain,
         stark.max_degree(padded_height),
     );
-    
+
     println!("[2/7] Creating main table...");
     let mut rng = StdRng::from_entropy();
     let seed: <StdRng as SeedableRng>::Seed = {
@@ -64,63 +71,73 @@ fn main() -> Result<()> {
         rng.fill_bytes(&mut seed);
         seed
     };
-    let mut master_main_table = MasterMainTable::new(
-        &aet,
-        domains,
-        stark.num_trace_randomizers,
-        seed,
-    );
-    
+    let mut master_main_table =
+        MasterMainTable::new(&aet, domains, stark.num_trace_randomizers, seed);
+
     // Dump table after creation (before padding)
     dump_table_state(&output_dir, "01_after_create", &master_main_table)?;
-    
+
     println!("[3/7] Padding main table...");
     master_main_table.pad();
-    
+
     // Dump table after padding
     dump_table_state(&output_dir, "02_after_pad", &master_main_table)?;
-    
+
     println!("[4/7] Running LDE (with step-by-step capture)...");
-    
+
     // The LDE process in triton-vm does:
     // 1. Interpolation (trace -> polynomials)
     // 2. Resize (low-degree extension coefficients)
     // 3. Evaluation (polynomials -> quotient domain values)
-    
+
     // Capture trace domain values before LDE
     dump_trace_table_data(&output_dir, "03_lde_input_trace", &master_main_table)?;
-    
+
     // Dump domain parameters
     let trace_domain = master_main_table.domains().trace;
     let quotient_domain = master_main_table.domains().quotient;
     dump_domains(&output_dir, &trace_domain, &quotient_domain, &fri.domain)?;
-    
+
     // Run LDE and capture output
     master_main_table.maybe_low_degree_extend_all_columns();
-    
+
     // Dump LDE output
     dump_lde_output_from_table(&output_dir, "05_lde_output", &master_main_table)?;
-    
+
     println!("[5/7] Computing Merkle root...");
     let merkle_tree = master_main_table.merkle_tree();
     let merkle_root = merkle_tree.root();
     dump_merkle_info(&output_dir, &merkle_tree, merkle_root)?;
-    
+
     println!("[6/7] Generating polynomial sample data...");
     // Sample a few columns' worth of polynomial coefficients for verification
     dump_polynomial_samples(&output_dir, &master_main_table)?;
-    
+
     println!("[7/7] Writing summary...");
-    dump_summary(&output_dir, padded_height, &trace_domain, &quotient_domain, &fri, merkle_root)?;
-    
-    println!("\n✅ All LDE step data generated in: {}", output_dir.display());
+    dump_summary(
+        &output_dir,
+        padded_height,
+        &trace_domain,
+        &quotient_domain,
+        &fri,
+        merkle_root,
+    )?;
+
+    println!(
+        "\n✅ All LDE step data generated in: {}",
+        output_dir.display()
+    );
     println!("\nGenerated files:");
     for entry in fs::read_dir(&output_dir)? {
         let entry = entry?;
         let size = entry.metadata()?.len();
-        println!("   {} ({} bytes)", entry.file_name().to_string_lossy(), size);
+        println!(
+            "   {} ({} bytes)",
+            entry.file_name().to_string_lossy(),
+            size
+        );
     }
-    
+
     Ok(())
 }
 
@@ -128,7 +145,7 @@ fn dump_table_state(dir: &PathBuf, name: &str, table: &MasterMainTable) -> Resul
     let trace = table.trace_table();
     let rows = trace.nrows();
     let cols = trace.ncols();
-    
+
     // Dump shape and first/last rows
     let first_row: Vec<u64> = trace.row(0).iter().map(|x| x.value()).collect();
     let last_row: Vec<u64> = if rows > 1 {
@@ -136,12 +153,12 @@ fn dump_table_state(dir: &PathBuf, name: &str, table: &MasterMainTable) -> Resul
     } else {
         vec![]
     };
-    
+
     // Dump all rows for full verification
     let all_rows: Vec<Vec<u64>> = (0..rows)
         .map(|r| trace.row(r).iter().map(|x| x.value()).collect())
         .collect();
-    
+
     let data = serde_json::json!({
         "stage": name,
         "shape": [rows, cols],
@@ -150,11 +167,16 @@ fn dump_table_state(dir: &PathBuf, name: &str, table: &MasterMainTable) -> Resul
         "last_row": last_row,
         "all_rows": all_rows,
     });
-    
+
     let path = dir.join(format!("{}.json", name));
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
-    println!("   Wrote {} ({} rows x {} cols)", path.display(), rows, cols);
-    
+    println!(
+        "   Wrote {} ({} rows x {} cols)",
+        path.display(),
+        rows,
+        cols
+    );
+
     Ok(())
 }
 
@@ -162,21 +184,26 @@ fn dump_trace_table_data(dir: &PathBuf, name: &str, table: &MasterMainTable) -> 
     let trace = table.trace_table();
     let rows = trace.nrows();
     let cols = trace.ncols();
-    
+
     let all_rows: Vec<Vec<u64>> = (0..rows)
         .map(|r| trace.row(r).iter().map(|x| x.value()).collect())
         .collect();
-    
+
     let data = serde_json::json!({
         "stage": name,
         "shape": [rows, cols],
         "data": all_rows,
     });
-    
+
     let path = dir.join(format!("{}.json", name));
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
-    println!("   Wrote {} ({} rows x {} cols)", path.display(), rows, cols);
-    
+    println!(
+        "   Wrote {} ({} rows x {} cols)",
+        path.display(),
+        rows,
+        cols
+    );
+
     Ok(())
 }
 
@@ -204,11 +231,11 @@ fn dump_domains(
         },
         "expansion_factor": fri_domain.length / trace_domain.length,
     });
-    
+
     let path = dir.join("04_domains.json");
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
     println!("   Wrote {}", path.display());
-    
+
     Ok(())
 }
 
@@ -216,25 +243,30 @@ fn dump_lde_output_from_table(dir: &PathBuf, name: &str, table: &MasterMainTable
     if let Some(lde) = table.quotient_domain_table() {
         let rows = lde.nrows();
         let cols = lde.ncols();
-        
+
         // Dump full LDE table
         let all_rows: Vec<Vec<u64>> = (0..rows)
             .map(|r| lde.row(r).iter().map(|x| x.value()).collect())
             .collect();
-        
+
         let data = serde_json::json!({
             "stage": name,
             "shape": [rows, cols],
             "data": all_rows,
         });
-        
+
         let path = dir.join(format!("{}.json", name));
         fs::write(&path, serde_json::to_string_pretty(&data)?)?;
-        println!("   Wrote {} ({} rows x {} cols)", path.display(), rows, cols);
+        println!(
+            "   Wrote {} ({} rows x {} cols)",
+            path.display(),
+            rows,
+            cols
+        );
     } else {
         println!("   Warning: LDE table not available");
     }
-    
+
     Ok(())
 }
 
@@ -254,11 +286,11 @@ fn dump_merkle_info(
         ],
         "root_hex": root.to_hex(),
     });
-    
+
     let path = dir.join("06_merkle.json");
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
     println!("   Wrote {}", path.display());
-    
+
     Ok(())
 }
 
@@ -266,29 +298,27 @@ fn dump_polynomial_samples(dir: &PathBuf, table: &MasterMainTable) -> Result<()>
     // Get interpolation polynomials for first few columns
     let trace = table.trace_table();
     let rows = trace.nrows();
-    
+
     // Sample first 5 columns
     let mut samples = vec![];
     for col in 0..std::cmp::min(5, trace.ncols()) {
-        let column: Vec<u64> = (0..rows)
-            .map(|row| trace[[row, col]].value())
-            .collect();
+        let column: Vec<u64> = (0..rows).map(|row| trace[[row, col]].value()).collect();
         samples.push(serde_json::json!({
             "column_index": col,
             "values": column,
         }));
     }
-    
+
     let data = serde_json::json!({
         "num_samples": samples.len(),
         "trace_length": rows,
         "samples": samples,
     });
-    
+
     let path = dir.join("07_polynomial_samples.json");
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
     println!("   Wrote {}", path.display());
-    
+
     Ok(())
 }
 
@@ -319,11 +349,10 @@ fn dump_summary(
             "8. Compare Merkle root with 06_merkle.json",
         ],
     });
-    
+
     let path = dir.join("00_summary.json");
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
     println!("   Wrote {}", path.display());
-    
+
     Ok(())
 }
-

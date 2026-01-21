@@ -2,10 +2,10 @@ use std::ops::Mul;
 
 use arbitrary::Arbitrary;
 use arbitrary::Unstructured;
-use itertools::Itertools;
 use itertools::izip;
-use ndarray::Zip;
+use itertools::Itertools;
 use ndarray::prelude::*;
+use ndarray::Zip;
 use num_traits::ConstOne;
 use num_traits::ConstZero;
 use num_traits::Zero;
@@ -38,14 +38,14 @@ use crate::proof::Claim;
 use crate::proof::Proof;
 use crate::proof_item::ProofItem;
 use crate::proof_stream::ProofStream;
-use crate::table::{MainRow, AuxiliaryRow, QuotientSegments};
 use crate::table::auxiliary_table::Evaluable;
+use crate::table::master_table::all_quotients_combined;
+use crate::table::master_table::max_degree_with_origin;
 use crate::table::master_table::BfeSlice;
 use crate::table::master_table::MasterAuxTable;
 use crate::table::master_table::MasterMainTable;
 use crate::table::master_table::MasterTable;
-use crate::table::master_table::all_quotients_combined;
-use crate::table::master_table::max_degree_with_origin;
+use crate::table::{AuxiliaryRow, MainRow, QuotientSegments};
 use crate::test_data_dumper;
 
 /// The number of segments the quotient polynomial is split into.
@@ -250,21 +250,21 @@ impl Prover {
     ) -> Result<Proof, ProvingError> {
         // Check if test data dumping is enabled
         let test_data_dir = test_data_dumper::get_test_data_dir();
-        
+
         // Dump claim before Fiat-Shamir
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_claim(dir, claim);
         }
-        
+
         profiler!(start "Fiat-Shamir: claim" ("hash"));
         let mut proof_stream = ProofStream::new();
         proof_stream.alter_fiat_shamir_state_with(claim);
-        
+
         // Dump sponge state after claim absorption
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_sponge_state(dir, "after_claim", &proof_stream.sponge);
         }
-        
+
         profiler!(stop "Fiat-Shamir: claim");
 
         profiler!(start "derive additional parameters");
@@ -277,12 +277,13 @@ impl Prover {
             self.parameters.max_degree(padded_height),
         );
         proof_stream.enqueue(ProofItem::Log2PaddedHeight(padded_height.ilog2()));
-        
+
         // Dump parameters
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_parameters(dir, padded_height, fri.domain.length, &domains);
+            let _ =
+                test_data_dumper::dump_parameters(dir, padded_height, fri.domain.length, &domains);
         }
-        
+
         profiler!(stop "derive additional parameters");
 
         profiler!(start "main tables");
@@ -293,32 +294,33 @@ impl Prover {
             self.parameters.num_trace_randomizers,
             self.randomness_seed,
         );
-        
+
         // Dump main table after creation
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_main_table_create(dir, &master_main_table);
         }
-        
+
         profiler!(stop "create");
 
         profiler!(start "pad" ("gen"));
         master_main_table.pad();
-        
+
         // Dump main table after padding
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_main_table_pad(dir, &master_main_table);
         }
-        
+
         profiler!(stop "pad");
 
         master_main_table.maybe_low_degree_extend_all_columns();
-        
+
         // Dump main table LDE
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_main_table_lde(dir, &master_main_table);
             // trace_randomizer_column_0.json is large (full LDE), only dump if detailed mode
             if test_data_dumper::should_dump_detailed() {
-                let _ = test_data_dumper::dump_trace_randomizer_first_column(dir, &master_main_table);
+                let _ =
+                    test_data_dumper::dump_trace_randomizer_first_column(dir, &master_main_table);
             }
             // Dump randomizer coefficients for ALL columns (for full verification)
             let _ = test_data_dumper::dump_trace_randomizer_all_columns(dir, &master_main_table);
@@ -326,54 +328,59 @@ impl Prover {
 
         profiler!(start "Merkle tree");
         let main_merkle_tree = master_main_table.merkle_tree();
-        
+
         // Dump main table Merkle tree
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_main_table_merkle(dir, main_merkle_tree.root(), main_merkle_tree.num_leafs());
+            let _ = test_data_dumper::dump_main_table_merkle(
+                dir,
+                main_merkle_tree.root(),
+                main_merkle_tree.num_leafs(),
+            );
         }
-        
+
         profiler!(stop "Merkle tree");
 
         profiler!(start "Fiat-Shamir" ("hash"));
         let merkle_root_item = ProofItem::MerkleRoot(main_merkle_tree.root());
-        
+
         // Dump Merkle root encoding before enqueue
         if let Some(ref dir) = test_data_dir {
             let merkle_encoded = merkle_root_item.encode();
             let _ = test_data_dumper::dump_merkle_root_encoding(dir, &merkle_encoded);
         }
-        
+
         proof_stream.enqueue(merkle_root_item);
-        
+
         // Dump sponge state after Merkle root enqueue
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_sponge_state(dir, "after_merkle_root", &proof_stream.sponge);
+            let _ =
+                test_data_dumper::dump_sponge_state(dir, "after_merkle_root", &proof_stream.sponge);
         }
-        
+
         let challenges_scalars = proof_stream.sample_scalars(Challenges::SAMPLE_COUNT);
         let challenges = Challenges::new(challenges_scalars.clone(), claim);
-        
+
         // Dump Fiat-Shamir challenges
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_fiat_shamir_challenges(dir, &challenges_scalars);
         }
-        
+
         profiler!(stop "Fiat-Shamir");
 
         profiler!(start "extend" ("gen"));
         let mut master_aux_table = master_main_table.extend(&challenges);
-        
+
         // Dump aux table after creation
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_aux_table_create(dir, &master_aux_table);
         }
-        
+
         profiler!(stop "extend");
         profiler!(stop "main tables");
 
         profiler!(start "aux tables");
         master_aux_table.maybe_low_degree_extend_all_columns();
-        
+
         // Dump aux table LDE
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_aux_table_lde(dir, &master_aux_table);
@@ -383,36 +390,51 @@ impl Prover {
 
         profiler!(start "Merkle tree");
         let aux_merkle_tree = master_aux_table.merkle_tree();
-        
+
         // Dump aux table Merkle tree
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_aux_table_merkle(dir, aux_merkle_tree.root(), aux_merkle_tree.num_leafs());
-            
+            let _ = test_data_dumper::dump_aux_table_merkle(
+                dir,
+                aux_merkle_tree.root(),
+                aux_merkle_tree.num_leafs(),
+            );
+
             // Dump row digests for debugging (only when TVM_DEBUG_ROW_HASHES=1)
             // This helps diagnose Merkle root mismatches between Rust and C++
             let row_digests = master_aux_table.hash_all_fri_domain_rows();
-            let _ = test_data_dumper::dump_aux_row_digests(dir, &row_digests, aux_merkle_tree.num_leafs());
+            let _ = test_data_dumper::dump_aux_row_digests(
+                dir,
+                &row_digests,
+                aux_merkle_tree.num_leafs(),
+            );
         }
-        
+
         profiler!(stop "Merkle tree");
 
         profiler!(start "Fiat-Shamir" ("hash"));
         proof_stream.enqueue(ProofItem::MerkleRoot(aux_merkle_tree.root()));
-        
+
         // Dump sponge state after aux Merkle root enqueue
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_sponge_state(dir, "after_aux_merkle_root", &proof_stream.sponge);
+            let _ = test_data_dumper::dump_sponge_state(
+                dir,
+                "after_aux_merkle_root",
+                &proof_stream.sponge,
+            );
         }
 
         // Get the weights with which to compress the many quotients into one.
         let quotient_combination_weights =
             proof_stream.sample_scalars(MasterAuxTable::NUM_CONSTRAINTS);
-        
+
         // Dump quotient combination weights
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_quotient_combination_weights(dir, &quotient_combination_weights);
+            let _ = test_data_dumper::dump_quotient_combination_weights(
+                dir,
+                &quotient_combination_weights,
+            );
         }
-        
+
         profiler!(stop "Fiat-Shamir");
         profiler!(stop "aux tables");
 
@@ -425,10 +447,13 @@ impl Prover {
                 &quotient_combination_weights,
                 test_data_dir.as_ref(),
             );
-        
+
         // Dump quotient LDE info
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_quotient_lde(dir, Some(&fri_domain_quotient_segment_codewords));
+            let _ = test_data_dumper::dump_quotient_lde(
+                dir,
+                Some(&fri_domain_quotient_segment_codewords),
+            );
         }
 
         profiler!(start "hash rows of quotient segments" ("hash"));
@@ -442,23 +467,30 @@ impl Prover {
             .into_par_iter();
         let fri_domain_quotient_segment_codewords_digests =
             quotient_segments_rows.map(hash_row).collect::<Vec<_>>();
-        
+
         // Dump quotient hash rows
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_quotient_hash_rows(dir, &fri_domain_quotient_segment_codewords_digests);
+            let _ = test_data_dumper::dump_quotient_hash_rows(
+                dir,
+                &fri_domain_quotient_segment_codewords_digests,
+            );
         }
-        
+
         profiler!(stop "hash rows of quotient segments");
         profiler!(start "Merkle tree" ("hash"));
         let quot_merkle_tree = MerkleTree::par_new(&fri_domain_quotient_segment_codewords_digests)?;
         let quot_merkle_tree_root = quot_merkle_tree.root();
         proof_stream.enqueue(ProofItem::MerkleRoot(quot_merkle_tree_root));
-        
+
         // Dump quotient Merkle tree
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_quotient_merkle(dir, quot_merkle_tree_root, quot_merkle_tree.num_leafs());
+            let _ = test_data_dumper::dump_quotient_merkle(
+                dir,
+                quot_merkle_tree_root,
+                quot_merkle_tree.num_leafs(),
+            );
         }
-        
+
         profiler!(stop "Merkle tree");
 
         debug_assert_eq!(domains.fri.length, quot_merkle_tree.num_leafs());
@@ -494,13 +526,17 @@ impl Prover {
         proof_stream.enqueue(ProofItem::OutOfDomainQuotientSegments(
             out_of_domain_curr_row_quot_segments,
         ));
-        
+
         // Dump out-of-domain rows
         if let Some(ref dir) = test_data_dir {
             // Convert XFieldElement main rows to BFieldElement by extracting base field component
-            let ood_main_row_bfe: Vec<BFieldElement> = ood_main_row.iter().map(|x| x.coefficients[0]).collect();
-            let ood_next_main_row_bfe: Vec<BFieldElement> = ood_next_main_row.iter().map(|x| x.coefficients[0]).collect();
-            
+            let ood_main_row_bfe: Vec<BFieldElement> =
+                ood_main_row.iter().map(|x| x.coefficients[0]).collect();
+            let ood_next_main_row_bfe: Vec<BFieldElement> = ood_next_main_row
+                .iter()
+                .map(|x| x.coefficients[0])
+                .collect();
+
             let _ = test_data_dumper::dump_out_of_domain_rows(
                 dir,
                 out_of_domain_point_curr_row,
@@ -513,7 +549,7 @@ impl Prover {
                 &challenges,
             );
         }
-        
+
         profiler!(stop "out-of-domain rows");
 
         profiler!(start "Fiat-Shamir" ("hash"));
@@ -645,12 +681,13 @@ impl Prover {
 
         profiler!(start "combined DEEP polynomial");
         profiler!(start "sum" ("CC"));
-        
+
         // Clone deep codewords before they're moved into combined deep_codeword
         let main_and_aux_curr_row_deep_codeword_clone = main_and_aux_curr_row_deep_codeword.clone();
         let main_and_aux_next_row_deep_codeword_clone = main_and_aux_next_row_deep_codeword.clone();
-        let quotient_segments_curr_row_deep_codeword_clone = quotient_segments_curr_row_deep_codeword.clone();
-        
+        let quotient_segments_curr_row_deep_codeword_clone =
+            quotient_segments_curr_row_deep_codeword.clone();
+
         let deep_codeword = [
             main_and_aux_curr_row_deep_codeword,
             main_and_aux_next_row_deep_codeword,
@@ -665,7 +702,7 @@ impl Prover {
         );
 
         profiler!(stop "sum");
-        
+
         // Dump DEEP (deep_codeword is now available)
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_deep(dir, deep_codeword.len());
@@ -686,14 +723,14 @@ impl Prover {
                 );
             }
         }
-        
+
         // Clone deep_codeword before it's moved/shadowed (only if detailed dump enabled)
         let deep_codeword_clone_for_dump = if test_data_dumper::should_dump_detailed() {
             Some(deep_codeword.clone())
         } else {
             None
         };
-        
+
         let fri_combination_codeword = if fri_domain_is_short_domain {
             deep_codeword
         } else {
@@ -705,10 +742,13 @@ impl Prover {
             deep_codeword
         };
         assert_eq!(domains.fri.length, fri_combination_codeword.len());
-        
+
         // Dump combined DEEP polynomial
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_combined_deep_polynomial(dir, fri_combination_codeword.len());
+            let _ = test_data_dumper::dump_combined_deep_polynomial(
+                dir,
+                fri_combination_codeword.len(),
+            );
             // Detailed dump is very large, opt-in only
             if let Some(ref deep_clone) = deep_codeword_clone_for_dump {
                 let fri_combination_codeword_clone = fri_combination_codeword.clone();
@@ -721,7 +761,7 @@ impl Prover {
                 );
             }
         }
-        
+
         profiler!(stop "combined DEEP polynomial");
 
         profiler!(start "FRI");
@@ -731,22 +771,28 @@ impl Prover {
         } else {
             None
         };
-        
+
         // Dump sponge state right before FRI.prove() for C++ verification
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_sponge_state(dir, "before_fri_prove", &proof_stream.sponge);
+            let _ =
+                test_data_dumper::dump_sponge_state(dir, "before_fri_prove", &proof_stream.sponge);
         }
-        
+
         // Collect FRI debug data only if detailed dump mode is enabled
-        let should_collect_fri_debug = test_data_dir.is_some() && test_data_dumper::should_dump_detailed();
+        let should_collect_fri_debug =
+            test_data_dir.is_some() && test_data_dumper::should_dump_detailed();
         let mut fri_debug_data = if should_collect_fri_debug {
             Some(crate::fri::FriDebugData::default())
         } else {
             None
         };
-        
+
         let revealed_current_row_indices = if let Some(ref mut debug_data) = fri_debug_data {
-            fri.prove_with_debug(&fri_combination_codeword, &mut proof_stream, Some(debug_data))?
+            fri.prove_with_debug(
+                &fri_combination_codeword,
+                &mut proof_stream,
+                Some(debug_data),
+            )?
         } else {
             fri.prove(&fri_combination_codeword, &mut proof_stream)?
         };
@@ -754,7 +800,7 @@ impl Prover {
             self.parameters.num_collinearity_checks,
             revealed_current_row_indices.len()
         );
-        
+
         // Dump FRI
         if let Some(ref dir) = test_data_dir {
             let _ = test_data_dumper::dump_fri(dir, revealed_current_row_indices.len());
@@ -778,7 +824,7 @@ impl Prover {
                 }
             }
         }
-        
+
         profiler!(stop "FRI");
 
         profiler!(start "open trace leafs");
@@ -792,14 +838,14 @@ impl Prover {
             .into_iter()
             .map(|row| row.try_into().map_err(main_row_err))
             .try_collect()?;
-        
+
         // Clone before moving into proof_stream (only if detailed dump enabled)
         let revealed_main_elems_clone = if test_data_dumper::should_dump_detailed() {
             Some(revealed_main_elems.clone())
         } else {
             None
         };
-        
+
         let base_authentication_structure =
             main_merkle_tree.authentication_structure(&revealed_current_row_indices)?;
         proof_stream.enqueue(ProofItem::MasterMainTableRows(revealed_main_elems));
@@ -816,14 +862,14 @@ impl Prover {
             .into_iter()
             .map(|row| row.try_into().map_err(aux_row_err))
             .try_collect()?;
-        
+
         // Clone before moving into proof_stream (only if detailed dump enabled)
         let revealed_aux_elems_clone = if test_data_dumper::should_dump_detailed() {
             Some(revealed_aux_elems.clone())
         } else {
             None
         };
-        
+
         let aux_authentication_structure =
             aux_merkle_tree.authentication_structure(&revealed_current_row_indices)?;
         proof_stream.enqueue(ProofItem::MasterAuxTableRows(revealed_aux_elems));
@@ -840,14 +886,14 @@ impl Prover {
             .map(|&i| fri_domain_quotient_segment_codewords.row(i))
             .map(into_fixed_width_row)
             .collect_vec();
-        
+
         // Clone before moving into proof_stream (only if detailed dump enabled)
         let revealed_quotient_segments_rows_clone = if test_data_dumper::should_dump_detailed() {
             Some(revealed_quotient_segments_rows.clone())
         } else {
             None
         };
-        
+
         let revealed_quotient_authentication_structure =
             quot_merkle_tree.authentication_structure(&revealed_current_row_indices)?;
         proof_stream.enqueue(ProofItem::QuotientSegmentsElements(
@@ -856,13 +902,17 @@ impl Prover {
         proof_stream.enqueue(ProofItem::AuthenticationStructure(
             revealed_quotient_authentication_structure,
         ));
-        
+
         // Dump open trace leafs
         if let Some(ref dir) = test_data_dir {
-            let _ = test_data_dumper::dump_open_trace_leafs(dir, revealed_current_row_indices.len());
+            let _ =
+                test_data_dumper::dump_open_trace_leafs(dir, revealed_current_row_indices.len());
             // Detailed dump is moderately large, opt-in only
-            if let (Some(main_clone), Some(aux_clone), Some(quot_clone)) = 
-                (&revealed_main_elems_clone, &revealed_aux_elems_clone, &revealed_quotient_segments_rows_clone) {
+            if let (Some(main_clone), Some(aux_clone), Some(quot_clone)) = (
+                &revealed_main_elems_clone,
+                &revealed_aux_elems_clone,
+                &revealed_quotient_segments_rows_clone,
+            ) {
                 let _ = test_data_dumper::dump_open_trace_leafs_detailed(
                     dir,
                     &revealed_current_row_indices,
@@ -872,7 +922,7 @@ impl Prover {
                 );
             }
         }
-        
+
         profiler!(stop "open trace leafs");
 
         Ok(proof_stream.into())
@@ -922,7 +972,7 @@ impl Prover {
                     quotient_combination_weights,
                 );
             profiler!(stop "quotient calculation (just-in-time)");
-            
+
             // Dump quotient calculation (just-in-time)
             if let Some(dir) = test_data_dir {
                 let _ = test_data_dumper::dump_quotient_calculation(dir, false);
@@ -935,28 +985,20 @@ impl Prover {
         };
 
         profiler!(start "quotient calculation (cached)" ("CC"));
-        
+
         // Compute zerofier inverses for dumping
         use crate::table::master_table::{
-            initial_quotient_zerofier_inverse,
-            consistency_quotient_zerofier_inverse,
-            transition_quotient_zerofier_inverse,
-            terminal_quotient_zerofier_inverse,
+            consistency_quotient_zerofier_inverse, initial_quotient_zerofier_inverse,
+            terminal_quotient_zerofier_inverse, transition_quotient_zerofier_inverse,
         };
         let initial_zerofier_inverse = initial_quotient_zerofier_inverse(quotient_domain);
-        let consistency_zerofier_inverse = consistency_quotient_zerofier_inverse(
-            main_table.domains().trace,
-            quotient_domain,
-        );
-        let transition_zerofier_inverse = transition_quotient_zerofier_inverse(
-            main_table.domains().trace,
-            quotient_domain,
-        );
-        let terminal_zerofier_inverse = terminal_quotient_zerofier_inverse(
-            main_table.domains().trace,
-            quotient_domain,
-        );
-        
+        let consistency_zerofier_inverse =
+            consistency_quotient_zerofier_inverse(main_table.domains().trace, quotient_domain);
+        let transition_zerofier_inverse =
+            transition_quotient_zerofier_inverse(main_table.domains().trace, quotient_domain);
+        let terminal_zerofier_inverse =
+            terminal_quotient_zerofier_inverse(main_table.domains().trace, quotient_domain);
+
         let quotient_codeword = all_quotients_combined(
             main_quotient_domain_codewords,
             aux_quotient_domain_codewords,
@@ -968,16 +1010,17 @@ impl Prover {
         let quotient_codeword = Array1::from(quotient_codeword);
         assert_eq!(quotient_domain.length, quotient_codeword.len());
         profiler!(stop "quotient calculation (cached)");
-        
+
         // Compute first row constraint evaluation for debugging
         let first_row_constraints = if quotient_domain.length > 0 {
             let dot_product_debug = |partial_row: &[_], weights: &[_]| -> XFieldElement {
-                partial_row.iter()
+                partial_row
+                    .iter()
                     .zip(weights.iter())
                     .map(|(v, &w)| *v * w)
                     .sum()
             };
-            
+
             let row_index = 0;
             let unit_distance = quotient_domain.length / main_table.domains().trace.length;
             let next_row_index = (row_index + unit_distance) % quotient_domain.length;
@@ -985,11 +1028,11 @@ impl Prover {
             let current_row_aux = aux_quotient_domain_codewords.row(row_index);
             let next_row_main = main_quotient_domain_codewords.row(next_row_index);
             let next_row_aux = aux_quotient_domain_codewords.row(next_row_index);
-            
+
             let init_section_end = MasterAuxTable::NUM_INITIAL_CONSTRAINTS;
             let cons_section_end = init_section_end + MasterAuxTable::NUM_CONSISTENCY_CONSTRAINTS;
             let tran_section_end = cons_section_end + MasterAuxTable::NUM_TRANSITION_CONSTRAINTS;
-            
+
             let initial_constraint_values = MasterAuxTable::evaluate_initial_constraints(
                 current_row_main,
                 current_row_aux,
@@ -999,7 +1042,7 @@ impl Prover {
                 &initial_constraint_values,
                 &quotient_combination_weights[..init_section_end],
             );
-            
+
             let consistency_constraint_values = MasterAuxTable::evaluate_consistency_constraints(
                 current_row_main,
                 current_row_aux,
@@ -1009,7 +1052,7 @@ impl Prover {
                 &consistency_constraint_values,
                 &quotient_combination_weights[init_section_end..cons_section_end],
             );
-            
+
             let transition_constraint_values = MasterAuxTable::evaluate_transition_constraints(
                 current_row_main,
                 current_row_aux,
@@ -1021,7 +1064,7 @@ impl Prover {
                 &transition_constraint_values,
                 &quotient_combination_weights[cons_section_end..tran_section_end],
             );
-            
+
             let terminal_constraint_values = MasterAuxTable::evaluate_terminal_constraints(
                 current_row_main,
                 current_row_aux,
@@ -1031,12 +1074,12 @@ impl Prover {
                 &terminal_constraint_values,
                 &quotient_combination_weights[tran_section_end..],
             );
-            
+
             let quotient_value = initial_inner_product * initial_zerofier_inverse[row_index]
                 + consistency_inner_product * consistency_zerofier_inverse[row_index]
                 + transition_inner_product * transition_zerofier_inverse[row_index]
                 + terminal_inner_product * terminal_zerofier_inverse[row_index];
-            
+
             // Convert to owned vectors for passing to dump function
             Some((
                 initial_constraint_values,
@@ -1052,7 +1095,7 @@ impl Prover {
         } else {
             None
         };
-        
+
         // Dump quotient calculation (cached) - detailed version is very large, opt-in only
         if let Some(dir) = test_data_dir {
             if test_data_dumper::should_dump_detailed() {
@@ -1613,8 +1656,12 @@ impl Verifier {
         profiler!(stop "Fiat-Shamir: Claim");
 
         profiler!(start "derive additional parameters");
-        let log_2_padded_height = proof_stream.dequeue()?.try_into_log2_padded_height()?;
-        let padded_height = 1 << log_2_padded_height;
+        let log2_padded_height = proof_stream.dequeue()?.try_into_log2_padded_height()?;
+        if log2_padded_height >= 32 {
+            return Err(VerificationError::Log2PaddedHeightTooLarge);
+        };
+
+        let padded_height = 1 << log2_padded_height;
         let fri = self.parameters.fri(padded_height)?;
         let merkle_tree_height = fri.domain.length.ilog2();
 
@@ -1736,13 +1783,31 @@ impl Verifier {
         if out_of_domain_quotient_value != sum_of_evaluated_out_of_domain_quotient_segments {
             // Enhanced debug output for out-of-domain quotient mismatch
             eprintln!("=== OUT-OF-DOMAIN QUOTIENT VALUE MISMATCH DEBUG ===");
-            eprintln!("out_of_domain_point_curr_row: {}", out_of_domain_point_curr_row);
+            eprintln!(
+                "out_of_domain_point_curr_row: {}",
+                out_of_domain_point_curr_row
+            );
             eprintln!("NUM_QUOTIENT_SEGMENTS: {}", NUM_QUOTIENT_SEGMENTS);
-            eprintln!("powers_of_out_of_domain_point_curr_row: {:?}", powers_of_out_of_domain_point_curr_row);
-            eprintln!("out_of_domain_curr_row_quot_segments: {:?}", out_of_domain_curr_row_quot_segments);
-            eprintln!("Computed out_of_domain_quotient_value: {}", out_of_domain_quotient_value);
-            eprintln!("Provided sum_of_evaluated_out_of_domain_quotient_segments: {}", sum_of_evaluated_out_of_domain_quotient_segments);
-            eprintln!("Difference: {}", out_of_domain_quotient_value - sum_of_evaluated_out_of_domain_quotient_segments);
+            eprintln!(
+                "powers_of_out_of_domain_point_curr_row: {:?}",
+                powers_of_out_of_domain_point_curr_row
+            );
+            eprintln!(
+                "out_of_domain_curr_row_quot_segments: {:?}",
+                out_of_domain_curr_row_quot_segments
+            );
+            eprintln!(
+                "Computed out_of_domain_quotient_value: {}",
+                out_of_domain_quotient_value
+            );
+            eprintln!(
+                "Provided sum_of_evaluated_out_of_domain_quotient_segments: {}",
+                sum_of_evaluated_out_of_domain_quotient_segments
+            );
+            eprintln!(
+                "Difference: {}",
+                out_of_domain_quotient_value - sum_of_evaluated_out_of_domain_quotient_segments
+            );
 
             // Show detailed calculation of the sum
             eprintln!("Detailed calculation of sum:");
@@ -2156,13 +2221,11 @@ pub(crate) mod tests {
     use std::collections::HashSet;
     use std::fmt::Formatter;
 
-    use air::AIR;
     use air::challenge_id::ChallengeId::StandardInputIndeterminate;
     use air::challenge_id::ChallengeId::StandardOutputIndeterminate;
     use air::cross_table_argument::CrossTableArg;
     use air::cross_table_argument::EvalArg;
     use air::cross_table_argument::GrandCrossTableArg;
-    use air::table::TableId;
     use air::table::cascade::CascadeTable;
     use air::table::hash::HashTable;
     use air::table::jump_stack::JumpStackTable;
@@ -2173,6 +2236,7 @@ pub(crate) mod tests {
     use air::table::ram;
     use air::table::ram::RamTable;
     use air::table::u32::U32Table;
+    use air::table::TableId;
     use air::table_column::MasterAuxColumn;
     use air::table_column::MasterMainColumn;
     use air::table_column::OpStackMainColumn;
@@ -2180,6 +2244,7 @@ pub(crate) mod tests {
     use air::table_column::ProcessorAuxColumn::OutputTableEvalArg;
     use air::table_column::ProcessorMainColumn;
     use air::table_column::RamMainColumn;
+    use air::AIR;
     use assert2::assert;
     use assert2::check;
     use assert2::let_assert;
@@ -2192,8 +2257,8 @@ pub(crate) mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::TestCaseResult;
     use proptest_arbitrary_interop::arb;
-    use rand::Rng;
     use rand::prelude::*;
+    use rand::Rng;
     use strum::EnumCount;
     use strum::IntoEnumIterator;
     use test_strategy::proptest;
@@ -2201,7 +2266,6 @@ pub(crate) mod tests {
     use twenty_first::math::other::random_elements;
 
     use super::*;
-    use crate::PublicInput;
     use crate::config::CacheDecision;
     use crate::error::InstructionError;
     use crate::shared_tests::TestableProgram;
@@ -2209,11 +2273,6 @@ pub(crate) mod tests {
     use crate::table::auxiliary_table::Evaluable;
     use crate::table::master_table::MasterAuxTable;
     use crate::triton_program;
-    use crate::vm::NonDeterminism;
-    use crate::vm::VM;
-    use crate::vm::tests::ProgramForMerkleTreeUpdate;
-    use crate::vm::tests::ProgramForRecurseOrReturn;
-    use crate::vm::tests::ProgramForSpongeAndHashInstructions;
     use crate::vm::tests::property_based_test_program_for_and;
     use crate::vm::tests::property_based_test_program_for_assert_vector;
     use crate::vm::tests::property_based_test_program_for_div_mod;
@@ -2265,6 +2324,12 @@ pub(crate) mod tests {
     use crate::vm::tests::test_program_for_xx_add;
     use crate::vm::tests::test_program_for_xx_mul;
     use crate::vm::tests::test_program_hash_nop_nop_lt;
+    use crate::vm::tests::ProgramForMerkleTreeUpdate;
+    use crate::vm::tests::ProgramForRecurseOrReturn;
+    use crate::vm::tests::ProgramForSpongeAndHashInstructions;
+    use crate::vm::NonDeterminism;
+    use crate::vm::VM;
+    use crate::PublicInput;
 
     impl Stark {
         pub const LOW_SECURITY_LEVEL: usize = 32;
@@ -2356,8 +2421,9 @@ pub(crate) mod tests {
 
             let weights = StdRng::seed_from_u64(15157673430940347283)
                 .random::<[XFieldElement; MasterAuxTable::NUM_CONSTRAINTS]>();
-            let _segments =
-                Prover::compute_quotient_segments(&mut main, &mut aux, quot_dom, &ch, &weights, None);
+            let _segments = Prover::compute_quotient_segments(
+                &mut main, &mut aux, quot_dom, &ch, &weights, None,
+            );
 
             assert_eq!(original_main_trace, main.trace_table());
             assert_eq!(original_aux_trace, aux.trace_table());
@@ -2388,11 +2454,11 @@ pub(crate) mod tests {
 
         insta::assert_snapshot!(
             Tip5::hash(&proof),
-            @"17275651906185656762,\
-              13250937299792022858,\
-              05731754925513787901,\
-              05512095638892086027,\
-              08634562101877660478",
+            @"08133801845754967830,\
+              12011037839595956778,\
+              14175473847383162005,\
+              05024926201443895262,\
+              17294001373192224874",
         );
     }
 
@@ -3004,8 +3070,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_program_for_merkle_step_mem_right_sibling()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_program_for_merkle_step_mem_right_sibling(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(test_program_for_merkle_step_mem_right_sibling())
     }
 
@@ -3135,8 +3201,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_assert_vector()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_assert_vector(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_assert_vector())
     }
 
@@ -3185,8 +3251,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_log2floor()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_log2floor(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_log2floor())
     }
 
@@ -3202,8 +3268,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_pop_count()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_pop_count(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_pop_count())
     }
 
@@ -3214,20 +3280,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_random_ram_access()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_random_ram_access(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_random_ram_access())
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_xx_dot_step()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_xx_dot_step(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_xx_dot_step())
     }
 
     #[test]
-    fn constraints_evaluate_to_zero_on_property_based_test_program_for_xb_dot_step()
-    -> ConstraintResult {
+    fn constraints_evaluate_to_zero_on_property_based_test_program_for_xb_dot_step(
+    ) -> ConstraintResult {
         triton_constraints_evaluate_to_zero(property_based_test_program_for_xb_dot_step())
     }
 

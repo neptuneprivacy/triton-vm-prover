@@ -4033,13 +4033,8 @@ int main(int argc, char* argv[]) {
             }
         };
 
-        // Enqueue log2_padded_height before claim absorption (matches tasm-lib verifier order)
-        // See: tasm-lib/src/verifier/stark_verify.rs lines 145-150
-        need(1);
-        uint32_t log2_height = static_cast<uint32_t>(proof.elements[idx++].value());
-        ps.enqueue(ProofItem::make_log2_padded_height(log2_height));
-        
-        // Absorb claim into ProofStream using Rust FFI to ensure exact BFieldCodec encoding
+        // Absorb claim into ProofStream FIRST using Rust FFI to ensure exact BFieldCodec encoding
+        // Order must match Rust verifier: claim -> Log2PaddedHeight -> MerkleRoot...
         std::vector<uint64_t> program_digest_u64(5);
         for (size_t i = 0; i < 5; ++i) {
             program_digest_u64[i] = claim.program_digest[i].value();
@@ -4080,6 +4075,12 @@ int main(int argc, char* argv[]) {
         
         claim_encode_free(encoded_ptr, encoded_len);
         ps.alter_fiat_shamir_state_with(claim_encoding);
+
+        // Enqueue log2_padded_height AFTER claim absorption (matches Rust verifier order)
+        // See: triton-vm/src/stark.rs verify() - claim absorbed first, then Log2PaddedHeight dequeued
+        need(1);
+        uint32_t log2_height = static_cast<uint32_t>(proof.elements[idx++].value());
+        ps.enqueue(ProofItem::make_log2_padded_height(log2_height));
 
         auto read_digest = [&]() -> Digest {
             need(5);

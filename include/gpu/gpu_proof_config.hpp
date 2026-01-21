@@ -189,21 +189,22 @@ struct GpuProofConfig {
         GpuProofConfig cfg;
         cfg.log2_padded_height = input;
         
-        // Threshold: 2^21 (padded height = 2,097,152)
-        const uint32_t THRESHOLD_LOG2 = 21;
+        // Threshold: 2^20 (padded height = 1,048,576)
+        // Lowered from 2^21 for RTX 5090 (32GB) compatibility - RTX Pro 6000 had 96GB
+        const uint32_t THRESHOLD_LOG2 = 20;
         
         if (input >= THRESHOLD_LOG2) {
-            // Large instances (>= 2^21): Use streaming mode with RAM overflow
+            // Large instances (>= 2^20): Use streaming mode with RAM overflow
             // Environment should be set: TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4
             cfg.streaming_mode = true;
             cfg.column_batch_size = 64;
             cfg.max_gpu_memory_bytes = 96ULL * 1024 * 1024 * 1024;  // 96 GB for RTX Pro 6000
             
-            std::cout << "[GPU Config] Padded height >= 2^21 detected (log2=" << input << ")" << std::endl;
+            std::cout << "[GPU Config] Padded height >= 2^20 detected (log2=" << input << ")" << std::endl;
             std::cout << "             Using: streaming mode + RAM overflow" << std::endl;
             std::cout << "             Set: TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4" << std::endl;
         } else {
-            // Small instances (<= 2^20): Use zero-copy mode, direct GPU
+            // Small instances (< 2^20): Use zero-copy mode, direct GPU
             // Environment should be set: TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0
             cfg.streaming_mode = false;
             cfg.column_batch_size = MAIN_WIDTH;  // All columns at once
@@ -214,7 +215,7 @@ struct GpuProofConfig {
                                         ? 16ULL * 1024 * 1024 * 1024
                                         : 12ULL * 1024 * 1024 * 1024;
             
-            std::cout << "[GPU Config] Padded height <= 2^20 detected (log2=" << input << ")" << std::endl;
+            std::cout << "[GPU Config] Padded height < 2^20 detected (log2=" << input << ")" << std::endl;
             std::cout << "             Using: zero-copy mode (direct GPU)" << std::endl;
             std::cout << "             Set: TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
         }
