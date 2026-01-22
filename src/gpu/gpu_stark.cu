@@ -1582,18 +1582,18 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     // Always override user settings to ensure optimal configuration
     if (padded_height >= THRESHOLD_HEIGHT) {
         // Large instances (>= 2^21): Enable RAM overflow mode AND multi-GPU unified memory
-        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "1", 1);  // Always override
+        setenv("TRITON_GPU_USE_SYSTEM_RAM", "1", 1);  // Always override
         setenv("TRITON_PAD_SCALE_MODE", "4", 1);
         // Enable unified memory mode for multi-GPU pooling (CRITICAL for large instances!)
         use_unified_memory() = true;
         std::cout << "[GPU] Auto-config: Padded height >= 2^21 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4, unified_memory=true" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_SYSTEM_RAM=1, TRITON_PAD_SCALE_MODE=4, unified_memory=true" << std::endl;
     } else {
         // Small instances (<= 2^20): Use direct GPU mode
-        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);  // Always override
+        setenv("TRITON_GPU_USE_SYSTEM_RAM", "0", 1);  // Always override
         setenv("TRITON_PAD_SCALE_MODE", "0", 1);
         std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_SYSTEM_RAM=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
     }
     
     size_t required = estimate_gpu_memory(padded_height);
@@ -1638,7 +1638,7 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     // Check if we should use system RAM as overflow buffer
     // This works for both single-GPU and multi-GPU modes
     // CUDA unified memory (cudaMallocManaged) can use system RAM as backing store when GPU memory is insufficient
-    const char* use_ram_env = std::getenv("TRITON_GPU_USE_RAM_OVERFLOW");
+    const char* use_ram_env = std::getenv("TRITON_GPU_USE_SYSTEM_RAM");
     bool use_ram_overflow = (use_ram_env && (strcmp(use_ram_env, "1") == 0 || strcmp(use_ram_env, "true") == 0));
     
     // If GPU memory is insufficient, automatically enable RAM overflow

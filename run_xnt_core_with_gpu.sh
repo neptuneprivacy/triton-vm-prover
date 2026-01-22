@@ -29,7 +29,7 @@ export TVM_USE_TBB="${TVM_USE_TBB:-1}"                          # Enable Intel T
 export TRITON_GPU_DEGREE_LOWERING="${TRITON_GPU_DEGREE_LOWERING:-1}"  # GPU degree lowering optimization
 export TRITON_GPU_U32="${TRITON_GPU_U32:-1}"                    # Use 32-bit operations on GPU
 export TVM_USE_RUST_TRACE="${TVM_USE_RUST_TRACE:-1}"            # Use Rust trace execution
-export TRITON_GPU_USE_RAM_OVERFLOW="${TRITON_GPU_USE_RAM_OVERFLOW:-1}"  # Use system RAM as VRAM buffer
+export TRITON_GPU_USE_SYSTEM_RAM="${TRITON_GPU_USE_SYSTEM_RAM:-1}"  # Use system RAM as VRAM buffer
 export TRITON_MULTI_GPU="${TRITON_MULTI_GPU:-0}"                # Disable multi-GPU (each GPU works independently)
 export TRITON_GPU_COUNT="${TRITON_GPU_COUNT:-2}"                # Number of GPUs to use
 export TRITON_NTT_REG6STAGE="${TRITON_NTT_REG6STAGE:-1}"        # NTT register optimization (6-stage)
@@ -61,7 +61,7 @@ echo ""
 echo "GPU Optimizations:"
 echo "  Degree Lower:   $TRITON_GPU_DEGREE_LOWERING"
 echo "  U32 Mode:       $TRITON_GPU_U32"
-echo "  RAM Overflow:   $TRITON_GPU_USE_RAM_OVERFLOW"
+echo "  System RAM:     $TRITON_GPU_USE_SYSTEM_RAM"
 echo "  AUX CPU:        $TRITON_AUX_CPU"
 echo ""
 echo "NTT Optimizations:"
