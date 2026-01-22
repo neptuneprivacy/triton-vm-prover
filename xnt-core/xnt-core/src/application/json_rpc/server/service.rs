@@ -499,10 +499,15 @@ impl RpcApi for RpcServer {
                 let utxo_digest = ar.canonical_commitment;
 
                 if let Some(incoming) = known_outputs.get(&utxo_digest) {
-                    let receiving_address = state
+                    let spending_key = state
                         .wallet_state
-                        .find_spending_key_for_utxo(&incoming.utxo)
+                        .find_spending_key_for_utxo(&incoming.utxo);
+                    let receiving_address = spending_key
+                        .as_ref()
                         .and_then(|key| key.to_address().to_bech32m(network).ok());
+                    let receiver_identifier = spending_key
+                        .as_ref()
+                        .map(|key| key.receiver_identifier().value());
 
                     BlockInfoOutput {
                         n,
@@ -511,6 +516,7 @@ impl RpcApi for RpcServer {
                         sender_randomness: Some(incoming.sender_randomness),
                         receiving_address,
                         receiver_digest: Some(incoming.receiver_preimage),
+                        receiver_identifier,
                         utxo: Some(ApiUtxo::new(&incoming.utxo)),
                     }
                 } else {
@@ -521,6 +527,7 @@ impl RpcApi for RpcServer {
                         sender_randomness: None,
                         receiving_address: None,
                         receiver_digest: None,
+                        receiver_identifier: None,
                         utxo: None,
                     }
                 }
@@ -1035,14 +1042,109 @@ impl RpcApi for RpcServer {
     async fn validate_address_call(
         &self,
         request: ValidateAddressRequest,
-    ) -> RpcResult<ValidateAddressResponse> {
+        ) -> RpcResult<ValidateAddressResponse> {
         let network = self.state.cli().network;
 
         let ret = ReceivingAddress::from_bech32m(&request.address_string, network).ok();
 
-        let address = ret.and_then(|addr| addr.to_bech32m(network).ok());
+        let address = ret.as_ref().and_then(|addr| addr.to_bech32m(network).ok());
+        let address_type = ret.as_ref().map(|addr| {
+            match addr {
+                crate::state::wallet::address::ReceivingAddress::Generation(_) => "Generation",
+                crate::state::wallet::address::ReceivingAddress::Symmetric(_) => "Symmetric",
+            }
+            .to_string()
+        });
+        let receiver_identifier = ret.as_ref().map(|addr| addr.receiver_identifier().value());
+        let base_address = None;
+        let payment_id = None;
 
-        Ok(ValidateAddressResponse { address })
+        Ok(ValidateAddressResponse {
+            address,
+            address_type,
+            receiver_identifier,
+            base_address,
+            payment_id,
+        })
+    }
+
+    async fn generate_subaddress_call(
+        &self,
+        request: GenerateSubaddressRequest,
+    ) -> RpcResult<GenerateSubaddressResponse> {
+        use crate::state::wallet::address::GenerationSubAddress;
+        use tasm_lib::triton_vm::prelude::BFieldElement;
+
+        let network = self.state.cli().network;
+        let payment_id = request.payment_id;
+
+        // payment_id must be non-zero for subaddresses
+        if payment_id == 0 {
+            return Err(RpcError::Server(JsonError::Custom {
+                code: -32602,
+                message: "payment_id must be non-zero for subaddresses; use base address for payment_id 0".to_string(),
+                data: None,
+            }));
+        }
+
+        let state = self.state.lock_guard().await;
+
+        // Get the latest spending key of Generation type
+        let current_counter = state.wallet_state.spending_key_counter(KeyType::Generation);
+        let index = current_counter.checked_sub(1).ok_or_else(|| {
+            RpcError::Server(JsonError::Custom {
+                code: -32000,
+                message: "No generation keys available".to_string(),
+                data: None,
+            })
+        })?;
+        let spending_key = state
+            .wallet_state
+            .nth_spending_key(KeyType::Generation, index);
+
+        // Get the receiving address and create the subaddress
+        let receiving_address = spending_key.to_address();
+        match receiving_address {
+            crate::state::wallet::address::ReceivingAddress::Generation(gen_addr) => {
+                let subaddress =
+                    GenerationSubAddress::new(*gen_addr, BFieldElement::new(payment_id)).map_err(
+                        |e: anyhow::Error| {
+                            RpcError::Server(JsonError::Custom {
+                                code: -32000,
+                                message: e.to_string(),
+                                data: None,
+                            })
+                        },
+                    )?;
+
+                let address = subaddress.to_bech32m(network).map_err(|e| {
+                    RpcError::Server(JsonError::Custom {
+                        code: -32000,
+                        message: format!("Failed to encode subaddress: {}", e),
+                        data: None,
+                    })
+                })?;
+
+                let base_address = gen_addr.to_bech32m(network).map_err(|e| {
+                    RpcError::Server(JsonError::Custom {
+                        code: -32000,
+                        message: format!("Failed to encode base address: {}", e),
+                        data: None,
+                    })
+                })?;
+
+                Ok(GenerateSubaddressResponse {
+                    address,
+                    payment_id,
+                    base_address,
+                })
+            }
+            _ => Err(RpcError::Server(JsonError::Custom {
+                code: -32000,
+                message: "Subaddresses are only supported for Generation addresses".to_string(),
+                data: None,
+            })),
+        }
     }
 
     async fn send_tx_call(&self, request: SendTxRequest) -> RpcResult<SendTxResponse> {

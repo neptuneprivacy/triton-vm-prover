@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::future::join_all;
 use get_size2::GetSize;
 use itertools::Itertools;
 use serde::Deserialize;
@@ -82,15 +83,11 @@ impl ProofCollection {
         )
     }
 
-    pub(crate) async fn produce(
+    pub async fn produce(
         primitive_witness: &PrimitiveWitness,
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
-        mut proof_job_options: TritonVmProofJobOptions,
+        proof_job_options: TritonVmProofJobOptions,
     ) -> Result<Self, CreateProofError> {
-        // Use GPU for proofs with padded_height >= 2^15 (32,768), CPU for smaller proofs
-        // The actual decision will be made in the prover based on calculated padded height
-        // For now, don't force CPU - let the prover decide based on padded height
-        proof_job_options.job_settings.force_cpu = false;
         let (
             removal_records_integrity_witness,
             collect_lock_scripts_witness,
@@ -106,70 +103,59 @@ impl ProofCollection {
         debug!("proving, salted inputs hash: {}", salted_inputs_hash);
         debug!("proving, salted outputs hash: {}", salted_outputs_hash);
 
-        // prove
-        debug!("proving RemovalRecordsIntegrity");
-        let removal_records_integrity = RemovalRecordsIntegrity
-            .prove(
-                removal_records_integrity_witness.claim(),
-                removal_records_integrity_witness.nondeterminism(),
-                triton_vm_job_queue.clone(),
-                proof_job_options.clone(),
-            )
-            .await?;
+        // Spawn all core proofs in parallel (they are independent)
+        debug!("proving core proofs in parallel: RemovalRecordsIntegrity, CollectLockScripts, KernelToOutputs, CollectTypeScripts");
+        
+        let removal_records_integrity_fut = RemovalRecordsIntegrity.prove(
+            removal_records_integrity_witness.claim(),
+            removal_records_integrity_witness.nondeterminism(),
+            triton_vm_job_queue.clone(),
+            proof_job_options.clone(),
+        );
+        
+        let collect_lock_scripts_fut = CollectLockScripts.prove(
+            collect_lock_scripts_witness.claim(),
+            collect_lock_scripts_witness.nondeterminism(),
+            triton_vm_job_queue.clone(),
+            proof_job_options.clone(),
+        );
+        
+        let kernel_to_outputs_fut = KernelToOutputs.prove(
+            kernel_to_outputs_witness.claim(),
+            kernel_to_outputs_witness.nondeterminism(),
+            triton_vm_job_queue.clone(),
+            proof_job_options.clone(),
+        );
+        
+        let collect_type_scripts_fut = CollectTypeScripts.prove(
+            collect_type_scripts_witness.claim(),
+            collect_type_scripts_witness.nondeterminism(),
+            triton_vm_job_queue.clone(),
+            proof_job_options.clone(),
+        );
 
-        debug!("proving CollectLockScripts");
-        let collect_lock_scripts = CollectLockScripts
-            .prove(
-                collect_lock_scripts_witness.claim(),
-                collect_lock_scripts_witness.nondeterminism(),
-                triton_vm_job_queue.clone(),
-                proof_job_options.clone(),
-            )
-            .await?;
+        // Spawn lock script proofs in parallel
+        debug!("proving {} lock scripts in parallel", primitive_witness.lock_scripts_and_witnesses.len());
+        let lock_script_futs: Vec<_> = primitive_witness
+            .lock_scripts_and_witnesses
+            .iter()
+            .map(|lock_script_and_witness| {
+                lock_script_and_witness.prove(
+                    txk_mast_hash_as_input.clone(),
+                    triton_vm_job_queue.clone(),
+                    proof_job_options.clone(),
+                )
+            })
+            .collect();
 
-        debug!("proving KernelToOutputs");
-        let kernel_to_outputs = KernelToOutputs
-            .prove(
-                kernel_to_outputs_witness.claim(),
-                kernel_to_outputs_witness.nondeterminism(),
-                triton_vm_job_queue.clone(),
-                proof_job_options.clone(),
-            )
-            .await?;
-
-        debug!("proving CollectTypeScripts");
-        let collect_type_scripts = CollectTypeScripts
-            .prove(
-                collect_type_scripts_witness.claim(),
-                collect_type_scripts_witness.nondeterminism(),
-                triton_vm_job_queue.clone(),
-                proof_job_options.clone(),
-            )
-            .await?;
-
-        debug!("proving lock scripts");
-        let mut lock_scripts_halt = vec![];
-        for lock_script_and_witness in &primitive_witness.lock_scripts_and_witnesses {
-            lock_scripts_halt.push(
-                lock_script_and_witness
-                    .prove(
-                        txk_mast_hash_as_input.clone(),
-                        triton_vm_job_queue.clone(),
-                        proof_job_options.clone(),
-                    )
-                    .await?,
-            );
-        }
-
-        debug!("proving type scripts");
-        let mut type_scripts_halt = vec![];
-        for (i, tsaw) in primitive_witness
+        // Spawn type script proofs in parallel
+        debug!("proving {} type scripts in parallel", primitive_witness.type_scripts_and_witnesses.len());
+        let type_script_futs: Vec<_> = primitive_witness
             .type_scripts_and_witnesses
             .iter()
             .enumerate()
-        {
-            debug!("proving type script number {i}: {:x}", tsaw.program.hash());
-            type_scripts_halt.push(
+            .map(|(i, tsaw)| {
+                trace!("spawning type script proof {i}: {:x}", tsaw.program.hash());
                 tsaw.prove(
                     txk_mast_hash,
                     salted_inputs_hash,
@@ -177,9 +163,34 @@ impl ProofCollection {
                     triton_vm_job_queue.clone(),
                     proof_job_options.clone(),
                 )
-                .await?,
-            );
-        }
+            })
+            .collect();
+
+        // Await all proofs concurrently using join
+        let (
+            removal_records_integrity,
+            collect_lock_scripts,
+            kernel_to_outputs,
+            collect_type_scripts,
+            lock_scripts_results,
+            type_scripts_results,
+        ) = tokio::join!(
+            removal_records_integrity_fut,
+            collect_lock_scripts_fut,
+            kernel_to_outputs_fut,
+            collect_type_scripts_fut,
+            join_all(lock_script_futs),
+            join_all(type_script_futs),
+        );
+
+        // Unwrap results (propagate errors)
+        let removal_records_integrity = removal_records_integrity?;
+        let collect_lock_scripts = collect_lock_scripts?;
+        let kernel_to_outputs = kernel_to_outputs?;
+        let collect_type_scripts = collect_type_scripts?;
+        let lock_scripts_halt: Vec<_> = lock_scripts_results.into_iter().collect::<Result<_, _>>()?;
+        let type_scripts_halt: Vec<_> = type_scripts_results.into_iter().collect::<Result<_, _>>()?;
+
         info!("done proving proof collection");
 
         // collect hashes

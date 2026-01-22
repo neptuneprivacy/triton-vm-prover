@@ -57,22 +57,40 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
         let has_gpu_prover = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok() 
             || std::env::var("TRITON_GPU_PROVER_PATH").is_ok();
         
+        // Get number of GPUs from CUDA_VISIBLE_DEVICES
+        let gpu_count = std::env::var("CUDA_VISIBLE_DEVICES")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .count()
+            .max(1); // At least 1 GPU
+        
+        // Get max CPU parallel jobs (default 8, or override with TRITON_VM_MAX_CPU_JOBS)
+        let max_cpu_jobs = std::env::var("TRITON_VM_MAX_CPU_JOBS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8);
+        
         let max_concurrent_jobs = if let Ok(val) = std::env::var("TRITON_VM_MAX_CONCURRENT_JOBS") {
             // Explicit setting takes precedence
-            val.parse().unwrap_or(if has_gpu_prover { 2 } else { 1 })
+            val.parse().unwrap_or(if has_gpu_prover { gpu_count + max_cpu_jobs } else { 1 })
         } else if has_gpu_prover {
             // GPU prover available - allow concurrent execution
-            // Default to 2 for dual-GPU setup
-            2
+            // GPU jobs are serialized by GPU_MUTEXES in prover_job.rs (one per GPU)
+            // CPU jobs can run in parallel (they're faster for small proofs)
+            // Total = gpu_count (for GPU jobs) + max_cpu_jobs (for CPU jobs)
+            gpu_count + max_cpu_jobs
         } else {
             // CPU-only mode - serial execution
             1
         };
         
         tracing::info!(
-            "JobQueue: starting with max_concurrent_jobs={} (GPU prover: {})",
+            "JobQueue: starting with max_concurrent_jobs={} (GPU prover: {}, gpu_count: {}, max_cpu_jobs: {})",
             max_concurrent_jobs,
-            has_gpu_prover
+            has_gpu_prover,
+            gpu_count,
+            max_cpu_jobs
         );
         
         // create a SharedQueue that is shared between tokio tasks.

@@ -14,6 +14,8 @@
 #include "gpu/gpu_proof_context.hpp"
 #include "gpu/cuda_common.cuh"
 #include "common/debug_control.hpp"
+#include "ntt/ntt.hpp"  // For NTT::interpolate (FriPolynomial)
+#include "proof_stream/proof_stream.hpp"  // For ProofItem encoding
 #include <fstream>
 #include <iomanip>
 
@@ -207,6 +209,25 @@ __global__ void qzc_colmajor_to_rowmajor_xfe(
         size_t src_col = col * 3 + comp;
         d_rowmajor[(row * aux_width + col) * 3 + comp] = d_colmajor[src_col * n + row];
     }
+}
+
+// Scatter row-major batch columns into a full row-major table with column offset.
+__global__ void qzc_scatter_rowmajor_offset_bfe(
+    const uint64_t* d_batch_rows, // [num_rows * batch_cols]
+    size_t batch_cols,
+    uint64_t* d_full_rows,        // [num_rows * full_cols]
+    size_t full_cols,
+    size_t num_rows,
+    size_t col_offset
+) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = num_rows * batch_cols;
+    if (idx >= total) return;
+    size_t row = idx / batch_cols;
+    size_t col = idx % batch_cols;
+    size_t dst_col = col_offset + col;
+    if (dst_col >= full_cols) return;
+    d_full_rows[row * full_cols + dst_col] = d_batch_rows[idx];
 }
 
 __global__ void qzc_fill_domain_points(
@@ -966,6 +987,156 @@ __global__ void qzc_build_main_aux_codeword_kernel(
     d_out_xfe[row * 3 + 2] = acc2;
 }
 
+// Scatter contiguous digests (coset-order) into full-domain leaves at stride = num_cosets.
+// Input: d_coset_digests[k] for k in [0, coset_len)
+// Output: d_leaves[(k*num_cosets + coset_idx)] = digest
+__global__ void qzc_scatter_digests_strided_kernel(
+    const uint64_t* __restrict__ d_coset_digests, // [coset_len * 5]
+    uint64_t* __restrict__ d_leaves,              // [full_len * 5]
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets
+) {
+    size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= coset_len) return;
+    size_t out_row = k * num_cosets + coset_idx;
+    #pragma unroll
+    for (int i = 0; i < 5; ++i) {
+        d_leaves[out_row * 5 + i] = d_coset_digests[k * 5 + i];
+    }
+}
+
+__global__ void qzc_scatter_xfe_strided_kernel(
+    const uint64_t* __restrict__ d_coset_xfe, // [coset_len * 3] row-major
+    uint64_t* __restrict__ d_full_xfe,        // [full_len * 3] row-major
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets
+) {
+    size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= coset_len) return;
+    size_t out_row = k * num_cosets + coset_idx;
+    d_full_xfe[out_row * 3 + 0] = d_coset_xfe[k * 3 + 0];
+    d_full_xfe[out_row * 3 + 1] = d_coset_xfe[k * 3 + 1];
+    d_full_xfe[out_row * 3 + 2] = d_coset_xfe[k * 3 + 2];
+}
+
+__global__ void qzc_build_main_aux_codeword_coset_kernel(
+    const uint64_t* __restrict__ d_main_coset, // [main_width * coset_len] col-major
+    const uint64_t* __restrict__ d_aux_coset,  // [(aux_width*3) * coset_len] comp-major col-major
+    const uint64_t* __restrict__ d_weights,    // [(main_width + aux_width + ...)*3] XFE weights
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets,
+    size_t main_width,
+    size_t aux_width,
+    uint64_t* __restrict__ d_out_xfe           // [full_len * 3] row-major
+) {
+    size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= coset_len) return;
+    size_t out_row = k * num_cosets + coset_idx;
+
+    uint64_t acc0 = 0, acc1 = 0, acc2 = 0;
+    // main
+    for (size_t c = 0; c < main_width; ++c) {
+        uint64_t v = d_main_coset[c * coset_len + k];
+        uint64_t w0 = d_weights[c * 3 + 0];
+        uint64_t w1 = d_weights[c * 3 + 1];
+        uint64_t w2 = d_weights[c * 3 + 2];
+        uint64_t t0, t1, t2;
+        triton_vm::gpu::kernels::xfield_scalar_mul_impl(w0, w1, w2, v, t0, t1, t2);
+        acc0 = triton_vm::gpu::kernels::bfield_add_impl(acc0, t0);
+        acc1 = triton_vm::gpu::kernels::bfield_add_impl(acc1, t1);
+        acc2 = triton_vm::gpu::kernels::bfield_add_impl(acc2, t2);
+    }
+    // aux
+    size_t base = main_width;
+    for (size_t c = 0; c < aux_width; ++c) {
+        uint64_t v0 = d_aux_coset[(c * 3 + 0) * coset_len + k];
+        uint64_t v1 = d_aux_coset[(c * 3 + 1) * coset_len + k];
+        uint64_t v2 = d_aux_coset[(c * 3 + 2) * coset_len + k];
+        uint64_t w0 = d_weights[(base + c) * 3 + 0];
+        uint64_t w1 = d_weights[(base + c) * 3 + 1];
+        uint64_t w2 = d_weights[(base + c) * 3 + 2];
+        uint64_t t0, t1, t2;
+        triton_vm::gpu::kernels::xfield_mul_impl(w0, w1, w2, v0, v1, v2, t0, t1, t2);
+        acc0 = triton_vm::gpu::kernels::bfield_add_impl(acc0, t0);
+        acc1 = triton_vm::gpu::kernels::bfield_add_impl(acc1, t1);
+        acc2 = triton_vm::gpu::kernels::bfield_add_impl(acc2, t2);
+    }
+
+    d_out_xfe[out_row * 3 + 0] = acc0;
+    d_out_xfe[out_row * 3 + 1] = acc1;
+    d_out_xfe[out_row * 3 + 2] = acc2;
+}
+
+// FRUGAL: accumulate main column batches into codeword.
+__global__ void frugal_accumulate_main_codeword_kernel(
+    const uint64_t* d_main_lde_batch, // [batch_cols * n] BFE col-major
+    size_t n,
+    size_t batch_cols,
+    const uint64_t* d_weights,        // [total*3]
+    size_t weight_base,
+    size_t col_start,
+    uint64_t* d_out_xfe               // [n*3] row-major
+) {
+    size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n) return;
+    uint64_t acc0 = d_out_xfe[row * 3 + 0];
+    uint64_t acc1 = d_out_xfe[row * 3 + 1];
+    uint64_t acc2 = d_out_xfe[row * 3 + 2];
+    for (size_t c = 0; c < batch_cols; ++c) {
+        size_t col = col_start + c;
+        uint64_t v = d_main_lde_batch[c * n + row];
+        uint64_t w0 = d_weights[(weight_base + col) * 3 + 0];
+        uint64_t w1 = d_weights[(weight_base + col) * 3 + 1];
+        uint64_t w2 = d_weights[(weight_base + col) * 3 + 2];
+        uint64_t t0, t1, t2;
+        triton_vm::gpu::kernels::xfield_scalar_mul_impl(w0, w1, w2, v, t0, t1, t2);
+        acc0 = triton_vm::gpu::kernels::bfield_add_impl(acc0, t0);
+        acc1 = triton_vm::gpu::kernels::bfield_add_impl(acc1, t1);
+        acc2 = triton_vm::gpu::kernels::bfield_add_impl(acc2, t2);
+    }
+    d_out_xfe[row * 3 + 0] = acc0;
+    d_out_xfe[row * 3 + 1] = acc1;
+    d_out_xfe[row * 3 + 2] = acc2;
+}
+
+// FRUGAL: accumulate aux XFE column batches into codeword.
+__global__ void frugal_accumulate_aux_codeword_kernel(
+    const uint64_t* d_aux_lde_batch,  // [batch_xfe_cols*3 * n] BFE comp-major col-major
+    size_t n,
+    size_t batch_xfe_cols,
+    const uint64_t* d_weights,        // [total*3]
+    size_t weight_base,
+    size_t xfe_col_start,
+    uint64_t* d_out_xfe               // [n*3] row-major
+) {
+    size_t row = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n) return;
+    uint64_t acc0 = d_out_xfe[row * 3 + 0];
+    uint64_t acc1 = d_out_xfe[row * 3 + 1];
+    uint64_t acc2 = d_out_xfe[row * 3 + 2];
+    for (size_t c = 0; c < batch_xfe_cols; ++c) {
+        size_t xfe_col = xfe_col_start + c;
+        size_t base = c * 3;
+        uint64_t v0 = d_aux_lde_batch[(base + 0) * n + row];
+        uint64_t v1 = d_aux_lde_batch[(base + 1) * n + row];
+        uint64_t v2 = d_aux_lde_batch[(base + 2) * n + row];
+        uint64_t w0 = d_weights[(weight_base + xfe_col) * 3 + 0];
+        uint64_t w1 = d_weights[(weight_base + xfe_col) * 3 + 1];
+        uint64_t w2 = d_weights[(weight_base + xfe_col) * 3 + 2];
+        uint64_t t0, t1, t2;
+        triton_vm::gpu::kernels::xfield_mul_impl(w0, w1, w2, v0, v1, v2, t0, t1, t2);
+        acc0 = triton_vm::gpu::kernels::bfield_add_impl(acc0, t0);
+        acc1 = triton_vm::gpu::kernels::bfield_add_impl(acc1, t1);
+        acc2 = triton_vm::gpu::kernels::bfield_add_impl(acc2, t2);
+    }
+    d_out_xfe[row * 3 + 0] = acc0;
+    d_out_xfe[row * 3 + 1] = acc1;
+    d_out_xfe[row * 3 + 2] = acc2;
+}
+
 __global__ void qzc_build_quot_codeword_kernel(
     const uint64_t* d_quot_segments,  // [(num_segments*3) * n] col-major comps
     const uint64_t* d_weights,        // [total*3]
@@ -1324,6 +1495,20 @@ GpuStark::GpuStark() {
 
 GpuStark::~GpuStark() = default;
 
+static bool use_lde_frugal_mode(size_t padded_height) {
+    const char* frugal_env = std::getenv("TRITON_GPU_LDE_FRUGAL");
+    if (frugal_env) {
+        if (strcmp(frugal_env, "1") == 0 || strcmp(frugal_env, "true") == 0) {
+            return true;
+        }
+        if (strcmp(frugal_env, "0") == 0 || strcmp(frugal_env, "false") == 0) {
+            return false;
+        }
+    }
+    const size_t FRUGAL_THRESHOLD = 1ULL << 22; // 2^22
+    return padded_height >= FRUGAL_THRESHOLD;
+}
+
 size_t GpuStark::estimate_gpu_memory(size_t padded_height) {
     size_t fri_length = padded_height * 8;
     size_t main_width = 379;
@@ -1396,17 +1581,19 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     // Automatically configure environment based on padded height
     // Always override user settings to ensure optimal configuration
     if (padded_height >= THRESHOLD_HEIGHT) {
-        // Large instances (>= 2^21): Enable RAM overflow mode
-        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "1", 1);  // Always override
+        // Large instances (>= 2^21): Enable RAM overflow mode AND multi-GPU unified memory
+        setenv("TRITON_GPU_USE_SYSTEM_RAM", "1", 1);  // Always override
         setenv("TRITON_PAD_SCALE_MODE", "4", 1);
+        // Enable unified memory mode for multi-GPU pooling (CRITICAL for large instances!)
+        use_unified_memory() = true;
         std::cout << "[GPU] Auto-config: Padded height >= 2^21 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=1, TRITON_PAD_SCALE_MODE=4" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_SYSTEM_RAM=1, TRITON_PAD_SCALE_MODE=4, unified_memory=true" << std::endl;
     } else {
         // Small instances (<= 2^20): Use direct GPU mode
-        setenv("TRITON_GPU_USE_RAM_OVERFLOW", "0", 1);  // Always override
+        setenv("TRITON_GPU_USE_SYSTEM_RAM", "0", 1);  // Always override
         setenv("TRITON_PAD_SCALE_MODE", "0", 1);
         std::cout << "[GPU] Auto-config: Padded height <= 2^20 (log2=" << log2_height << ", height=" << padded_height << ")" << std::endl;
-        std::cout << "      Forcing TRITON_GPU_USE_RAM_OVERFLOW=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
+        std::cout << "      Forcing TRITON_GPU_USE_SYSTEM_RAM=0, TRITON_PAD_SCALE_MODE=0" << std::endl;
     }
     
     size_t required = estimate_gpu_memory(padded_height);
@@ -1451,7 +1638,7 @@ bool GpuStark::check_gpu_memory(size_t padded_height) {
     // Check if we should use system RAM as overflow buffer
     // This works for both single-GPU and multi-GPU modes
     // CUDA unified memory (cudaMallocManaged) can use system RAM as backing store when GPU memory is insufficient
-    const char* use_ram_env = std::getenv("TRITON_GPU_USE_RAM_OVERFLOW");
+    const char* use_ram_env = std::getenv("TRITON_GPU_USE_SYSTEM_RAM");
     bool use_ram_overflow = (use_ram_env && (strcmp(use_ram_env, "1") == 0 || strcmp(use_ram_env, "true") == 0));
     
     // If GPU memory is insufficient, automatically enable RAM overflow
@@ -1553,6 +1740,11 @@ Proof GpuStark::prove(
     dims_.padded_height = static_cast<size_t>(trace_domain_3[0]);
     dims_.quotient_length = static_cast<size_t>(quotient_domain_3[0]);
     dims_.fri_length = static_cast<size_t>(fri_domain_3[0]);
+
+    dims_.lde_frugal_mode = use_lde_frugal_mode(dims_.padded_height);
+    if (dims_.lde_frugal_mode) {
+        TRITON_PROFILE_COUT("      LDE FRUGAL MODE: ENABLED (streaming LDE, no cache)" << std::endl);
+    }
 
     dims_.trace_offset = trace_domain_3[1];
     dims_.trace_generator = trace_domain_3[2];
@@ -1897,7 +2089,15 @@ void GpuStark::step_initialize_fiat_shamir(const Claim& claim) {
     uint32_t log2_height = 0;
     size_t temp = dims_.padded_height;
     while (temp >>= 1) log2_height++;
-    // NOTE: Log2PaddedHeight is NOT included in Fiat-Shamir (matches Rust).
+    
+    // NOTE: After triton-vm.patch, Log2PaddedHeight IS included in Fiat-Shamir!
+    // Use ProofItem::encode() for correct encoding format
+    {
+        auto log2_item = ProofItem::make_log2_padded_height(log2_height);
+        auto encoding = log2_item.encode();
+        fs_cpu_.alter_fiat_shamir_state_with(encoding);
+    }
+    
     // Append to proof buffer (we store just the u32 value; main_gpu_full reconstructs the ProofItem)
     uint64_t log2_val = log2_height;
     cudaMemcpyAsync(ctx_->d_proof_buffer(), &log2_val, sizeof(uint64_t),
@@ -2024,24 +2224,199 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
         }
     }
 
-    // Note: Can't use scratch_a for interpolants because d_trace_colmajor IS scratch_a
-    // Allocate internally for Main LDE
-    kernels::randomized_lde_batch_gpu(
-        d_trace_colmajor,
-        width,
-        trace_len,
-        d_randomizer_coeffs,
-        num_randomizers,
-        trace_offset,
-        fri_offset,
-        dims_.fri_length,
-        ctx_->d_main_lde(),
-        ctx_->stream()
-    );
-    if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] LDE (" << width << " cols, " << trace_len << " -> " << dims_.fri_length << "): " << elapsed_ms(t_lde) << " ms\n"; }
+    if (dims_.lde_frugal_mode) {
+        // FRUGAL: 8-way coset streaming with multi-GPU support.
+        // Compute LDE on each coset (length = trace_len), hash rows, and scatter digests into full leaf array.
+        auto t_stream = std::chrono::high_resolution_clock::now();
+        const size_t fri_len = dims_.fri_length;
+        const size_t num_cosets = fri_len / trace_len;
+        if (num_cosets == 0 || fri_len % trace_len != 0) {
+            throw std::runtime_error("FRUGAL: invalid domains (fri_len must be multiple of trace_len)");
+        }
+        if (num_cosets != 8) {
+            TRITON_PROFILE_COUT("[GPU] FRUGAL: Warning: expected 8 cosets, got " << num_cosets << std::endl);
+        }
 
-    // Debug: dump first row of main LDE (row 0 across all columns)
-    if (std::getenv("TVM_DEBUG_MAIN_LDE_FIRST_ROW")) {
+        // Check for multi-GPU with peer access
+        int num_gpus = get_effective_gpu_count();
+        if (num_gpus > 2) num_gpus = 2;
+        bool multi_gpu = false; // Disabled due to memory issues
+        
+        // Verify peer access is available
+        if (multi_gpu) {
+            int can_access_0_1 = 0, can_access_1_0 = 0;
+            cudaDeviceCanAccessPeer(&can_access_0_1, 0, 1);
+            cudaDeviceCanAccessPeer(&can_access_1_0, 1, 0);
+            if (!can_access_0_1 || !can_access_1_0) {
+                multi_gpu = false;
+                TRITON_PROFILE_COUT("[GPU] Multi-GPU disabled: peer access not available\n");
+            }
+        }
+        
+        // Multi-GPU disabled due to memory access issues; use concurrent streams instead
+        multi_gpu = false;
+        
+        if (multi_gpu) {
+            // Multi-GPU: distribute cosets across GPUs
+            // GPU 0: cosets 0,1,2,3  GPU 1: cosets 4,5,6,7
+            const size_t cosets_per_gpu = num_cosets / num_gpus;
+            
+            // Create per-GPU resources - use cudaMallocManaged for cross-GPU access
+            cudaStream_t streams[2];
+            uint64_t* d_working_per_gpu[2];
+            uint64_t* d_digests_per_gpu[2];
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+                // Use managed memory for working buffers so all GPUs can access inputs
+                CUDA_CHECK(cudaMallocManaged(&d_working_per_gpu[gpu], width * trace_len * sizeof(uint64_t)));
+                CUDA_CHECK(cudaMallocManaged(&d_digests_per_gpu[gpu], trace_len * 5 * sizeof(uint64_t)));
+                // Advise CUDA to prefer this GPU for these allocations
+                
+                
+            }
+            
+            // Launch cosets in parallel across GPUs
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                size_t coset_start = gpu * cosets_per_gpu;
+                size_t coset_end = coset_start + cosets_per_gpu;
+                
+                for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                    uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                    
+                    kernels::randomized_lde_batch_gpu_preallocated(
+                        d_trace_colmajor,
+                        width,
+                        trace_len,
+                        d_randomizer_coeffs,
+                        num_randomizers,
+                        trace_offset,
+                        coset_offset,
+                        trace_len,
+                        d_working_per_gpu[gpu],
+                        d_working_per_gpu[gpu],
+                        nullptr,
+                        streams[gpu]
+                    );
+                    
+                    kernels::hash_bfield_rows_gpu(
+                        d_working_per_gpu[gpu],
+                        trace_len,
+                        width,
+                        d_digests_per_gpu[gpu],
+                        streams[gpu]
+                    );
+                    
+                    qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, streams[gpu]>>>(
+                        d_digests_per_gpu[gpu],
+                        ctx_->d_main_merkle(),
+                        trace_len,
+                        coset,
+                        num_cosets
+                    );
+                }
+            }
+            
+            // Synchronize all GPUs
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+                CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+                CUDA_CHECK(cudaFree(d_working_per_gpu[gpu]));
+                CUDA_CHECK(cudaFree(d_digests_per_gpu[gpu]));
+            }
+            CUDA_CHECK(cudaSetDevice(0)); // Return to primary GPU
+            
+            if (profile_main) { std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (multi-GPU): " << elapsed_ms(t_stream) << " ms\n"; }
+        } else {
+            // Single-GPU path with TWO-PHASE optimization
+            // Phase 1: Compute polynomial coefficients ONCE (memcpy + INTT)
+            // Phase 2: For each coset, only evaluate at coset points (fast)
+            uint64_t* d_tmp_digests = ctx_->d_scratch_b();
+            uint64_t* d_working = ctx_->d_working_main();
+            
+            // Reuse scratch buffer for coefficients to avoid extra allocations
+            uint64_t* d_coefficients = d_trace_colmajor;
+            uint64_t* d_tail_scratch = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_tail_scratch, width * trace_len * sizeof(uint64_t)));
+            
+            // Phase 1: Compute coefficients once (expensive: ~487ms)
+            if (profile_main) { std::cout << "    [Main] FRUGAL Phase 1: Computing coefficients...\n"; }
+            kernels::compute_trace_coefficients_gpu(
+                d_trace_colmajor,
+                width,
+                trace_len,
+                trace_offset,
+                d_coefficients,
+                ctx_->stream()
+            );
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+
+            // Phase 2: Evaluate at each coset (fast: ~20ms each)
+            if (profile_main) { std::cout << "    [Main] FRUGAL Phase 2: Evaluating " << num_cosets << " cosets...\n"; }
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+
+                kernels::evaluate_coset_from_coefficients_gpu(
+                    d_coefficients,
+                    width,
+                    trace_len,
+                    d_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    coset_offset,
+                    d_working,
+                    d_tail_scratch,
+                    ctx_->stream()
+                );
+
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    width,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
+
+                qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_main_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
+            
+            CUDA_CHECK(cudaFree(d_tail_scratch));
+
+            if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (2-phase): " << elapsed_ms(t_stream) << " ms\n"; }
+        }
+    } else {
+        // Note: Can't use scratch_a for interpolants because d_trace_colmajor IS scratch_a
+        // Allocate internally for Main LDE
+        kernels::randomized_lde_batch_gpu(
+            d_trace_colmajor,
+            width,
+            trace_len,
+            d_randomizer_coeffs,
+            num_randomizers,
+            trace_offset,
+            fri_offset,
+            dims_.fri_length,
+            ctx_->d_main_lde(),
+            ctx_->stream()
+        );
+        if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] LDE (" << width << " cols, " << trace_len << " -> " << dims_.fri_length << "): " << elapsed_ms(t_lde) << " ms\n"; }
+
+        // Debug: dump first row of main LDE (row 0 across all columns)
+        if (std::getenv("TVM_DEBUG_MAIN_LDE_FIRST_ROW")) {
         ctx_->synchronize();
         fprintf(stderr, "[DBG] Main LDE first row (row=0), width=%zu, fri_len=%zu:\n", width, dims_.fri_length);
         // Column-major layout: d_main_lde[col * fri_length + row]
@@ -2070,7 +2445,7 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
         }
     }
 
-    if (std::getenv("TVM_DEBUG_MAIN_LDE_COL0_POINT")) {
+        if (std::getenv("TVM_DEBUG_MAIN_LDE_COL0_POINT")) {
         // Validate one point of randomized LDE for main column 0 against Rust reference.
         const size_t idx = std::getenv("TVM_DEBUG_MAIN_LDE_IDX") ? std::atoi(std::getenv("TVM_DEBUG_MAIN_LDE_IDX")) : 12345;
         const uint64_t x = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(idx)).value();
@@ -2155,17 +2530,18 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
         }
     }
     
-    // 2. Hash LDE rows to digests
-    // The digests go into the leaf level of the Merkle tree
-    auto t_hash = std::chrono::high_resolution_clock::now();
-    kernels::hash_bfield_rows_gpu(
-        ctx_->d_main_lde(),
-        dims_.fri_length,
-        dims_.main_width,
-        ctx_->d_main_merkle(),  // Bottom of Merkle tree
-        ctx_->stream()
-    );
-    if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] hash rows (" << dims_.fri_length << " rows × " << dims_.main_width << " cols): " << elapsed_ms(t_hash) << " ms\n"; }
+        // 2. Hash LDE rows to digests
+        // The digests go into the leaf level of the Merkle tree
+        auto t_hash = std::chrono::high_resolution_clock::now();
+        kernels::hash_bfield_rows_gpu(
+            ctx_->d_main_lde(),
+            dims_.fri_length,
+            dims_.main_width,
+            ctx_->d_main_merkle(),  // Bottom of Merkle tree
+            ctx_->stream()
+        );
+        if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] hash rows (" << dims_.fri_length << " rows × " << dims_.main_width << " cols): " << elapsed_ms(t_hash) << " ms\n"; }
+    }
     
     // 3. Build Merkle tree
     auto t_merkle = std::chrono::high_resolution_clock::now();
@@ -2694,29 +3070,189 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
     uint64_t* d_lde_scratch1 = ctx_->d_scratch_a();  // For interpolants: num_cols * trace_len
     uint64_t* d_lde_scratch2 = nullptr;  // Not used anymore (fused into kernel)
     
-    kernels::randomized_lde_batch_gpu_preallocated(
-        d_aux_colmajor_components,
-        aux_width * 3,
-        trace_len,
-        d_aux_randomizer_coeffs,
-        num_randomizers,
-        trace_offset,
-        fri_offset,
-        dims_.fri_length,
-        ctx_->d_aux_lde(),
-        d_lde_scratch1,
-        d_lde_scratch2,
-        ctx_->stream()
-    );
-    
-    // Sync after LDE to catch errors early and ensure LDE completes before hash operations
-    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (dims_.lde_frugal_mode) {
+        // FRUGAL: 8-way coset streaming with multi-GPU support.
+        const size_t fri_len = dims_.fri_length;
+        const size_t num_cosets = fri_len / trace_len;
+        if (num_cosets == 0 || fri_len % trace_len != 0) {
+            throw std::runtime_error("FRUGAL AUX: invalid domains (fri_len must be multiple of trace_len)");
+        }
 
-    if (aux_profile_mode) {
-        cudaEventRecord(ev_lde, ctx_->stream());
-    }
+        // Check for multi-GPU with peer access
+        int num_gpus = get_effective_gpu_count();
+        if (num_gpus > 2) num_gpus = 2;
+        bool multi_gpu = false; // Disabled due to memory issues
+        
+        // Verify peer access is available
+        if (multi_gpu) {
+            int can_access_0_1 = 0, can_access_1_0 = 0;
+            cudaDeviceCanAccessPeer(&can_access_0_1, 0, 1);
+            cudaDeviceCanAccessPeer(&can_access_1_0, 1, 0);
+            if (!can_access_0_1 || !can_access_1_0) {
+                multi_gpu = false;
+                TRITON_PROFILE_COUT("[GPU] Multi-GPU disabled: peer access not available\n");
+            }
+        }
+        
+        // Multi-GPU disabled due to memory access issues; use concurrent streams instead
+        multi_gpu = false;
+        
+        const size_t num_cols_bfe = aux_width * 3;
 
-    if (std::getenv("TVM_DEBUG_AUX_LDE_COL0_POINT")) {
+        // Two-phase optimization: compute coefficients once (in-place on scratch_b)
+        kernels::compute_trace_coefficients_gpu(
+            d_aux_colmajor_components,
+            num_cols_bfe,
+            trace_len,
+            trace_offset,
+            d_aux_colmajor_components,
+            ctx_->stream()
+        );
+        
+        if (multi_gpu) {
+            // Multi-GPU: distribute cosets across GPUs
+            const size_t cosets_per_gpu = num_cosets / num_gpus;
+            
+            // Create per-GPU resources
+            cudaStream_t streams[2];
+            uint64_t* d_working_per_gpu[2];
+            uint64_t* d_digests_per_gpu[2];
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamCreate(&streams[gpu]));
+                CUDA_CHECK(cudaMallocManaged(&d_working_per_gpu[gpu], num_cols_bfe * trace_len * sizeof(uint64_t)));
+                CUDA_CHECK(cudaMallocManaged(&d_digests_per_gpu[gpu], trace_len * 5 * sizeof(uint64_t)));
+            }
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+            
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                size_t coset_start = gpu * cosets_per_gpu;
+                size_t coset_end = coset_start + cosets_per_gpu;
+                
+                for (size_t coset = coset_start; coset < coset_end; ++coset) {
+                    uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+                    
+                    kernels::randomized_lde_batch_gpu_preallocated(
+                        d_aux_colmajor_components,
+                        num_cols_bfe,
+                        trace_len,
+                        d_aux_randomizer_coeffs,
+                        num_randomizers,
+                        trace_offset,
+                        coset_offset,
+                        trace_len,
+                        d_working_per_gpu[gpu],
+                        d_working_per_gpu[gpu],
+                        nullptr,
+                        streams[gpu]
+                    );
+                    
+                    kernels::hash_bfield_rows_gpu(
+                        d_working_per_gpu[gpu],
+                        trace_len,
+                        num_cols_bfe,
+                        d_digests_per_gpu[gpu],
+                        streams[gpu]
+                    );
+                    
+                    qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, streams[gpu]>>>(
+                        d_digests_per_gpu[gpu],
+                        ctx_->d_aux_merkle(),
+                        trace_len,
+                        coset,
+                        num_cosets
+                    );
+                }
+            }
+            
+            // Synchronize all GPUs
+            for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                CUDA_CHECK(cudaSetDevice(gpu));
+                CUDA_CHECK(cudaStreamSynchronize(streams[gpu]));
+                CUDA_CHECK(cudaStreamDestroy(streams[gpu]));
+                CUDA_CHECK(cudaFree(d_working_per_gpu[gpu]));
+                CUDA_CHECK(cudaFree(d_digests_per_gpu[gpu]));
+            }
+            CUDA_CHECK(cudaSetDevice(0)); // Return to primary GPU
+            
+            if (aux_profile_mode) {
+                cudaEventRecord(ev_lde, ctx_->stream());
+            }
+        } else {
+            // Single-GPU path
+            uint64_t* d_working = ctx_->d_working_aux();
+            // Use scratch_a for digests + tail scratch (scratch_a is large enough)
+            uint64_t* d_tmp_digests = ctx_->d_scratch_a();
+            uint64_t* d_tail_scratch = d_tmp_digests + trace_len * 5;
+            
+            constexpr int DIGEST_BLOCK = 256;
+            int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
+
+            for (size_t coset = 0; coset < num_cosets; ++coset) {
+                uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+
+                kernels::evaluate_coset_from_coefficients_gpu(
+                    d_aux_colmajor_components,
+                    num_cols_bfe,
+                    trace_len,
+                    d_aux_randomizer_coeffs,
+                    num_randomizers,
+                    trace_offset,
+                    coset_offset,
+                    d_working,
+                    d_tail_scratch,
+                    ctx_->stream()
+                );
+
+                kernels::hash_bfield_rows_gpu(
+                    d_working,
+                    trace_len,
+                    num_cols_bfe,
+                    d_tmp_digests,
+                    ctx_->stream()
+                );
+
+                qzc_scatter_digests_strided_kernel<<<grid_digest, DIGEST_BLOCK, 0, ctx_->stream()>>>(
+                    d_tmp_digests,
+                    ctx_->d_aux_merkle(),
+                    trace_len,
+                    coset,
+                    num_cosets
+                );
+            }
+
+            if (aux_profile_mode) {
+                cudaEventRecord(ev_lde, ctx_->stream());
+            }
+        }
+    } else {
+        kernels::randomized_lde_batch_gpu_preallocated(
+            d_aux_colmajor_components,
+            aux_width * 3,
+            trace_len,
+            d_aux_randomizer_coeffs,
+            num_randomizers,
+            trace_offset,
+            fri_offset,
+            dims_.fri_length,
+            ctx_->d_aux_lde(),
+            d_lde_scratch1,
+            d_lde_scratch2,
+            ctx_->stream()
+        );
+        
+        // Sync after LDE to catch errors early and ensure LDE completes before hash operations
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+        if (aux_profile_mode) {
+            cudaEventRecord(ev_lde, ctx_->stream());
+        }
+
+        if (std::getenv("TVM_DEBUG_AUX_LDE_COL0_POINT")) {
         // Validate one point of randomized LDE for aux column 0 against Rust reference evaluation.
         const size_t idx = 12345;
         const uint64_t x = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(idx)).value();
@@ -2778,18 +3314,21 @@ void GpuStark::step_aux_table_commitment(const std::vector<uint64_t>& aux_random
                       << "\n";
         }
     }
+    } // end non-frugal LDE path
     
-    // 4. Hash rows and build Merkle tree
-    kernels::hash_xfield_rows_gpu(
-        ctx_->d_aux_lde(),
-        dims_.fri_length,
-        dims_.aux_width,
-        ctx_->d_aux_merkle(),
-        ctx_->stream()
-    );
-    
-    // Sync after hash to catch errors early
-    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (!dims_.lde_frugal_mode) {
+        // 4. Hash rows and build Merkle tree
+        kernels::hash_xfield_rows_gpu(
+            ctx_->d_aux_lde(),
+            dims_.fri_length,
+            dims_.aux_width,
+            ctx_->d_aux_merkle(),
+            ctx_->stream()
+        );
+        
+        // Sync after hash to catch errors early
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    }
     
     kernels::merkle_tree_gpu(
         ctx_->d_aux_merkle(),
@@ -2909,6 +3448,11 @@ void GpuStark::step_quotient_commitment() {
         ));
     }
 
+    if (dims_.lde_frugal_mode) {
+        step_quotient_commitment_frugal();
+        return;
+    }
+
     // 2. GPU quotient evaluation using chunked approach (works for small inputs)
     //   - evaluate constraints on quotient domain with unit_distance = quotient_len / trace_len
     //   - combine init+cons+tran+term into quotient values (XFE)
@@ -2958,6 +3502,36 @@ void GpuStark::step_quotient_commitment() {
     CUDA_CHECK(cudaMalloc(&d_win_indices, window_max * sizeof(size_t)));
     CUDA_CHECK(cudaMalloc(&d_main_window, window_max * main_width * sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&d_aux_window, window_max * aux_width * 3 * sizeof(uint64_t)));
+
+    // Frugal mode: batch buffers and col-major traces for streaming LDE
+    constexpr size_t FRUGAL_BATCH_COLS = 10; // Tip5 RATE
+    uint64_t* d_main_batch_rows = nullptr;
+    uint64_t* d_aux_batch_rows = nullptr;
+    uint64_t* d_main_colmajor = nullptr;
+    uint64_t* d_aux_colmajor_components = nullptr;
+    if (dims_.lde_frugal_mode) {
+        CUDA_CHECK(cudaMalloc(&d_main_batch_rows, window_max * FRUGAL_BATCH_COLS * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_aux_batch_rows, window_max * FRUGAL_BATCH_COLS * sizeof(uint64_t)));
+
+        // Build col-major main trace and aux component-major trace once
+        d_main_colmajor = ctx_->d_scratch_a();
+        {
+            size_t total = trace_len * main_width;
+            int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+            qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_main_trace(), d_main_colmajor, trace_len, main_width
+            );
+        }
+        d_aux_colmajor_components = ctx_->d_scratch_b();
+        {
+            constexpr int TRANSPOSE_ELEMS = 4;
+            int grid_aux = (int)(((trace_len * aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+            qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_aux_trace(), d_aux_colmajor_components, trace_len, aux_width
+            );
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    }
 
     // Zerofier inverse arrays on quotient domain (BFE)
     uint64_t* d_init_inv = nullptr;
@@ -3031,25 +3605,98 @@ void GpuStark::step_quotient_commitment() {
             eval_to_quot_stride
         );
 
-        // Gather main/aux rows on quotient domain window into row-major buffers.
-        kernels::gather_bfield_rows_colmajor_gpu(
-            ctx_->d_main_lde(),
-            d_win_indices,
-            d_main_window,
-            fri_len,
-            main_width,
-            win_len,
-            ctx_->stream()
-        );
-        kernels::gather_xfield_rows_colmajor_gpu(
-            ctx_->d_aux_lde(),
-            d_win_indices,
-            d_aux_window,
-            fri_len,
-            aux_width,
-            win_len,
-            ctx_->stream()
-        );
+        if (dims_.lde_frugal_mode) {
+            // Streaming LDE for main columns
+            for (size_t col_start = 0; col_start < main_width; col_start += FRUGAL_BATCH_COLS) {
+                const size_t batch_cols = std::min(FRUGAL_BATCH_COLS, main_width - col_start);
+                kernels::randomized_lde_batch_gpu(
+                    d_main_colmajor + col_start * trace_len,
+                    batch_cols,
+                    trace_len,
+                    ctx_->d_main_randomizer_coeffs() + col_start * dims_.num_trace_randomizers,
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    dims_.fri_offset,
+                    fri_len,
+                    ctx_->d_main_lde(), // batch buffer
+                    ctx_->stream()
+                );
+                kernels::gather_bfield_rows_colmajor_gpu(
+                    ctx_->d_main_lde(),
+                    d_win_indices,
+                    d_main_batch_rows,
+                    fri_len,
+                    batch_cols,
+                    win_len,
+                    ctx_->stream()
+                );
+                int grid_scatter = (int)((win_len * batch_cols + BLOCK - 1) / BLOCK);
+                qzc_scatter_rowmajor_offset_bfe<<<grid_scatter, BLOCK, 0, ctx_->stream()>>>(
+                    d_main_batch_rows,
+                    batch_cols,
+                    d_main_window,
+                    main_width,
+                    win_len,
+                    col_start
+                );
+            }
+
+            // Streaming LDE for aux component columns (BFE view)
+            const size_t aux_cols_bfe = aux_width * 3;
+            for (size_t col_start = 0; col_start < aux_cols_bfe; col_start += FRUGAL_BATCH_COLS) {
+                const size_t batch_cols = std::min(FRUGAL_BATCH_COLS, aux_cols_bfe - col_start);
+                kernels::randomized_lde_batch_gpu(
+                    d_aux_colmajor_components + col_start * trace_len,
+                    batch_cols,
+                    trace_len,
+                    ctx_->d_aux_randomizer_coeffs() + col_start * dims_.num_trace_randomizers,
+                    dims_.num_trace_randomizers,
+                    dims_.trace_offset,
+                    dims_.fri_offset,
+                    fri_len,
+                    ctx_->d_aux_lde(), // batch buffer
+                    ctx_->stream()
+                );
+                kernels::gather_bfield_rows_colmajor_gpu(
+                    ctx_->d_aux_lde(),
+                    d_win_indices,
+                    d_aux_batch_rows,
+                    fri_len,
+                    batch_cols,
+                    win_len,
+                    ctx_->stream()
+                );
+                int grid_scatter = (int)((win_len * batch_cols + BLOCK - 1) / BLOCK);
+                qzc_scatter_rowmajor_offset_bfe<<<grid_scatter, BLOCK, 0, ctx_->stream()>>>(
+                    d_aux_batch_rows,
+                    batch_cols,
+                    d_aux_window,
+                    aux_width * 3,
+                    win_len,
+                    col_start
+                );
+            }
+        } else {
+            // Gather main/aux rows on quotient domain window into row-major buffers.
+            kernels::gather_bfield_rows_colmajor_gpu(
+                ctx_->d_main_lde(),
+                d_win_indices,
+                d_main_window,
+                fri_len,
+                main_width,
+                win_len,
+                ctx_->stream()
+            );
+            kernels::gather_xfield_rows_colmajor_gpu(
+                ctx_->d_aux_lde(),
+                d_win_indices,
+                d_aux_window,
+                fri_len,
+                aux_width,
+                win_len,
+                ctx_->stream()
+            );
+        }
         if (profile_quot) { ctx_->synchronize(); gather_time += elapsed_ms(t_chunk_gather); }
 
         auto t_chunk_init = std::chrono::high_resolution_clock::now();
@@ -3162,7 +3809,7 @@ void GpuStark::step_quotient_commitment() {
         }
     }
 
-    if (std::getenv("TVM_DEBUG_QUOT_ROW_CHECK")) {
+    if (std::getenv("TVM_DEBUG_QUOT_ROW_CHECK") && !dims_.lde_frugal_mode) {
         // Check: quotient at a chosen quotient-domain index computed from CPU constraint evaluators
         // matches GPU kernel output at that index. This helps detect row-dependent kernel bugs.
         const size_t row0 = 12345 % quotient_len;
@@ -3518,6 +4165,8 @@ void GpuStark::step_quotient_commitment() {
     CUDA_CHECK(cudaFree(d_win_indices));
     CUDA_CHECK(cudaFree(d_main_window));
     CUDA_CHECK(cudaFree(d_aux_window));
+    if (d_main_batch_rows) CUDA_CHECK(cudaFree(d_main_batch_rows));
+    if (d_aux_batch_rows) CUDA_CHECK(cudaFree(d_aux_batch_rows));
     CUDA_CHECK(cudaFree(d_domain_x));
     CUDA_CHECK(cudaFree(d_init_inv));
     CUDA_CHECK(cudaFree(d_cons_inv));
@@ -3529,6 +4178,381 @@ void GpuStark::step_quotient_commitment() {
     CUDA_CHECK(cudaFree(d_out_tran));
     for (int i = 0; i < 4; ++i) CUDA_CHECK(cudaFree(d_tran_parts_window[i]));
     CUDA_CHECK(cudaFree(d_quotient));
+}
+
+void GpuStark::step_quotient_commitment_frugal() {
+    // Frugal quotient: compute main/aux LDE on the quotient domain one coset at a time (len = padded_height),
+    // evaluate constraints in windows, scatter quotient evaluations into the full quotient domain,
+    // then segmentify+LDE and commit as usual.
+    const bool profile_quot = TRITON_PROFILE_ENABLED();
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto elapsed_ms = [&t0]() {
+        auto now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - t0).count();
+        t0 = now;
+        return ms;
+    };
+
+    constexpr int BLOCK = 256;
+    const size_t quotient_len = dims_.quotient_length;
+    const size_t fri_len = dims_.fri_length;
+    const size_t trace_len = dims_.padded_height;
+    const size_t main_width = dims_.main_width;
+    const size_t aux_width = dims_.aux_width;
+    const size_t num_segments = dims_.num_quotient_segments;
+
+    if (quotient_len == 0 || trace_len == 0 || (quotient_len % trace_len) != 0) {
+        throw std::runtime_error("FRUGAL quotient: quotient_len must be multiple of trace_len");
+    }
+    const size_t num_cosets = quotient_len / trace_len; // typically 8
+    if (num_cosets == 0) {
+        throw std::runtime_error("FRUGAL quotient: num_cosets is zero");
+    }
+
+    // Transpose main trace to col-major into scratch_a (needed as input to LDE kernel).
+    uint64_t* d_main_colmajor = ctx_->d_scratch_a(); // [main_width * trace_len]
+    {
+        size_t total = trace_len * main_width;
+        int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+        qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_main_trace(), d_main_colmajor, trace_len, main_width
+        );
+    }
+
+    // Transpose aux trace to component-major col-major into scratch_b.
+    uint64_t* d_aux_colmajor_components = ctx_->d_scratch_b(); // [(aux_width*3) * trace_len]
+    {
+        constexpr int TRANSPOSE_ELEMS = 4;
+        int grid_aux = (int)(((trace_len * aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+        qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_aux_trace(), d_aux_colmajor_components, trace_len, aux_width
+        );
+    }
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (profile_quot) { std::cout << "    [Quot FRUGAL] transpose main+aux: " << elapsed_ms() << " ms\n"; }
+
+    // Two-phase optimization: compute coefficients once (in-place on scratch buffers)
+    kernels::compute_trace_coefficients_gpu(
+        d_main_colmajor,
+        main_width,
+        trace_len,
+        dims_.trace_offset,
+        d_main_colmajor,
+        ctx_->stream()
+    );
+    kernels::compute_trace_coefficients_gpu(
+        d_aux_colmajor_components,
+        aux_width * 3,
+        trace_len,
+        dims_.trace_offset,
+        d_aux_colmajor_components,
+        ctx_->stream()
+    );
+
+    // Allocate full quotient codeword on quotient domain: [quotient_len * 3]
+    uint64_t* d_quotient_full = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_quotient_full, quotient_len * 3 * sizeof(uint64_t)));
+
+    // Tail scratch buffers for coset evaluation (freed at end of step)
+    uint64_t* d_main_tail = nullptr;
+    uint64_t* d_aux_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
+
+    // Per-coset buffers (reused each coset)
+    uint64_t* d_domain_x = nullptr;
+    uint64_t* d_init_inv = nullptr;
+    uint64_t* d_cons_inv = nullptr;
+    uint64_t* d_tran_inv = nullptr;
+    uint64_t* d_term_inv = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_domain_x, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_init_inv, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_cons_inv, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_tran_inv, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_term_inv, trace_len * sizeof(uint64_t)));
+
+    constexpr size_t QUOT_CHUNK = 65536;
+    const size_t window_max = std::min(QUOT_CHUNK + 1, trace_len);
+    size_t* d_win_indices = nullptr;
+    uint64_t* d_main_window = nullptr;
+    uint64_t* d_aux_window = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_win_indices, window_max * sizeof(size_t)));
+    CUDA_CHECK(cudaMalloc(&d_main_window, window_max * main_width * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_window, window_max * aux_width * 3 * sizeof(uint64_t)));
+
+    // Constraint outputs (per coset)
+    uint64_t* d_out_init = nullptr;
+    uint64_t* d_out_cons = nullptr;
+    uint64_t* d_out_term = nullptr;
+    uint64_t* d_out_tran = nullptr;
+    uint64_t* d_tran_parts_window[4]{nullptr, nullptr, nullptr, nullptr};
+    uint64_t* d_quotient_coset = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_out_init, trace_len * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_out_cons, trace_len * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_out_term, trace_len * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_out_tran, trace_len * 3 * sizeof(uint64_t)));
+    for (int i = 0; i < 4; ++i) CUDA_CHECK(cudaMalloc(&d_tran_parts_window[i], window_max * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_quotient_coset, trace_len * 3 * sizeof(uint64_t)));
+
+    int grid_trace = (int)((trace_len + BLOCK - 1) / BLOCK);
+    uint64_t trace_gen_inv = BFieldElement(dims_.trace_generator).inverse().value();
+    uint64_t trace_offset_for_zerofier = 1;
+    uint64_t trace_offset_pow = 1;
+
+    // Evaluate cosets
+    for (size_t coset = 0; coset < num_cosets; ++coset) {
+        // coset_offset on quotient domain: quotient_offset * quotient_gen^coset
+        uint64_t coset_offset = (BFieldElement(dims_.quotient_offset) * BFieldElement(dims_.quotient_generator).pow(coset)).value();
+
+        // domain_x for this coset uses generator = trace_generator (== quotient_generator^num_cosets)
+        qzc_fill_domain_points<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
+            d_domain_x, trace_len, coset_offset, dims_.trace_generator
+        );
+        qzc_compute_zerofier_arrays<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
+            d_domain_x,
+            trace_len,
+            (uint64_t)trace_len,
+            trace_offset_for_zerofier,
+            trace_offset_pow,
+            trace_gen_inv,
+            d_init_inv,
+            d_cons_inv,
+            d_tran_inv,
+            d_term_inv
+        );
+
+        // Evaluate main/aux on this coset from pre-computed coefficients.
+        kernels::evaluate_coset_from_coefficients_gpu(
+            d_main_colmajor,
+            main_width,
+            trace_len,
+            ctx_->d_main_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            ctx_->d_working_main(),
+            d_main_tail,
+            ctx_->stream()
+        );
+
+        kernels::evaluate_coset_from_coefficients_gpu(
+            d_aux_colmajor_components,
+            aux_width * 3,
+            trace_len,
+            ctx_->d_aux_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            ctx_->d_working_aux(),
+            d_aux_tail,
+            ctx_->stream()
+        );
+
+        // Evaluate constraints chunk-by-chunk on this coset (unit_distance=1, stride=1).
+        for (size_t start = 0; start < trace_len; start += QUOT_CHUNK) {
+            const size_t chunk_len = std::min(QUOT_CHUNK, trace_len - start);
+            const size_t win_len = std::min(chunk_len + 1, window_max);
+            int grid_len = (int)((win_len + BLOCK - 1) / BLOCK);
+
+            qzc_fill_strided_indices_offset_wrap<<<grid_len, BLOCK, 0, ctx_->stream()>>>(
+                d_win_indices,
+                win_len,
+                start,
+                trace_len,
+                1
+            );
+
+            kernels::gather_bfield_rows_colmajor_gpu(
+                ctx_->d_working_main(),
+                d_win_indices,
+                d_main_window,
+                trace_len,
+                main_width,
+                win_len,
+                ctx_->stream()
+            );
+            kernels::gather_xfield_rows_colmajor_gpu(
+                ctx_->d_working_aux(),
+                d_win_indices,
+                d_aux_window,
+                trace_len,
+                aux_width,
+                win_len,
+                ctx_->stream()
+            );
+
+            kernels::compute_quotient_split_partial(
+                d_main_window,
+                main_width,
+                d_aux_window,
+                aux_width,
+                chunk_len,
+                ctx_->d_challenges(),
+                ctx_->d_quotient_weights(),
+                d_init_inv + start,
+                d_cons_inv + start,
+                d_term_inv + start,
+                d_out_init + start * 3,
+                d_out_cons + start * 3,
+                d_out_term + start * 3,
+                ctx_->stream()
+            );
+
+            kernels::launch_quotient_transition_part0(
+                d_main_window, main_width,
+                d_aux_window, aux_width,
+                win_len, 1,
+                ctx_->d_challenges(), ctx_->d_quotient_weights(),
+                d_tran_parts_window[0],
+                ctx_->stream()
+            );
+            kernels::launch_quotient_transition_part1(
+                d_main_window, main_width,
+                d_aux_window, aux_width,
+                win_len, 1,
+                ctx_->d_challenges(), ctx_->d_quotient_weights(),
+                d_tran_parts_window[1],
+                ctx_->stream()
+            );
+            kernels::launch_quotient_transition_part2(
+                d_main_window, main_width,
+                d_aux_window, aux_width,
+                win_len, 1,
+                ctx_->d_challenges(), ctx_->d_quotient_weights(),
+                d_tran_parts_window[2],
+                ctx_->stream()
+            );
+            kernels::launch_quotient_transition_part3(
+                d_main_window, main_width,
+                d_aux_window, aux_width,
+                win_len, 1,
+                ctx_->d_challenges(), ctx_->d_quotient_weights(),
+                d_tran_parts_window[3],
+                ctx_->stream()
+            );
+
+            kernels::fused_sum4_scale_transition(
+                d_tran_parts_window[0],
+                d_tran_parts_window[1],
+                d_tran_parts_window[2],
+                d_tran_parts_window[3],
+                d_tran_inv + start,
+                chunk_len,
+                d_out_tran + start * 3,
+                ctx_->stream()
+            );
+        }
+
+        kernels::combine_quotient_results(
+            d_out_init, d_out_cons, d_out_tran, d_out_term,
+            trace_len,
+            d_quotient_coset,
+            ctx_->stream()
+        );
+
+        // Scatter coset quotient evaluations into the full quotient-domain array.
+        int grid_sc = (int)((trace_len + BLOCK - 1) / BLOCK);
+        qzc_scatter_xfe_strided_kernel<<<grid_sc, BLOCK, 0, ctx_->stream()>>>(
+            d_quotient_coset,
+            d_quotient_full,
+            trace_len,
+            coset,
+            num_cosets
+        );
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (profile_quot) { std::cout << "    [Quot FRUGAL] constraints+scatter: " << elapsed_ms() << " ms\n"; }
+
+    // Segmentify + LDE into quotient segments on FRI domain (same as non-frugal)
+    auto t_seg = std::chrono::high_resolution_clock::now();
+    uint64_t quotient_offset_inv = BFieldElement(dims_.quotient_offset).inverse().value();
+    kernels::quotient_segmentify_and_lde_gpu(
+        d_quotient_full,
+        quotient_len,
+        num_segments,
+        quotient_offset_inv,
+        dims_.fri_offset,
+        fri_len,
+        ctx_->d_quotient_segment_coeffs(),
+        ctx_->d_quotient_segments(),
+        ctx_->stream(),
+        ctx_->d_scratch_a(),
+        ctx_->d_scratch_b()
+    );
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (profile_quot) {
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_seg).count();
+        std::cout << "    [Quot FRUGAL] segmentify+LDE: " << ms << " ms\n";
+    }
+
+    // Hash quotient segment rows and build Merkle tree
+    auto t_hash = std::chrono::high_resolution_clock::now();
+    kernels::hash_xfield_rows_gpu(
+        ctx_->d_quotient_segments(),
+        fri_len,
+        num_segments,
+        ctx_->d_quotient_merkle(),
+        ctx_->stream()
+    );
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    kernels::merkle_tree_gpu(
+        ctx_->d_quotient_merkle(),
+        ctx_->d_quotient_merkle(),
+        fri_len,
+        ctx_->stream()
+    );
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+    if (profile_quot) {
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_hash).count();
+        std::cout << "    [Quot FRUGAL] hash+merkle: " << ms << " ms\n";
+    }
+
+    // Absorb encoded MerkleRoot proof item: [0] + digest(5)
+    uint64_t* d_root = ctx_->d_quotient_merkle() + (2 * fri_len - 2) * 5;
+    uint64_t* d_enc = ctx_->d_scratch_b(); // at least 6 u64
+    uint64_t disc = 0;
+    CUDA_CHECK(cudaMemcpyAsync(d_enc, &disc, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx_->stream()));
+    CUDA_CHECK(cudaMemcpyAsync(d_enc + 1, d_root, 5 * sizeof(uint64_t), cudaMemcpyDeviceToDevice, ctx_->stream()));
+    kernels::fs_absorb_device_gpu(ctx_->d_sponge_state(), d_enc, 6, ctx_->stream());
+
+    CUDA_CHECK(cudaMemcpyAsync(
+        ctx_->d_proof_buffer() + proof_size_,
+        d_root,
+        5 * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        ctx_->stream()
+    ));
+    proof_size_ += 5;
+
+    // CPU transcript: enqueue MerkleRoot (tiny D2H)
+    {
+        std::array<uint64_t, 5> h{};
+        CUDA_CHECK(cudaMemcpyAsync(h.data(), d_root, 5 * sizeof(uint64_t), cudaMemcpyDeviceToHost, ctx_->stream()));
+        ctx_->synchronize();
+        Digest root;
+        for (size_t i = 0; i < 5; ++i) root[i] = BFieldElement(h[i]);
+        fs_cpu_.enqueue(ProofItem::merkle_root(root));
+    }
+
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_quotient_full));
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
+    CUDA_CHECK(cudaFree(d_domain_x));
+    CUDA_CHECK(cudaFree(d_init_inv));
+    CUDA_CHECK(cudaFree(d_cons_inv));
+    CUDA_CHECK(cudaFree(d_tran_inv));
+    CUDA_CHECK(cudaFree(d_term_inv));
+    CUDA_CHECK(cudaFree(d_win_indices));
+    CUDA_CHECK(cudaFree(d_main_window));
+    CUDA_CHECK(cudaFree(d_aux_window));
+    CUDA_CHECK(cudaFree(d_out_init));
+    CUDA_CHECK(cudaFree(d_out_cons));
+    CUDA_CHECK(cudaFree(d_out_term));
+    CUDA_CHECK(cudaFree(d_out_tran));
+    for (int i = 0; i < 4; ++i) CUDA_CHECK(cudaFree(d_tran_parts_window[i]));
+    CUDA_CHECK(cudaFree(d_quotient_coset));
 }
 
 void GpuStark::step_out_of_domain_evaluation() {
@@ -4509,6 +5533,10 @@ void GpuStark::step_out_of_domain_evaluation() {
 // ============================================================================
 
 void GpuStark::step_fri_protocol() {
+    if (dims_.lde_frugal_mode) {
+        step_fri_protocol_frugal();
+        return;
+    }
     // Build the real initial FRI codeword on GPU:
     // - sample linear weights
     // - form main+aux combination codeword on FRI domain
@@ -4538,7 +5566,7 @@ void GpuStark::step_fri_protocol() {
     // Unified-memory perf: prefetch the big FRI-domain tables to the active GPU before
     // building the DEEP/FRI input codeword. This avoids massive UM page-fault overhead.
     // Enable via TRITON_PREFETCH_FRI=1.
-    if (triton_vm::gpu::use_unified_memory() && std::getenv("TRITON_PREFETCH_FRI")) {
+    if (!dims_.lde_frugal_mode && triton_vm::gpu::use_unified_memory() && std::getenv("TRITON_PREFETCH_FRI")) {
         int dev = 0;
         CUDA_CHECK(cudaGetDevice(&dev));
         cudaMemLocation location;
@@ -4605,15 +5633,94 @@ void GpuStark::step_fri_protocol() {
     );
 
     // build main+aux codeword from LDE tables (FRI domain)
-    qzc_build_main_aux_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
-        ctx_->d_main_lde(),
-        ctx_->d_aux_lde(),
-        d_weights,
-        n,
-        main_width,
-        aux_width,
-        d_main_aux_codeword
-    );
+    if (dims_.lde_frugal_mode) {
+        // FRUGAL: stream LDE batches and accumulate into codeword.
+        constexpr size_t FRUGAL_BATCH_COLS = 10;
+        CUDA_CHECK(cudaMemsetAsync(d_main_aux_codeword, 0, n * 3 * sizeof(uint64_t), ctx_->stream()));
+
+        // Build col-major traces for batch LDE
+        uint64_t* d_main_colmajor = ctx_->d_scratch_a();
+        {
+            size_t total = dims_.padded_height * main_width;
+            int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+            qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_main_trace(), d_main_colmajor, dims_.padded_height, main_width
+            );
+        }
+        uint64_t* d_aux_colmajor_components = ctx_->d_scratch_b();
+        {
+            constexpr int TRANSPOSE_ELEMS = 4;
+            int grid_aux = (int)(((dims_.padded_height * aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+            qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_aux_trace(), d_aux_colmajor_components, dims_.padded_height, aux_width
+            );
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+        // Accumulate main columns
+        for (size_t col_start = 0; col_start < main_width; col_start += FRUGAL_BATCH_COLS) {
+            const size_t batch_cols = std::min(FRUGAL_BATCH_COLS, main_width - col_start);
+            kernels::randomized_lde_batch_gpu(
+                d_main_colmajor + col_start * dims_.padded_height,
+                batch_cols,
+                dims_.padded_height,
+                ctx_->d_main_randomizer_coeffs() + col_start * dims_.num_trace_randomizers,
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                dims_.fri_offset,
+                n,
+                ctx_->d_main_lde(),
+                ctx_->stream()
+            );
+            frugal_accumulate_main_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_main_lde(),
+                n,
+                batch_cols,
+                d_weights,
+                0,
+                col_start,
+                d_main_aux_codeword
+            );
+        }
+
+        // Accumulate aux columns (XFE)
+        for (size_t col_start = 0; col_start < aux_width; col_start += FRUGAL_BATCH_COLS) {
+            const size_t batch_xfe_cols = std::min(FRUGAL_BATCH_COLS, aux_width - col_start);
+            const size_t comp_start = col_start * 3;
+            const size_t batch_cols_bfe = batch_xfe_cols * 3;
+            kernels::randomized_lde_batch_gpu(
+                d_aux_colmajor_components + comp_start * dims_.padded_height,
+                batch_cols_bfe,
+                dims_.padded_height,
+                ctx_->d_aux_randomizer_coeffs() + comp_start * dims_.num_trace_randomizers,
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                dims_.fri_offset,
+                n,
+                ctx_->d_aux_lde(),
+                ctx_->stream()
+            );
+            frugal_accumulate_aux_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_aux_lde(),
+                n,
+                batch_xfe_cols,
+                d_weights,
+                main_width,
+                col_start,
+                d_main_aux_codeword
+            );
+        }
+    } else {
+        qzc_build_main_aux_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_main_lde(),
+            ctx_->d_aux_lde(),
+            d_weights,
+            n,
+            main_width,
+            aux_width,
+            d_main_aux_codeword
+        );
+    }
 
     // build quotient combination codeword from quotient segments on FRI domain
     qzc_build_quot_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
@@ -4765,7 +5872,7 @@ void GpuStark::step_fri_protocol() {
     if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_loop, ctx_->stream())); }
 
     // Append FriCodeword (last round codeword) as raw XFE triplets.
-    // This is not absorbed into Fiat-Shamir (matches ProofItem::include_in_fiat_shamir_heuristic()).
+    // FriCodeword is NOT absorbed into Fiat-Shamir.
     const uint64_t* d_last_codeword = ctx_->d_fri_codeword(dims_.num_fri_rounds);
     // current_size is the last domain length after folding
     CUDA_CHECK(cudaMemcpyAsync(
@@ -4776,6 +5883,78 @@ void GpuStark::step_fri_protocol() {
         ctx_->stream()
     ));
     proof_size_ += current_size * 3;
+
+    // ---------------------------------------------------------------------
+    // Update Fiat-Shamir state with FriPolynomial (interpolated last codeword)
+    // After triton-vm.patch, FriPolynomial IS absorbed into Fiat-Shamir!
+    // 
+    // IMPORTANT: The GPU sponge state has been updated during FRI rounds
+    // (absorbing round roots, sampling folding challenges). We must download
+    // the current GPU state, absorb FriPolynomial, then upload the result.
+    // We cannot use fs_cpu_ because it hasn't tracked FRI round operations.
+    // ---------------------------------------------------------------------
+    {
+        // 1. Download last codeword to CPU
+        std::vector<uint64_t> h_codeword(current_size * 3);
+        CUDA_CHECK(cudaMemcpy(h_codeword.data(), d_last_codeword, 
+            current_size * 3 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 2. Extract 3 BFieldElement components
+        std::vector<BFieldElement> comp0(current_size), comp1(current_size), comp2(current_size);
+        for (size_t i = 0; i < current_size; ++i) {
+            comp0[i] = BFieldElement(h_codeword[i * 3 + 0]);
+            comp1[i] = BFieldElement(h_codeword[i * 3 + 1]);
+            comp2[i] = BFieldElement(h_codeword[i * 3 + 2]);
+        }
+        
+        // 3. Interpolate each component (INTT)
+        auto coeffs0 = NTT::interpolate(comp0);
+        auto coeffs1 = NTT::interpolate(comp1);
+        auto coeffs2 = NTT::interpolate(comp2);
+        
+        // 4. Combine back and trim trailing zeros
+        std::vector<XFieldElement> polynomial(coeffs0.size());
+        for (size_t i = 0; i < coeffs0.size(); ++i) {
+            polynomial[i] = XFieldElement(coeffs0[i], coeffs1[i], coeffs2[i]);
+        }
+        // Trim trailing zeros (matches Rust Polynomial encoding)
+        while (!polynomial.empty() && polynomial.back() == XFieldElement::zero()) {
+            polynomial.pop_back();
+        }
+        
+        // 5. Create ProofItem and use proper encoding
+        auto poly_item = ProofItem::fri_polynomial(polynomial);
+        auto poly_encoding = poly_item.encode();
+        
+        // 6. Download current GPU sponge state (has all FRI round operations)
+        std::array<uint64_t, 16> h_sponge{};
+        CUDA_CHECK(cudaMemcpy(h_sponge.data(), ctx_->d_sponge_state(),
+            16 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 7. Create a temporary ProofStream with this state and absorb FriPolynomial
+        ProofStream temp_ps;
+        Tip5 temp_tip5;
+        for (size_t i = 0; i < 16; ++i) {
+            temp_tip5.state[i] = BFieldElement(h_sponge[i]);
+        }
+        temp_ps.set_sponge_state(temp_tip5);
+        temp_ps.alter_fiat_shamir_state_with(poly_encoding);
+        
+        // 8. Upload updated sponge state back to GPU
+        for (size_t i = 0; i < 16; ++i) {
+            h_sponge[i] = temp_ps.sponge().state[i].value();
+        }
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_sponge_state(),
+            h_sponge.data(),
+            16 * sizeof(uint64_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+        
+        // NOTE: FriPolynomial is NOT written to proof buffer; main_gpu_full.cpp
+        // will compute it from FriCodeword and enqueue to ProofStream.
+    }
 
     // ---------------------------------------------------------------------
     // Query phase: sample indices and append FriResponse items (payloads)
@@ -4930,51 +6109,705 @@ void GpuStark::step_fri_protocol() {
     // - Query sampling and FriResponse openings (plus trace openings/auth paths)
 }
 
+void GpuStark::step_fri_protocol_frugal() {
+    // Frugal FRI: build main+aux codeword on the FRI domain without cached FRI-domain LDE tables.
+    // We stream 8 cosets (each of length padded_height) into ctx_->d_working_{main,aux} and fill the
+    // full-domain main+aux combination codeword row-major.
+    const size_t n = dims_.fri_length;
+    const size_t trace_len = dims_.padded_height;
+    const size_t num_cosets = n / trace_len;
+    if (trace_len == 0 || n == 0 || (n % trace_len) != 0) {
+        throw std::runtime_error("FRUGAL FRI: invalid domains (fri_len must be multiple of trace_len)");
+    }
+
+    constexpr int BLOCK = 256;
+    const int grid_n = (int)((n + BLOCK - 1) / BLOCK);
+    const int grid_trace = (int)((trace_len + BLOCK - 1) / BLOCK);
+
+    const bool profile_fri = TRITON_PROFILE_ENABLED();
+    cudaEvent_t ev0{}, ev_build{}, ev_round0{}, ev_loop{}, ev_queries{}, ev_end{};
+    if (profile_fri) {
+        CUDA_CHECK(cudaEventCreate(&ev0));
+        CUDA_CHECK(cudaEventCreate(&ev_build));
+        CUDA_CHECK(cudaEventCreate(&ev_round0));
+        CUDA_CHECK(cudaEventCreate(&ev_loop));
+        CUDA_CHECK(cudaEventCreate(&ev_queries));
+        CUDA_CHECK(cudaEventCreate(&ev_end));
+        CUDA_CHECK(cudaEventRecord(ev0, ctx_->stream()));
+    }
+
+    const size_t main_width = dims_.main_width;
+    const size_t aux_width = dims_.aux_width;
+    const size_t num_segments = dims_.num_quotient_segments;
+    const size_t total_weights = main_width + aux_width + num_segments + 3;
+
+    // Allocate a dedicated build scratch buffer (device memory). We cannot use ctx_->d_scratch_a/b
+    // because in frugal mode they hold the col-major trace transposes.
+    uint64_t* d_build = nullptr;
+    size_t build_words = 0;
+    const size_t off_weights = build_words; build_words += total_weights * 3;
+    const size_t off_main_aux = build_words; build_words += n * 3;
+    const size_t off_quot = build_words; build_words += n * 3;
+    const size_t off_eval_ma_z = build_words; build_words += 3;
+    const size_t off_eval_ma_gz = build_words; build_words += 3;
+    const size_t off_eval_q_z4 = build_words; build_words += 3;
+    const size_t off_z4 = build_words; build_words += 3;
+    const size_t off_fri_domain = build_words; build_words += n; // BFE
+
+    CUDA_CHECK(cudaMalloc(&d_build, build_words * sizeof(uint64_t)));
+    uint64_t* d_weights = d_build + off_weights;
+    uint64_t* d_main_aux_codeword = d_build + off_main_aux; // [n*3] row-major
+    uint64_t* d_quot_codeword = d_build + off_quot;         // [n*3] row-major
+    uint64_t* d_eval_main_aux_z = d_build + off_eval_ma_z;
+    uint64_t* d_eval_main_aux_gz = d_build + off_eval_ma_gz;
+    uint64_t* d_eval_quot_z4 = d_build + off_eval_q_z4;
+    uint64_t* d_z4 = d_build + off_z4;
+    uint64_t* d_fri_domain_vals = d_build + off_fri_domain;
+
+    // Sync GPU sponge state to CPU transcript state at the start of FRI.
+    {
+        std::array<uint64_t, 16> h_state{};
+        for (size_t i = 0; i < 16; ++i) {
+            h_state[i] = fs_cpu_.sponge().state[i].value();
+        }
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_sponge_state(),
+            h_state.data(),
+            16 * sizeof(uint64_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+    }
+
+    kernels::fs_sample_scalars_device_gpu(ctx_->d_sponge_state(), d_weights, total_weights, ctx_->stream());
+
+    // Read OOD rows/segments from proof buffer (written in Step 5) for eval_value computations
+    const size_t base = 1 + 5 + 5 + 5;
+    const uint64_t* d_ood_main_curr = ctx_->d_proof_buffer() + base;
+    const uint64_t* d_ood_aux_curr  = d_ood_main_curr + main_width * 3;
+    const uint64_t* d_ood_main_next = d_ood_aux_curr + aux_width * 3;
+    const uint64_t* d_ood_aux_next  = d_ood_main_next + main_width * 3;
+    const uint64_t* d_ood_quot      = d_ood_aux_next + aux_width * 3;
+
+    // Compute eval_main_aux_z / eval_main_aux_gz / eval_quot_z4
+    const size_t quot_weight_base = main_width + aux_width;
+    qzc_eval_ood_value_main_aux_kernel<<<1,1,0,ctx_->stream()>>>(
+        d_ood_main_curr, d_ood_aux_curr, d_weights, main_width, aux_width, d_eval_main_aux_z
+    );
+    qzc_eval_ood_value_main_aux_kernel<<<1,1,0,ctx_->stream()>>>(
+        d_ood_main_next, d_ood_aux_next, d_weights, main_width, aux_width, d_eval_main_aux_gz
+    );
+    qzc_eval_ood_value_quot_kernel<<<1,1,0,ctx_->stream()>>>(
+        d_ood_quot, d_weights, quot_weight_base, num_segments, d_eval_quot_z4
+    );
+
+    // compute z^4
+    qzc_pow4_xfe<<<1,1,0,ctx_->stream()>>>(ctx_->d_ood_point(), d_z4);
+
+    // Build main+aux combination codeword on full FRI domain via cosets
+    // 1) transpose main trace row-major -> col-major into scratch_a
+    uint64_t* d_main_colmajor = ctx_->d_scratch_a();
+    {
+        size_t total = trace_len * main_width;
+        int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+        qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_main_trace(), d_main_colmajor, trace_len, main_width
+        );
+    }
+    // 2) transpose aux trace row-major -> comp-major col-major into scratch_b
+    uint64_t* d_aux_colmajor_components = ctx_->d_scratch_b();
+    {
+        constexpr int TRANSPOSE_ELEMS = 4;
+        int grid_aux = (int)(((trace_len * aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+        qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_aux_trace(), d_aux_colmajor_components, trace_len, aux_width
+        );
+    }
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+    // Two-phase optimization: compute coefficients once (in-place on scratch buffers)
+    kernels::compute_trace_coefficients_gpu(
+        d_main_colmajor,
+        dims_.main_width,
+        trace_len,
+        dims_.trace_offset,
+        d_main_colmajor,
+        ctx_->stream()
+    );
+    kernels::compute_trace_coefficients_gpu(
+        d_aux_colmajor_components,
+        dims_.aux_width * 3,
+        trace_len,
+        dims_.trace_offset,
+        d_aux_colmajor_components,
+        ctx_->stream()
+    );
+
+    // Allocate tail scratch buffers for coset evaluation
+    uint64_t* d_main_tail = nullptr;
+    uint64_t* d_aux_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
+
+    for (size_t coset = 0; coset < num_cosets; ++coset) {
+        uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+        kernels::evaluate_coset_from_coefficients_gpu(
+            d_main_colmajor,
+            main_width,
+            trace_len,
+            ctx_->d_main_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            ctx_->d_working_main(),
+            d_main_tail,
+            ctx_->stream()
+        );
+        kernels::evaluate_coset_from_coefficients_gpu(
+            d_aux_colmajor_components,
+            aux_width * 3,
+            trace_len,
+            ctx_->d_aux_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            ctx_->d_working_aux(),
+            d_aux_tail,
+            ctx_->stream()
+        );
+        qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_working_main(),
+            ctx_->d_working_aux(),
+            d_weights,
+            trace_len,
+            coset,
+            num_cosets,
+            main_width,
+            aux_width,
+            d_main_aux_codeword
+        );
+    }
+
+    // build quotient combination codeword from quotient segments on FRI domain
+    qzc_build_quot_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
+        ctx_->d_quotient_segments(),
+        d_weights,
+        n,
+        quot_weight_base,
+        num_segments,
+        d_quot_codeword
+    );
+
+    // Compute fri domain values (BFE) for denominators
+    {
+        constexpr int ITEMS = 4;
+        int grid = (int)((n + (size_t)BLOCK * ITEMS - 1) / ((size_t)BLOCK * ITEMS));
+        qzc_fill_domain_points_chunked<ITEMS><<<grid, BLOCK, 0, ctx_->stream()>>>(d_fri_domain_vals, n, dims_.fri_offset, dims_.fri_generator);
+    }
+
+    // deep weights are last 3 weights
+    const uint64_t* d_w_deep = d_weights + (main_width + aux_width + num_segments) * 3;
+
+    // build final FRI input codeword in ctx_->d_fri_codeword(0)
+    qzc_deep_fri_codeword_kernel<<<grid_n, BLOCK, 0, ctx_->stream()>>>(
+        d_fri_domain_vals,
+        d_main_aux_codeword,
+        d_quot_codeword,
+        n,
+        ctx_->d_ood_point(),
+        ctx_->d_next_row_point(),
+        d_z4,
+        d_eval_main_aux_z,
+        d_eval_main_aux_gz,
+        d_eval_quot_z4,
+        d_w_deep,
+        ctx_->d_fri_codeword(0)
+    );
+
+    if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_build, ctx_->stream())); }
+
+    // From here on, reuse the EXACT folding/commit/query logic from the working (non-frugal) FRI path.
+    size_t current_size = n;
+    uint64_t offset = dims_.fri_offset;
+    uint64_t generator = dims_.fri_generator;
+    uint64_t two_inv = BFieldElement(2).inverse().value();
+
+    // Commit to first round
+    {
+        uint64_t* d_tree = ctx_->d_fri_merkle(0);
+        int grid = (int)((current_size + BLOCK - 1) / BLOCK);
+        qzc_xfe_to_digest_leaves_kernel<<<grid, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_fri_codeword(0),
+            current_size,
+            d_tree
+        );
+        kernels::merkle_tree_gpu(d_tree, d_tree, current_size, ctx_->stream());
+
+        uint64_t* d_root = d_tree + (2 * current_size - 2) * 5;
+        uint64_t* d_enc = ctx_->d_scratch_b();
+        uint64_t disc = 0;
+        CUDA_CHECK(cudaMemcpyAsync(d_enc, &disc, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx_->stream()));
+        CUDA_CHECK(cudaMemcpyAsync(d_enc + 1, d_root, 5 * sizeof(uint64_t), cudaMemcpyDeviceToDevice, ctx_->stream()));
+        kernels::fs_absorb_device_gpu(ctx_->d_sponge_state(), d_enc, 6, ctx_->stream());
+
+        cudaMemcpyAsync(ctx_->d_proof_buffer() + proof_size_, d_root, 5 * sizeof(uint64_t),
+                        cudaMemcpyDeviceToDevice, ctx_->stream());
+        proof_size_ += 5;
+    }
+
+    if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_round0, ctx_->stream())); }
+
+    // Pre-allocate device memory for domain inverses (reuse across rounds)
+    size_t max_domain_inv_size = n / 2;
+    uint64_t* d_domain_inv_pool;
+    CUDA_CHECK(cudaMalloc(&d_domain_inv_pool, max_domain_inv_size * sizeof(uint64_t)));
+
+    // Reuse scratch_a for sampled challenges (3 u64)
+    uint64_t* d_chal = ctx_->d_scratch_a();
+
+    for (size_t round = 0; round < dims_.num_fri_rounds; ++round) {
+        size_t half = current_size / 2;
+
+        // Sample folding challenge sequentially
+        kernels::fs_sample_scalars_device_gpu(ctx_->d_sponge_state(), d_chal, 1, ctx_->stream());
+
+        uint64_t* d_domain_inv = d_domain_inv_pool;
+        kernels::compute_domain_inverses_gpu(offset, generator, d_domain_inv, half, ctx_->stream());
+
+        kernels::fri_fold_gpu(
+            ctx_->d_fri_codeword(round),
+            current_size,
+            d_chal,
+            d_domain_inv,
+            two_inv,
+            ctx_->d_fri_codeword(round + 1),
+            ctx_->stream()
+        );
+
+        // Halve domain
+        offset = (BFieldElement(offset) * BFieldElement(offset)).value();
+        generator = (BFieldElement(generator) * BFieldElement(generator)).value();
+        current_size = half;
+
+        // Commit to new round
+        uint64_t* d_tree = ctx_->d_fri_merkle(round + 1);
+        int grid = (int)((current_size + BLOCK - 1) / BLOCK);
+        qzc_xfe_to_digest_leaves_kernel<<<grid, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_fri_codeword(round + 1),
+            current_size,
+            d_tree
+        );
+        kernels::merkle_tree_gpu(d_tree, d_tree, current_size, ctx_->stream());
+
+        uint64_t* d_root = d_tree + (2 * current_size - 2) * 5;
+        uint64_t* d_enc = ctx_->d_scratch_b();
+        uint64_t disc = 0;
+        CUDA_CHECK(cudaMemcpyAsync(d_enc, &disc, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx_->stream()));
+        CUDA_CHECK(cudaMemcpyAsync(d_enc + 1, d_root, 5 * sizeof(uint64_t), cudaMemcpyDeviceToDevice, ctx_->stream()));
+        kernels::fs_absorb_device_gpu(ctx_->d_sponge_state(), d_enc, 6, ctx_->stream());
+
+        cudaMemcpyAsync(ctx_->d_proof_buffer() + proof_size_, d_root, 5 * sizeof(uint64_t),
+                        cudaMemcpyDeviceToDevice, ctx_->stream());
+        proof_size_ += 5;
+    }
+
+    CUDA_CHECK(cudaFree(d_domain_inv_pool));
+    if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_loop, ctx_->stream())); }
+
+    // Append last codeword (not absorbed)
+    const uint64_t* d_last_codeword = ctx_->d_fri_codeword(dims_.num_fri_rounds);
+    CUDA_CHECK(cudaMemcpyAsync(
+        ctx_->d_proof_buffer() + proof_size_,
+        d_last_codeword,
+        current_size * 3 * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        ctx_->stream()
+    ));
+    proof_size_ += current_size * 3;
+
+    // ---------------------------------------------------------------------
+    // Update Fiat-Shamir state with FriPolynomial (interpolated last codeword)
+    // After triton-vm.patch, FriPolynomial IS absorbed into Fiat-Shamir!
+    // 
+    // IMPORTANT: The GPU sponge state has been updated during FRI rounds
+    // (absorbing round roots, sampling folding challenges). We must download
+    // the current GPU state, absorb FriPolynomial, then upload the result.
+    // We cannot use fs_cpu_ because it hasn't tracked FRI round operations.
+    // ---------------------------------------------------------------------
+    {
+        // 1. Download last codeword to CPU
+        std::vector<uint64_t> h_codeword(current_size * 3);
+        CUDA_CHECK(cudaMemcpy(h_codeword.data(), d_last_codeword, 
+            current_size * 3 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 2. Extract 3 BFieldElement components
+        std::vector<BFieldElement> comp0(current_size), comp1(current_size), comp2(current_size);
+        for (size_t i = 0; i < current_size; ++i) {
+            comp0[i] = BFieldElement(h_codeword[i * 3 + 0]);
+            comp1[i] = BFieldElement(h_codeword[i * 3 + 1]);
+            comp2[i] = BFieldElement(h_codeword[i * 3 + 2]);
+        }
+        
+        // 3. Interpolate each component (INTT)
+        auto coeffs0 = NTT::interpolate(comp0);
+        auto coeffs1 = NTT::interpolate(comp1);
+        auto coeffs2 = NTT::interpolate(comp2);
+        
+        // 4. Combine back and trim trailing zeros
+        std::vector<XFieldElement> polynomial(coeffs0.size());
+        for (size_t i = 0; i < coeffs0.size(); ++i) {
+            polynomial[i] = XFieldElement(coeffs0[i], coeffs1[i], coeffs2[i]);
+        }
+        // Trim trailing zeros (matches Rust Polynomial encoding)
+        while (!polynomial.empty() && polynomial.back() == XFieldElement::zero()) {
+            polynomial.pop_back();
+        }
+        
+        // 5. Create ProofItem and use proper encoding
+        auto poly_item = ProofItem::fri_polynomial(polynomial);
+        auto poly_encoding = poly_item.encode();
+        
+        // 6. Download current GPU sponge state (has all FRI round operations)
+        std::array<uint64_t, 16> h_sponge{};
+        CUDA_CHECK(cudaMemcpy(h_sponge.data(), ctx_->d_sponge_state(),
+            16 * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        
+        // 7. Create a temporary ProofStream with this state and absorb FriPolynomial
+        ProofStream temp_ps;
+        Tip5 temp_tip5;
+        for (size_t i = 0; i < 16; ++i) {
+            temp_tip5.state[i] = BFieldElement(h_sponge[i]);
+        }
+        temp_ps.set_sponge_state(temp_tip5);
+        temp_ps.alter_fiat_shamir_state_with(poly_encoding);
+        
+        // 8. Upload updated sponge state back to GPU
+        for (size_t i = 0; i < 16; ++i) {
+            h_sponge[i] = temp_ps.sponge().state[i].value();
+        }
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_sponge_state(),
+            h_sponge.data(),
+            16 * sizeof(uint64_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+        
+        // NOTE: FriPolynomial is NOT written to proof buffer; main_gpu_full.cpp
+        // will compute it from FriCodeword and enqueue to ProofStream.
+    }
+
+    // Query phase (identical to non-frugal)
+    constexpr size_t NUM_QUERIES = GpuProofContext::NUM_FRI_QUERIES;
+    kernels::fs_sample_indices_device_gpu(
+        ctx_->d_sponge_state(),
+        ctx_->d_fri_query_indices(),
+        dims_.fri_length,
+        NUM_QUERIES,
+        ctx_->stream()
+    );
+    std::vector<size_t> a_indices(NUM_QUERIES);
+    CUDA_CHECK(cudaMemcpyAsync(
+        a_indices.data(),
+        ctx_->d_fri_query_indices(),
+        NUM_QUERIES * sizeof(size_t),
+        cudaMemcpyDeviceToHost,
+        ctx_->stream()
+    ));
+    ctx_->synchronize();
+
+    auto append_u64 = [&](uint64_t v) {
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_proof_buffer() + proof_size_,
+            &v,
+            sizeof(uint64_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+        proof_size_ += 1;
+    };
+
+    auto append_fri_response = [&](size_t round_idx, const std::vector<size_t>& leaf_indices, size_t domain_len) {
+        size_t* d_tmp_indices = reinterpret_cast<size_t*>(ctx_->d_scratch_a());
+        CUDA_CHECK(cudaMemcpyAsync(
+            d_tmp_indices,
+            leaf_indices.data(),
+            leaf_indices.size() * sizeof(size_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+
+        uint64_t* d_revealed = ctx_->d_scratch_b();
+        kernels::gather_xfield_rows_gpu(
+            ctx_->d_fri_codeword(round_idx),
+            d_tmp_indices,
+            d_revealed,
+            domain_len,
+            1,
+            leaf_indices.size(),
+            ctx_->stream()
+        );
+
+        std::vector<size_t> heap_nodes = auth_structure_heap_node_indices(leaf_indices, domain_len);
+        std::vector<size_t> flat_nodes;
+        flat_nodes.reserve(heap_nodes.size());
+        for (size_t h : heap_nodes) flat_nodes.push_back(merkle_heap_to_flat_index(h, domain_len));
+
+        size_t* d_auth_idx = d_tmp_indices;
+        CUDA_CHECK(cudaMemcpyAsync(
+            d_auth_idx,
+            flat_nodes.data(),
+            flat_nodes.size() * sizeof(size_t),
+            cudaMemcpyHostToDevice,
+            ctx_->stream()
+        ));
+
+        uint64_t* d_auth_digests = d_revealed + leaf_indices.size() * 3;
+        kernels::gather_bfield_rows_gpu(
+            ctx_->d_fri_merkle(round_idx),
+            d_auth_idx,
+            d_auth_digests,
+            2 * domain_len - 1,
+            5,
+            flat_nodes.size(),
+            ctx_->stream()
+        );
+
+        append_u64(static_cast<uint64_t>(flat_nodes.size()));
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_proof_buffer() + proof_size_,
+            d_auth_digests,
+            flat_nodes.size() * 5 * sizeof(uint64_t),
+            cudaMemcpyDeviceToDevice,
+            ctx_->stream()
+        ));
+        proof_size_ += flat_nodes.size() * 5;
+
+        append_u64(static_cast<uint64_t>(leaf_indices.size()));
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_proof_buffer() + proof_size_,
+            d_revealed,
+            leaf_indices.size() * 3 * sizeof(uint64_t),
+            cudaMemcpyDeviceToDevice,
+            ctx_->stream()
+        ));
+        proof_size_ += leaf_indices.size() * 3;
+    };
+
+    append_fri_response(0, a_indices, dims_.fri_length);
+
+    size_t dom_len = dims_.fri_length;
+    for (size_t r = 0; r < dims_.num_fri_rounds; ++r) {
+        size_t half = dom_len / 2;
+        std::vector<size_t> b_indices;
+        b_indices.reserve(a_indices.size());
+        for (size_t a : a_indices) b_indices.push_back((a + half) % dom_len);
+        append_fri_response(r, b_indices, dom_len);
+        dom_len /= 2;
+    }
+
+    kernels::fs_sample_scalars_device_gpu(ctx_->d_sponge_state(), ctx_->d_scratch_a(), 1, ctx_->stream());
+    if (profile_fri) { CUDA_CHECK(cudaEventRecord(ev_queries, ctx_->stream())); }
+
+    if (profile_fri) {
+        CUDA_CHECK(cudaEventRecord(ev_end, ctx_->stream()));
+        CUDA_CHECK(cudaEventSynchronize(ev_end));
+        float t_build{}, t_round0{}, t_loop{}, t_queries{};
+        CUDA_CHECK(cudaEventElapsedTime(&t_build, ev0, ev_build));
+        CUDA_CHECK(cudaEventElapsedTime(&t_round0, ev_build, ev_round0));
+        CUDA_CHECK(cudaEventElapsedTime(&t_loop, ev_round0, ev_queries));
+        CUDA_CHECK(cudaEventElapsedTime(&t_queries, ev_queries, ev_end));
+        std::cout << "  [FRI profile] build_codeword: " << t_build << " ms\n";
+        std::cout << "  [FRI profile] round0_commit:  " << t_round0 << " ms\n";
+        std::cout << "  [FRI profile] fold+commit:    " << t_loop << " ms\n";
+        std::cout << "  [FRI profile] queries:        " << t_queries << " ms\n";
+        std::cout << "  [FRI profile] total:          " << (t_build + t_round0 + t_loop + t_queries) << " ms\n";
+        CUDA_CHECK(cudaEventDestroy(ev0));
+        CUDA_CHECK(cudaEventDestroy(ev_build));
+        CUDA_CHECK(cudaEventDestroy(ev_round0));
+        CUDA_CHECK(cudaEventDestroy(ev_loop));
+        CUDA_CHECK(cudaEventDestroy(ev_queries));
+        CUDA_CHECK(cudaEventDestroy(ev_end));
+    }
+
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
+    CUDA_CHECK(cudaFree(d_build));
+}
+
 // ============================================================================
 // Step 7: Open Trace
 // ============================================================================
 
 void GpuStark::step_open_trace() {
+    if (dims_.lde_frugal_mode) {
+        step_open_trace_frugal();
+        return;
+    }
     constexpr size_t NUM_QUERIES = GpuProofContext::NUM_FRI_QUERIES;
     const size_t n = dims_.fri_length;
+    constexpr int BLOCK = 256;
     
     // Use the FRI-sampled indices from step_fri_protocol()
     size_t* d_indices = ctx_->d_fri_query_indices();
 
     // Gather opened rows (row-major buffers)
-    uint64_t* d_main_rows = ctx_->d_scratch_a(); // [NUM*main_width]
-    uint64_t* d_aux_rows  = d_main_rows + NUM_QUERIES * dims_.main_width; // [NUM*aux_width*3]
-    uint64_t* d_quot_rows = d_aux_rows + NUM_QUERIES * dims_.aux_width * 3; // [NUM*4*3]
+    uint64_t* d_main_rows = nullptr;
+    uint64_t* d_aux_rows = nullptr;
+    uint64_t* d_quot_rows = nullptr;
+    uint64_t* d_main_batch_rows = nullptr;
+    uint64_t* d_aux_batch_rows = nullptr;
+    uint64_t* d_main_colmajor = nullptr;
+    uint64_t* d_aux_colmajor_components = nullptr;
 
-    kernels::gather_bfield_rows_colmajor_gpu(
-        ctx_->d_main_lde(),
-        d_indices,
-        d_main_rows,
-        n,
-        dims_.main_width,
-        NUM_QUERIES,
-        ctx_->stream()
-    );
-    
-    kernels::gather_xfield_rows_colmajor_gpu(
-        ctx_->d_aux_lde(),
-        d_indices,
-        d_aux_rows,
-        n,
-        dims_.aux_width,
-        NUM_QUERIES,
-        ctx_->stream()
-    );
-    
-    kernels::gather_xfield_rows_colmajor_gpu(
-        ctx_->d_quotient_segments(),
-        d_indices,
-        d_quot_rows,
-        n,
-        dims_.num_quotient_segments,
-        NUM_QUERIES,
-        ctx_->stream()
-    );
+    if (dims_.lde_frugal_mode) {
+        // Allocate small buffers for opened rows
+        CUDA_CHECK(cudaMalloc(&d_main_rows, NUM_QUERIES * dims_.main_width * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_aux_rows, NUM_QUERIES * dims_.aux_width * 3 * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_quot_rows, NUM_QUERIES * dims_.num_quotient_segments * 3 * sizeof(uint64_t)));
+
+        constexpr size_t FRUGAL_BATCH_COLS = 10;
+        CUDA_CHECK(cudaMalloc(&d_main_batch_rows, NUM_QUERIES * FRUGAL_BATCH_COLS * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_aux_batch_rows, NUM_QUERIES * FRUGAL_BATCH_COLS * sizeof(uint64_t)));
+
+        // Build col-major traces for batch LDE
+        CUDA_CHECK(cudaMalloc(&d_main_colmajor, dims_.padded_height * dims_.main_width * sizeof(uint64_t)));
+        {
+            size_t total = dims_.padded_height * dims_.main_width;
+            constexpr int BLOCK = 256;
+            int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+            qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_main_trace(), d_main_colmajor, dims_.padded_height, dims_.main_width
+            );
+        }
+        d_aux_colmajor_components = ctx_->d_scratch_b();
+        {
+            constexpr int BLOCK = 256;
+            constexpr int TRANSPOSE_ELEMS = 4;
+            int grid_aux = (int)(((dims_.padded_height * dims_.aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+            qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+                ctx_->d_aux_trace(), d_aux_colmajor_components, dims_.padded_height, dims_.aux_width
+            );
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+        // Main columns: stream LDE batches and gather query rows
+        for (size_t col_start = 0; col_start < dims_.main_width; col_start += FRUGAL_BATCH_COLS) {
+            const size_t batch_cols = std::min(FRUGAL_BATCH_COLS, dims_.main_width - col_start);
+            kernels::randomized_lde_batch_gpu(
+                d_main_colmajor + col_start * dims_.padded_height,
+                batch_cols,
+                dims_.padded_height,
+                ctx_->d_main_randomizer_coeffs() + col_start * dims_.num_trace_randomizers,
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                dims_.fri_offset,
+                n,
+                ctx_->d_main_lde(),
+                ctx_->stream()
+            );
+            kernels::gather_bfield_rows_colmajor_gpu(
+                ctx_->d_main_lde(),
+                d_indices,
+                d_main_batch_rows,
+                n,
+                batch_cols,
+                NUM_QUERIES,
+                ctx_->stream()
+            );
+            int grid_scatter = (int)((NUM_QUERIES * batch_cols + BLOCK - 1) / BLOCK);
+            qzc_scatter_rowmajor_offset_bfe<<<grid_scatter, BLOCK, 0, ctx_->stream()>>>(
+                d_main_batch_rows,
+                batch_cols,
+                d_main_rows,
+                dims_.main_width,
+                NUM_QUERIES,
+                col_start
+            );
+        }
+
+        // Aux columns: stream LDE batches (BFE component view) and gather query rows
+        const size_t aux_cols_bfe = dims_.aux_width * 3;
+        for (size_t col_start = 0; col_start < aux_cols_bfe; col_start += FRUGAL_BATCH_COLS) {
+            const size_t batch_cols = std::min(FRUGAL_BATCH_COLS, aux_cols_bfe - col_start);
+            kernels::randomized_lde_batch_gpu(
+                d_aux_colmajor_components + col_start * dims_.padded_height,
+                batch_cols,
+                dims_.padded_height,
+                ctx_->d_aux_randomizer_coeffs() + col_start * dims_.num_trace_randomizers,
+                dims_.num_trace_randomizers,
+                dims_.trace_offset,
+                dims_.fri_offset,
+                n,
+                ctx_->d_aux_lde(),
+                ctx_->stream()
+            );
+            kernels::gather_bfield_rows_colmajor_gpu(
+                ctx_->d_aux_lde(),
+                d_indices,
+                d_aux_batch_rows,
+                n,
+                batch_cols,
+                NUM_QUERIES,
+                ctx_->stream()
+            );
+            int grid_scatter = (int)((NUM_QUERIES * batch_cols + BLOCK - 1) / BLOCK);
+            qzc_scatter_rowmajor_offset_bfe<<<grid_scatter, BLOCK, 0, ctx_->stream()>>>(
+                d_aux_batch_rows,
+                batch_cols,
+                d_aux_rows,
+                dims_.aux_width * 3,
+                NUM_QUERIES,
+                col_start
+            );
+        }
+
+        // Quotient rows still gathered from cached quotient segments
+        kernels::gather_xfield_rows_colmajor_gpu(
+            ctx_->d_quotient_segments(),
+            d_indices,
+            d_quot_rows,
+            n,
+            dims_.num_quotient_segments,
+            NUM_QUERIES,
+            ctx_->stream()
+        );
+    } else {
+        d_main_rows = ctx_->d_scratch_a(); // [NUM*main_width]
+        d_aux_rows  = d_main_rows + NUM_QUERIES * dims_.main_width; // [NUM*aux_width*3]
+        d_quot_rows = d_aux_rows + NUM_QUERIES * dims_.aux_width * 3; // [NUM*4*3]
+
+        kernels::gather_bfield_rows_colmajor_gpu(
+            ctx_->d_main_lde(),
+            d_indices,
+            d_main_rows,
+            n,
+            dims_.main_width,
+            NUM_QUERIES,
+            ctx_->stream()
+        );
+        
+        kernels::gather_xfield_rows_colmajor_gpu(
+            ctx_->d_aux_lde(),
+            d_indices,
+            d_aux_rows,
+            n,
+            dims_.aux_width,
+            NUM_QUERIES,
+            ctx_->stream()
+        );
+        
+        kernels::gather_xfield_rows_colmajor_gpu(
+            ctx_->d_quotient_segments(),
+            d_indices,
+            d_quot_rows,
+            n,
+            dims_.num_quotient_segments,
+            NUM_QUERIES,
+            ctx_->stream()
+        );
+    }
 
     // Pull indices to host to compute authentication_structure node indices (small).
     std::vector<size_t> indices(NUM_QUERIES);
@@ -5073,6 +6906,234 @@ void GpuStark::step_open_trace() {
     ));
     proof_size_ += NUM_QUERIES * dims_.num_quotient_segments * 3;
     append_auth(ctx_->d_quotient_merkle());
+
+    if (dims_.lde_frugal_mode) {
+        CUDA_CHECK(cudaFree(d_main_rows));
+        CUDA_CHECK(cudaFree(d_aux_rows));
+        CUDA_CHECK(cudaFree(d_quot_rows));
+        if (d_main_batch_rows) CUDA_CHECK(cudaFree(d_main_batch_rows));
+        if (d_aux_batch_rows) CUDA_CHECK(cudaFree(d_aux_batch_rows));
+        if (d_main_colmajor) CUDA_CHECK(cudaFree(d_main_colmajor));
+    }
+}
+
+__global__ void qzc_open_main_aux_rows_from_coset_kernel(
+    const size_t* __restrict__ d_query_indices,     // [NUM]
+    size_t num_queries,
+    const uint64_t* __restrict__ d_main_coset,      // [main_width * coset_len] col-major
+    const uint64_t* __restrict__ d_aux_coset,       // [(aux_width*3) * coset_len] comp-major col-major (BFEs)
+    size_t coset_len,
+    size_t coset_idx,
+    size_t num_cosets,
+    size_t main_width,
+    size_t aux_width,
+    uint64_t* __restrict__ d_out_main_rows,         // [NUM * main_width] row-major (BFE)
+    uint64_t* __restrict__ d_out_aux_rows           // [NUM * aux_width * 3] row-major (XFE)
+) {
+    size_t q = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= num_queries) return;
+    size_t idx = d_query_indices[q];
+    if ((idx % num_cosets) != coset_idx) return;
+    size_t k = idx / num_cosets;
+    if (k >= coset_len) return;
+
+    // main
+    for (size_t c = 0; c < main_width; ++c) {
+        d_out_main_rows[q * main_width + c] = d_main_coset[c * coset_len + k];
+    }
+    // aux (XFE): output row-major XFE layout
+    for (size_t c = 0; c < aux_width; ++c) {
+        uint64_t v0 = d_aux_coset[(c * 3 + 0) * coset_len + k];
+        uint64_t v1 = d_aux_coset[(c * 3 + 1) * coset_len + k];
+        uint64_t v2 = d_aux_coset[(c * 3 + 2) * coset_len + k];
+        size_t base = (q * aux_width + c) * 3;
+        d_out_aux_rows[base + 0] = v0;
+        d_out_aux_rows[base + 1] = v1;
+        d_out_aux_rows[base + 2] = v2;
+    }
+}
+
+void GpuStark::step_open_trace_frugal() {
+    constexpr size_t NUM_QUERIES = GpuProofContext::NUM_FRI_QUERIES;
+    const size_t n = dims_.fri_length;
+    const size_t trace_len = dims_.padded_height;
+    const size_t num_cosets = n / trace_len;
+    if (trace_len == 0 || n == 0 || (n % trace_len) != 0) {
+        throw std::runtime_error("FRUGAL open: invalid domains");
+    }
+
+    size_t* d_indices = ctx_->d_fri_query_indices();
+
+    // Output opened rows (row-major). Allocate explicitly (small) to keep scratch buffers free for transposes.
+    uint64_t* d_main_rows = nullptr;
+    uint64_t* d_aux_rows  = nullptr;
+    uint64_t* d_quot_rows = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_rows, NUM_QUERIES * dims_.main_width * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_rows,  NUM_QUERIES * dims_.aux_width * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_quot_rows, NUM_QUERIES * dims_.num_quotient_segments * 3 * sizeof(uint64_t)));
+    // Zero-initialize to ensure uninitialized queries don't cause issues
+    CUDA_CHECK(cudaMemset(d_main_rows, 0, NUM_QUERIES * dims_.main_width * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_aux_rows, 0, NUM_QUERIES * dims_.aux_width * 3 * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(d_quot_rows, 0, NUM_QUERIES * dims_.num_quotient_segments * 3 * sizeof(uint64_t)));
+
+    // Build col-major trace transposes into scratch buffers (same layout as other frugal steps)
+    constexpr int BLOCK = 256;
+    uint64_t* d_main_colmajor = ctx_->d_scratch_a(); // [main_width * trace_len]
+    {
+        size_t total = trace_len * dims_.main_width;
+        int grid_t = (int)((total + BLOCK - 1) / BLOCK);
+        qzc_rowmajor_to_colmajor_bfe<<<grid_t, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_main_trace(), d_main_colmajor, trace_len, dims_.main_width
+        );
+    }
+    uint64_t* d_aux_colmajor_components = ctx_->d_scratch_b(); // [(aux_width*3) * trace_len]
+    {
+        constexpr int TRANSPOSE_ELEMS = 4;
+        int grid_aux = (int)(((trace_len * dims_.aux_width) + BLOCK * TRANSPOSE_ELEMS - 1) / (BLOCK * TRANSPOSE_ELEMS));
+        qzc_rowmajor_to_colmajor_xfe<<<grid_aux, BLOCK, 0, ctx_->stream()>>>(
+            ctx_->d_aux_trace(), d_aux_colmajor_components, trace_len, dims_.aux_width
+        );
+    }
+    CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
+
+    // Fill outputs by coset
+    int grid_q = (int)((NUM_QUERIES + BLOCK - 1) / BLOCK);
+    for (size_t coset = 0; coset < num_cosets; ++coset) {
+        uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
+        kernels::randomized_lde_batch_gpu_preallocated(
+            d_main_colmajor,
+            dims_.main_width,
+            trace_len,
+            ctx_->d_main_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            trace_len,
+            ctx_->d_working_main(),
+            ctx_->d_working_main(), // scratch1
+            nullptr,
+            ctx_->stream()
+        );
+        kernels::randomized_lde_batch_gpu_preallocated(
+            d_aux_colmajor_components,
+            dims_.aux_width * 3,
+            trace_len,
+            ctx_->d_aux_randomizer_coeffs(),
+            dims_.num_trace_randomizers,
+            dims_.trace_offset,
+            coset_offset,
+            trace_len,
+            ctx_->d_working_aux(),
+            ctx_->d_working_aux(), // scratch1
+            nullptr,
+            ctx_->stream()
+        );
+        qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, ctx_->stream()>>>(
+            d_indices,
+            NUM_QUERIES,
+            ctx_->d_working_main(),
+            ctx_->d_working_aux(),
+            trace_len,
+            coset,
+            num_cosets,
+            dims_.main_width,
+            dims_.aux_width,
+            d_main_rows,
+            d_aux_rows
+        );
+    }
+
+    // Quotient segment rows are already on full FRI domain
+    kernels::gather_xfield_rows_colmajor_gpu(
+        ctx_->d_quotient_segments(),
+        d_indices,
+        d_quot_rows,
+        n,
+        dims_.num_quotient_segments,
+        NUM_QUERIES,
+        ctx_->stream()
+    );
+
+    // From here on, reuse the existing non-frugal code paths by temporarily setting pointers and appending to proof.
+    // We inline the minimal parts needed: indices, opened rows, and auth paths.
+    std::vector<size_t> indices(NUM_QUERIES);
+    CUDA_CHECK(cudaMemcpyAsync(indices.data(), d_indices, NUM_QUERIES * sizeof(size_t), cudaMemcpyDeviceToHost, ctx_->stream()));
+    ctx_->synchronize();
+
+    std::vector<size_t> heap_nodes = auth_structure_heap_node_indices(indices, n);
+    std::vector<size_t> flat_nodes;
+    flat_nodes.reserve(heap_nodes.size());
+    for (size_t h : heap_nodes) flat_nodes.push_back(merkle_heap_to_flat_index(h, n));
+
+    size_t* d_auth_idx = reinterpret_cast<size_t*>(ctx_->d_scratch_b());
+    CUDA_CHECK(cudaMemcpyAsync(d_auth_idx, flat_nodes.data(), flat_nodes.size() * sizeof(size_t), cudaMemcpyHostToDevice, ctx_->stream()));
+    uint64_t* d_auth_digests = reinterpret_cast<uint64_t*>(d_auth_idx + flat_nodes.size());
+
+    auto append_u64 = [&](uint64_t v) {
+        CUDA_CHECK(cudaMemcpyAsync(ctx_->d_proof_buffer() + proof_size_, &v, sizeof(uint64_t), cudaMemcpyHostToDevice, ctx_->stream()));
+        proof_size_ += 1;
+    };
+    auto append_auth = [&](const uint64_t* d_tree) {
+        kernels::gather_bfield_rows_gpu(
+            d_tree,
+            d_auth_idx,
+            d_auth_digests,
+            2 * n - 1,
+            5,
+            flat_nodes.size(),
+            ctx_->stream()
+        );
+        append_u64(static_cast<uint64_t>(flat_nodes.size()));
+        CUDA_CHECK(cudaMemcpyAsync(
+            ctx_->d_proof_buffer() + proof_size_,
+            d_auth_digests,
+            flat_nodes.size() * 5 * sizeof(uint64_t),
+            cudaMemcpyDeviceToDevice,
+            ctx_->stream()
+        ));
+        proof_size_ += flat_nodes.size() * 5;
+    };
+
+    // Match non-frugal proof encoding EXACTLY:
+    // Main rows payload: [row_count] [rows...] then [auth_count] [auth_digests...]
+    append_u64(static_cast<uint64_t>(NUM_QUERIES));
+    CUDA_CHECK(cudaMemcpyAsync(
+        ctx_->d_proof_buffer() + proof_size_,
+        d_main_rows,
+        NUM_QUERIES * dims_.main_width * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        ctx_->stream()
+    ));
+    proof_size_ += NUM_QUERIES * dims_.main_width;
+    append_auth(ctx_->d_main_merkle());
+
+    // Aux rows payload
+    append_u64(static_cast<uint64_t>(NUM_QUERIES));
+    CUDA_CHECK(cudaMemcpyAsync(
+        ctx_->d_proof_buffer() + proof_size_,
+        d_aux_rows,
+        NUM_QUERIES * dims_.aux_width * 3 * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        ctx_->stream()
+    ));
+    proof_size_ += NUM_QUERIES * dims_.aux_width * 3;
+    append_auth(ctx_->d_aux_merkle());
+
+    // Quotient segments payload
+    append_u64(static_cast<uint64_t>(NUM_QUERIES));
+    CUDA_CHECK(cudaMemcpyAsync(
+        ctx_->d_proof_buffer() + proof_size_,
+        d_quot_rows,
+        NUM_QUERIES * dims_.num_quotient_segments * 3 * sizeof(uint64_t),
+        cudaMemcpyDeviceToDevice,
+        ctx_->stream()
+    ));
+    proof_size_ += NUM_QUERIES * dims_.num_quotient_segments * 3;
+    append_auth(ctx_->d_quotient_merkle());
+
+    CUDA_CHECK(cudaFree(d_main_rows));
+    CUDA_CHECK(cudaFree(d_aux_rows));
+    CUDA_CHECK(cudaFree(d_quot_rows));
 }
 
 void GpuStark::step_encode_proof() {
@@ -5127,6 +7188,11 @@ Proof GpuStark::prove_with_gpu_padding(
     dims_.fri_generator = fri_domain_3[2];
     dims_.main_width = num_cols;
     dims_.aux_width = 88;
+
+    dims_.lde_frugal_mode = use_lde_frugal_mode(dims_.padded_height);
+    if (dims_.lde_frugal_mode) {
+        TRITON_PROFILE_COUT("      LDE FRUGAL MODE: ENABLED (streaming LDE, no cache)" << std::endl);
+    }
     
     // Trace randomizer count
     {

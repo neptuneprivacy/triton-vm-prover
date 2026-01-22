@@ -102,6 +102,12 @@ This script automatically:
 
 The script uses sensible defaults for most settings, but you can customize them by setting environment variables before running the script. See `run_xnt_core_with_gpu.sh` for all available configuration options.
 
+For large padded height inputs (>= 2^22), set the following environment variable for proof-upgrader:
+
+```bash
+export TRITON_GPU_LDE_FRUGAL=1
+```
+
 ## License
 
 Apache 2.0 (matching Triton VM)

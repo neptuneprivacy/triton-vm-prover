@@ -55,6 +55,7 @@ use crate::protocol::consensus::type_scripts::native_currency_amount::NativeCurr
 use crate::protocol::proof_abstractions::tasm::program::TritonVmProofJobOptions;
 use crate::protocol::proof_abstractions::timestamp::Timestamp;
 use crate::protocol::shared::SIZE_20MB_IN_BYTES;
+use crate::state::mining::mining_status::BinaryMergeStage;
 use crate::state::transaction::transaction_details::TransactionDetails;
 use crate::state::wallet::expected_utxo::ExpectedUtxo;
 use crate::state::wallet::transaction_output::TxOutputList;
@@ -380,7 +381,11 @@ pub(crate) async fn make_coinbase_transaction_stateless(
 
     let witness = PrimitiveWitness::from_transaction_details(&transaction_details);
 
-    info!("Start: generate single proof for coinbase transaction");
+    let proof_type: TransactionProofType = job_options.job_settings.tx_proving_capability.into();
+    info!(
+        "Start: generate {} proof for coinbase transaction",
+        proof_type
+    );
 
     // note: we provide an owned witness to proof-builder and clone the kernel
     // because this fn accepts arbitrary proving power and generates proof to
@@ -400,7 +405,7 @@ pub(crate) async fn make_coinbase_transaction_stateless(
         .build()
         .await?;
 
-    info!("Done: generating single proof for coinbase transaction");
+    info!("Done: generating proof for coinbase transaction");
 
     let transaction = TransactionBuilder::new()
         .transaction_kernel(kernel)
@@ -462,6 +467,198 @@ pub(crate) enum TxMergeOrigin {
     ExplicitList(Vec<Transaction>),
 }
 
+/// Merge transactions using binary tree approach for better parallelism.
+///
+/// Strategy for 3+ transactions:
+/// - Level 1 (parallel): Split transactions into pairs and merge in parallel
+/// - Level 2+: Recursively merge results until final result
+async fn binary_tree_merge(
+    coinbase: BlockOrRegularTransaction,
+    mut transactions: Vec<Transaction>,
+    mut rng: StdRng,
+    vm_job_queue: Arc<TritonVmJobQueue>,
+    job_options: TritonVmProofJobOptions,
+    consensus_rule_set: ConsensusRuleSet,
+    global_state_lock: GlobalStateLock,
+) -> Result<BlockOrRegularTransaction> {
+    if transactions.is_empty() {
+        return Ok(coinbase);
+    }
+
+    let num_txs = transactions.len();
+    info!(
+        ">>> BINARY_TREE_MERGE ENTRY: processing {} transactions in parallel merge tree <<<",
+        num_txs
+    );
+
+    if num_txs < 3 {
+        let mut current = coinbase;
+        for tx in transactions {
+            current = BlockTransaction::merge(
+                current,
+                tx,
+                rng.random(),
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            )
+            .await?
+            .into();
+        }
+        return Ok(current);
+    }
+
+    if num_txs == 3 {
+        let tx1 = transactions.remove(0);
+        let tx2 = transactions.remove(0);
+        let tx3 = transactions.remove(0);
+
+        info!(">>> Binary tree merge (3 txs): Level 1 - PARALLEL merges (coinbase+tx1) AND (tx2+tx3) simultaneously <<<");
+
+        // Set Level 1 in progress - parallel merges starting
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::Level1InProgress {
+                num_transactions: num_txs,
+            })
+            .await;
+
+        let seed1: [u8; 32] = rng.random();
+        let seed2: [u8; 32] = rng.random();
+        let final_seed: [u8; 32] = rng.random();
+
+        let (coinbase_result, regular_result) = tokio::join!(
+            BlockTransaction::merge(
+                coinbase,
+                tx1,
+                seed1,
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            ),
+            BlockTransaction::merge(
+                tx2.into(),
+                tx3,
+                seed2,
+                vm_job_queue.clone(),
+                job_options.clone(),
+                consensus_rule_set.clone(),
+            ),
+        );
+
+        let coinbase_result = coinbase_result?;
+        let regular_result = regular_result?;
+
+        info!(">>> Binary tree merge (3 txs): Level 2 - merging two intermediate results into final <<<");
+
+        // Set Level 2 in progress - this is the critical stage where we should not cancel
+        // since Level 1 work would be wasted
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::Level2InProgress {
+                num_transactions: num_txs,
+            })
+            .await;
+
+        let final_result = BlockTransaction::merge(
+            coinbase_result.into(),
+            regular_result.into(),
+            final_seed,
+            vm_job_queue,
+            job_options,
+            consensus_rule_set,
+        )
+        .await?;
+
+        // Clear the stage after successful completion
+        global_state_lock
+            .set_binary_merge_stage(BinaryMergeStage::None)
+            .await;
+
+        Ok(final_result.into())
+    } else {
+        let mid = num_txs / 2;
+        let left_txs: Vec<Transaction> = transactions.drain(..mid).collect();
+        let right_txs = transactions;
+
+        info!(
+            ">>> Binary tree merge ({}+ txs): Splitting into left({}) and right({}) for PARALLEL recursive merge <<<",
+            num_txs,
+            mid,
+            num_txs - mid
+        );
+
+        let right_first = right_txs[0].clone();
+        let right_rest: Vec<Transaction> = right_txs.into_iter().skip(1).collect();
+
+        let left_seed: [u8; 32] = rng.random();
+        let right_seed: [u8; 32] = rng.random();
+        let final_seed: [u8; 32] = rng.random();
+
+        let left_future = {
+            let coinbase = coinbase.clone();
+            let left_txs = left_txs;
+            let vm_job_queue = vm_job_queue.clone();
+            let job_options = job_options.clone();
+            let consensus_rule_set = consensus_rule_set.clone();
+            let gsl = global_state_lock.clone();
+            async move {
+                let left_rng = StdRng::from_seed(left_seed);
+                binary_tree_merge(
+                    coinbase,
+                    left_txs,
+                    left_rng,
+                    vm_job_queue,
+                    job_options,
+                    consensus_rule_set,
+                    gsl,
+                )
+                .await
+            }
+        };
+
+        let right_future = {
+            let right_first = right_first.into();
+            let right_rest = right_rest;
+            let vm_job_queue = vm_job_queue.clone();
+            let job_options = job_options.clone();
+            let consensus_rule_set = consensus_rule_set.clone();
+            let gsl = global_state_lock.clone();
+            async move {
+                let right_rng = StdRng::from_seed(right_seed);
+                binary_tree_merge(
+                    right_first,
+                    right_rest,
+                    right_rng,
+                    vm_job_queue,
+                    job_options,
+                    consensus_rule_set,
+                    gsl,
+                )
+                .await
+            }
+        };
+
+        let (left_result, right_result) =
+            tokio::join!(Box::pin(left_future), Box::pin(right_future),);
+
+        let left_result = left_result?;
+        let right_result = right_result?;
+
+        info!(">>> Binary tree merge: Merging left and right branch results into FINAL result <<<");
+
+        let final_result = BlockTransaction::merge(
+            left_result.into(),
+            right_result.into(),
+            final_seed,
+            vm_job_queue,
+            job_options,
+            consensus_rule_set,
+        )
+        .await?;
+
+        Ok(final_result.into())
+    }
+}
+
 /// Create the transaction that goes into the block template. The transaction is
 /// built from the mempool and from the coinbase transaction. Also returns the
 /// "sender randomness" used in the coinbase transaction.
@@ -509,16 +706,18 @@ pub(crate) async fn create_block_transaction_from(
     let network = global_state_lock.cli().network;
     let consensus_rule_set = ConsensusRuleSet::infer_from(network, block_height);
 
-    // A coinbase transaction implies mining. So you *must*
-    // be able to create a SingleProof.
+    // Use the capability from job_options to determine proof type
+    // This ensures we don't try to generate proofs beyond the system's capability
     let vm_job_queue = vm_job_queue();
-    
+    let capability = job_options.job_settings.tx_proving_capability;
+    let proof_type: TransactionProofType = capability.into();
+
     // Prepare NOP transaction details and proof job options for parallel execution
     let proof_job_options = TritonVmProofJobOptionsBuilder::new()
         .template(&job_options)
-        .proof_type(TransactionProofType::SingleProof)
+        .proof_type(proof_type)
         .build();
-    
+
     // Start NOP proof generation in parallel with coinbase to utilize both GPUs
     // This prevents the 30+ second delay when NOP proof is needed
     let nop_proof_future = {
@@ -526,15 +725,11 @@ pub(crate) async fn create_block_transaction_from(
         let vm_job_queue = vm_job_queue.clone();
         let proof_job_options = proof_job_options.clone();
         let network = global_state_lock.cli().network;
-        
+
         async move {
-            let nop = TransactionDetails::nop(
-                predecessor_block_ms,
-                timestamp,
-                network,
-            );
+            let nop = TransactionDetails::nop(predecessor_block_ms, timestamp, network);
             let nop = PrimitiveWitness::from_transaction_details(&nop);
-            
+
             TransactionProofBuilder::new()
                 .consensus_rule_set(consensus_rule_set)
                 .primitive_witness_ref(&nop)
@@ -551,7 +746,7 @@ pub(crate) async fn create_block_transaction_from(
                 })
         }
     };
-    
+
     // Run coinbase and NOP proof generation in parallel
     let (coinbase_result, nop_proof_result) = tokio::join!(
         make_coinbase_transaction_stateless(
@@ -563,24 +758,39 @@ pub(crate) async fn create_block_transaction_from(
         ),
         nop_proof_future
     );
-    
+
     let (coinbase_transaction, composer_txos) = coinbase_result?;
     let nop_transaction = nop_proof_result?;
 
     // Get most valuable transactions from mempool.
     let max_num_mergers = global_state_lock.cli().max_num_compose_mergers.get();
     let mut transactions_to_merge = match &tx_merge_origin {
-        TxMergeOrigin::Mempool => global_state_lock
-            .lock_guard()
-            .await
-            .mempool
-            .get_transactions_for_block_composition(
-                block_capacity_for_transactions,
-                Some(max_num_mergers),
-            ),
+        TxMergeOrigin::Mempool => {
+            let mempool_guard = global_state_lock.lock_guard().await;
+            let mempool_size = mempool_guard.mempool.len();
+            let single_proof_count = mempool_guard.mempool.count_single_proof_transactions();
+            let synced_single_proof_count = mempool_guard
+                .mempool
+                .count_synced_single_proof_transactions();
+            info!(
+                "Mempool stats: {} total txs, {} with SingleProof, {} synced+SingleProof (ready for composition), max_mergers={}",
+                mempool_size, single_proof_count, synced_single_proof_count, max_num_mergers
+            );
+            mempool_guard
+                .mempool
+                .get_transactions_for_block_composition(
+                    block_capacity_for_transactions,
+                    Some(max_num_mergers),
+                )
+        }
         #[cfg(test)]
         TxMergeOrigin::ExplicitList(transactions) => transactions.to_owned(),
     };
+
+    info!(
+        "Transactions selected for composition: {}",
+        transactions_to_merge.len()
+    );
 
     // If no updated single-proof transaction were found in the mempool, try
     // to find one that's not updated, since updating this is faster than
@@ -628,26 +838,136 @@ pub(crate) async fn create_block_transaction_from(
         transactions_to_merge = vec![nop_transaction];
     }
 
-    let num_merges = transactions_to_merge.len();
+    const LARGE_TX_INPUT_THRESHOLD: usize = 35;
+    let small_transactions: Vec<Transaction> = transactions_to_merge
+        .iter()
+        .filter(|tx| tx.kernel.inputs.len() <= LARGE_TX_INPUT_THRESHOLD)
+        .cloned()
+        .collect();
+    let large_transactions: Vec<Transaction> = transactions_to_merge
+        .iter()
+        .filter(|tx| tx.kernel.inputs.len() > LARGE_TX_INPUT_THRESHOLD)
+        .cloned()
+        .collect();
+
     let mut block_transaction = BlockOrRegularTransaction::from(coinbase_transaction);
-    for (i, tx_to_include) in transactions_to_merge.into_iter().enumerate() {
-        info!("Merging transaction {} / {}", i + 1, num_merges);
+
+    if large_transactions.len() == 1 && small_transactions.is_empty() {
+        let large_tx = large_transactions.into_iter().next().unwrap();
         info!(
-            "Merging tx with {} inputs, {} outputs. With fee {}.",
-            tx_to_include.kernel.inputs.len(),
-            tx_to_include.kernel.outputs.len(),
-            tx_to_include.kernel.fee
+            "Found exactly 1 large transaction with {} inputs (threshold: {}). Using only this transaction",
+            large_tx.kernel.inputs.len(),
+            LARGE_TX_INPUT_THRESHOLD
+        );
+        info!(
+            "Large transaction details: {} inputs, {} outputs, fee {}",
+            large_tx.kernel.inputs.len(),
+            large_tx.kernel.outputs.len(),
+            large_tx.kernel.fee
         );
         block_transaction = BlockTransaction::merge(
             block_transaction,
-            tx_to_include,
+            large_tx,
             rng.random(),
             vm_job_queue.clone(),
             job_options.clone(),
             consensus_rule_set,
         )
         .await?
-        .into(); // fix #579.  propagate error up.
+        .into();
+    } else {
+        if !small_transactions.is_empty() {
+            let num_small = small_transactions.len();
+            info!(
+                "Processing {} small transaction(s) first (to increase TPS)",
+                num_small
+            );
+
+            if num_small >= 3 {
+                info!(
+                    "*** BINARY TREE MERGE ACTIVATED *** for {} small transactions (parallel merge path)",
+                    num_small
+                );
+                block_transaction = binary_tree_merge(
+                    block_transaction,
+                    small_transactions,
+                    rng.clone(),
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                    global_state_lock.clone(),
+                )
+                .await?;
+            } else if num_small == 2 {
+                info!("Using SEQUENTIAL merge for 2 small transactions");
+                for (i, tx) in small_transactions.into_iter().enumerate() {
+                    info!("Merging small transaction {} / {}", i + 1, 2);
+                    info!(
+                        "Merging tx with {} inputs, {} outputs, fee {}",
+                        tx.kernel.inputs.len(),
+                        tx.kernel.outputs.len(),
+                        tx.kernel.fee
+                    );
+                    block_transaction = BlockTransaction::merge(
+                        block_transaction,
+                        tx,
+                        rng.random(),
+                        vm_job_queue.clone(),
+                        job_options.clone(),
+                        consensus_rule_set.clone(),
+                    )
+                    .await?
+                    .into();
+                }
+            } else {
+                let tx = small_transactions.into_iter().next().unwrap();
+                info!("Merging 1 small transaction");
+                info!(
+                    "Merging tx with {} inputs, {} outputs, fee {}",
+                    tx.kernel.inputs.len(),
+                    tx.kernel.outputs.len(),
+                    tx.kernel.fee
+                );
+                block_transaction = BlockTransaction::merge(
+                    block_transaction,
+                    tx,
+                    rng.random(),
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                )
+                .await?
+                .into();
+            }
+        }
+
+        if !large_transactions.is_empty() {
+            let num_large = large_transactions.len();
+            info!(
+                "Processing {} large transaction(s) one by one sequentially",
+                num_large
+            );
+            for (i, large_tx) in large_transactions.into_iter().enumerate() {
+                info!(
+                    "Merging large transaction {} / {}: {} inputs, {} outputs, fee {}",
+                    i + 1,
+                    num_large,
+                    large_tx.kernel.inputs.len(),
+                    large_tx.kernel.outputs.len(),
+                    large_tx.kernel.fee
+                );
+                block_transaction = BlockTransaction::merge(
+                    block_transaction,
+                    large_tx,
+                    rng.random(),
+                    vm_job_queue.clone(),
+                    job_options.clone(),
+                    consensus_rule_set.clone(),
+                )
+                .await?
+                .into();
+            }
+        }
     }
 
     let own_expected_utxos = composer_parameters.extract_expected_utxos(composer_txos);
@@ -701,6 +1021,12 @@ pub(crate) async fn mine(
     let infinite = Duration::from_secs(u32::MAX.into());
     let guess_restart_timer = time::sleep(infinite);
     tokio::pin!(guess_restart_timer);
+
+    // Periodic check timer to re-evaluate conditions when neither guessing nor composing
+    // This ensures the loop doesn't get stuck when --prioritize-upgrades skips composing
+    const RECHECK_INTERVAL_SECS: u64 = 5;
+    let recheck_timer = time::sleep(Duration::from_secs(RECHECK_INTERVAL_SECS));
+    tokio::pin!(recheck_timer);
 
     let mut pause_mine = false;
     let mut wait_for_confirmation = false;
@@ -790,14 +1116,49 @@ pub(crate) async fn mine(
 
         let (cancel_compose_tx, cancel_compose_rx) = tokio::sync::watch::channel(());
 
-        let compose = cli_args.compose;
-        let mut composer_task = if !wait_for_confirmation
+        // Check if we should skip composing to prioritize upgrades/merges
+        // When --prioritize-upgrades is set:
+        // - Compose only when: 0-1 SingleProof AND 0 transactions needing upgrade
+        // - Skip compose when: 2+ SingleProof (need merge) OR any tx needs upgrade
+        let (single_proof_count, upgrades_needed) = global_state_lock
+            .lock(|s| {
+                (
+                    s.mempool.count_synced_single_proof_transactions(),
+                    s.mempool.count_transactions_needing_upgrade(),
+                )
+            })
+            .await;
+        
+        let should_skip_for_upgrades = cli_args.prioritize_upgrades
+            && (single_proof_count >= 2 || upgrades_needed > 0);
+        
+        if should_skip_for_upgrades {
+            if upgrades_needed > 0 {
+                tracing::info!(
+                    "Skipping compose: {} tx(s) need upgrading first (prioritize_upgrades enabled)",
+                    upgrades_needed
+                );
+            } else {
+                tracing::info!(
+                    "Skipping compose: {} SingleProof txs need merging first (prioritize_upgrades enabled)",
+                    single_proof_count
+                );
+            }
+        }
+
+        let compose = cli_args.compose && !should_skip_for_upgrades;
+        let should_compose = !wait_for_confirmation
             && compose
             && guesser_task.is_none()
             && !is_syncing
             && !pause_mine
-            && is_connected
-        {
+            && is_connected;
+
+        let mut composer_task: Option<JoinHandle<Result<()>>> = if should_compose {
+            info!(
+                "Starting compose: {} SingleProof tx(s), {} tx(s) needing upgrade",
+                single_proof_count, upgrades_needed
+            );
             global_state_lock.set_mining_status_to_composing().await;
 
             let latest_block = global_state_lock
@@ -811,23 +1172,47 @@ pub(crate) async fn mine(
                 Timestamp::now(),
             );
 
-            tokio::task::spawn(compose_task)
+            Some(tokio::task::spawn(compose_task))
         } else {
-            tokio::spawn(async { Ok(()) })
+            None
         };
+
+        // Reset recheck timer - only active when idle (neither composing nor guessing).
+        // This checks for upgrade completion so we can start composing.
+        // When composing or guessing, disable the timer to avoid interrupting the work.
+        // NOTE: New transactions arriving will still interrupt via main_loop messages.
+        let recheck_interval = if guesser_task.is_some() || composer_task.is_some() {
+            infinite // Working - don't interrupt with timer
+        } else {
+            Duration::from_secs(RECHECK_INTERVAL_SECS) // Idle - check for upgrade completion
+        };
+        recheck_timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + recheck_interval);
 
         let mut restart_guessing = false;
         let mut stop_guessing = false;
         let mut stop_composing = false;
         let mut stop_looping = false;
+        let mut composition_result_received = false;
 
         // Await a message from either the worker task or from the main loop,
-        // or the restart of the guesser-task.
+        // or the restart of the guesser-task, or the periodic recheck timer.
         select! {
             _ = &mut guess_restart_timer => {
                 restart_guessing = true;
             }
-            Ok(Err(e)) = &mut composer_task => {
+            _ = &mut recheck_timer => {
+                // Periodic recheck - only fires when idle (not composing/guessing).
+                // Re-evaluate conditions at top of loop to see if we can start composing.
+                trace!("Recheck timer triggered - re-evaluating mine loop conditions");
+            }
+            Ok(Err(e)) = async { 
+                match &mut composer_task {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
 
                 match e.root_cause().downcast_ref::<CreateProofError>() {
                     // address issue 579.
@@ -854,11 +1239,27 @@ pub(crate) async fn mine(
                     Some(CreateProofError::JobHandleError(JobHandleError::JobCancelled)) => {
                         debug!("composer job was cancelled. continuing normal operation");
                     }
-                    _ => {
-                        // Ensure graceful shutdown in case of error during composition.
+                    Some(CreateProofError::ProverJobError(_)) | Some(CreateProofError::AddJobError(_)) => {
+                        // External prover failures (GPU crashes, OOM, etc.) are recoverable.
+                        // Log as warning and continue - the node will retry on next block.
+                        warn!("Composition failed due to prover error (recoverable): {}. Will retry on next block.", e);
                         stop_composing = true;
-                        error!("Composition failed: {}", e);
+                        // Don't shutdown - just stop composing for this block and continue
+                    }
+                    Some(CreateProofError::MissingRequirement(_))
+                    | Some(CreateProofError::TooWeak { .. })
+                    | Some(CreateProofError::NotVmProof(_)) => {
+                        // These are fatal configuration/state errors that require shutdown
+                        stop_composing = true;
+                        error!("Composition failed with fatal error: {}. Shutting down.", e);
                         to_main.send(MinerToMain::Shutdown(COMPOSITION_FAILED_EXIT_CODE)).await?;
+                    }
+                    _ => {
+                        // For unknown errors, log as warning and continue rather than shutting down.
+                        // This makes the node more resilient to transient issues.
+                        warn!("Composition failed with unexpected error: {}. Will retry on next block.", e);
+                        stop_composing = true;
+                        // Don't shutdown - just stop composing for this block and continue
                     }
                 }
             },
@@ -867,6 +1268,39 @@ pub(crate) async fn mine(
                 debug!("Miner received message type: {}", main_message.get_type());
 
                 match main_message {
+                    MainToMiner::MempoolChanged => {
+                        // Re-evaluate whether composing should be stopped to prioritize upgrades/merges.
+                        // This allows immediate reaction to new tx arrivals or proof upgrades while composing.
+                        // Only stop compose if --restart-compose-on-new-tx is set (default: false).
+                        if cli_args.prioritize_upgrades && cli_args.restart_compose_on_new_tx {
+                            let (single_proof_count, upgrades_needed) = global_state_lock
+                                .lock(|s| {
+                                    (
+                                        s.mempool.count_synced_single_proof_transactions(),
+                                        s.mempool.count_transactions_needing_upgrade(),
+                                    )
+                                })
+                                .await;
+
+                            let should_stop_for_upgrades =
+                                single_proof_count >= 2 || upgrades_needed > 0;
+
+                            if should_stop_for_upgrades {
+                                if composer_task.is_some() {
+                                    info!(
+                                        "Stopping compose (mempool changed): {} SingleProof tx(s), {} tx(s) needing upgrade (restart_compose_on_new_tx enabled)",
+                                        single_proof_count, upgrades_needed
+                                    );
+                                    stop_composing = true;
+                                }
+
+                                // If we are currently guessing on a proposal, stop guessing too.
+                                // The high-priority work is now upgrading/merging, and any new
+                                // proposal should be composed after that work is done.
+                                stop_guessing = true;
+                            }
+                        }
+                    }
                     MainToMiner::Shutdown => {
                         debug!("Miner shutting down.");
 
@@ -925,6 +1359,7 @@ pub(crate) async fn mine(
 
                 match new_composition {
                     Ok((new_block_proposal, composer_utxos)) => {
+                        composition_result_received = true;
                         to_main.send(MinerToMain::BlockProposal(Box::new((new_block_proposal, composer_utxos)))).await?;
                         wait_for_confirmation = true;
                     },
@@ -982,9 +1417,23 @@ pub(crate) async fn mine(
             global_state_lock.set_mining_status_to_inactive().await;
         }
         if stop_composing {
-            if !composer_task.is_finished() {
-                cancel_compose_tx.send(())?;
-                debug!("Cancel signal sent to composer worker.");
+            // Don't cancel if we've already received the result - this prevents
+            // cancelling binary merge Level 2 when the result is about to be sent.
+            // Also don't cancel if binary merge Level 1 is complete - Level 2 is fast
+            // and worth completing to avoid wasting the Level 1 work.
+            let level1_complete = global_state_lock.is_binary_merge_level1_complete().await;
+
+            if let Some(ref task) = composer_task {
+                if !task.is_finished() && !composition_result_received {
+                    if level1_complete {
+                        // Level 1 is done, Level 2 is typically fast - let it complete
+                        // to avoid wasting the parallel merge work from Level 1
+                        info!("Binary merge Level 1 complete - allowing Level 2 to finish (not cancelling)");
+                    } else {
+                        cancel_compose_tx.send(())?;
+                        debug!("Cancel signal sent to composer worker.");
+                    }
+                }
             }
             // avoid duplicate call if stop_guessing is also true.
             if !stop_guessing {

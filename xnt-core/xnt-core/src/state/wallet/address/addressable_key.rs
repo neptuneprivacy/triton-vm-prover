@@ -16,6 +16,7 @@ use crate::protocol::consensus::transaction::transaction_kernel::TransactionKern
 use crate::protocol::consensus::transaction::utxo::Utxo;
 use crate::state::wallet::incoming_utxo::IncomingUtxo;
 use crate::BFieldElement;
+use num_traits::ConstZero;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[cfg_attr(test, derive(strum::EnumIter))]
@@ -244,6 +245,7 @@ impl SpendingKey {
                     sender_randomness,
                     receiver_preimage,
                     is_guesser_fee: false,
+                    payment_id: BFieldElement::ZERO,
                 }
             }).collect()
     }

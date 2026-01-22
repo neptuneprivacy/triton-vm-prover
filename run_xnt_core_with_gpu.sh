@@ -17,9 +17,10 @@ GPU_PROVER_PATH="${TRITON_GPU_PROVER_PATH:-$SCRIPT_DIR/build/triton_vm_prove_gpu
 XNT_CORE_PATH="${XNT_CORE_PATH:-$SCRIPT_DIR/xnt-core/target/release/xnt-core}"
 
 # GPU/OpenMP settings (adjust to match your hardware)
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"  # Use GPU 0 and 1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"  # Use 2 GPUs
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-64}"
 export TRITON_OMP_INIT="${TRITON_OMP_INIT:-0}"
+export TRITON_VM_MAX_CPU_JOBS="${TRITON_VM_MAX_CPU_JOBS:-$((OMP_NUM_THREADS / 2))}"  # Half of OMP threads for parallel CPU proof jobs
 
 # GPU optimization settings - Performance tuning for GPU prover
 export TRITON_AUX_CPU="${TRITON_AUX_CPU:-1}"                     # Use CPU for auxiliary tables
@@ -28,9 +29,9 @@ export TVM_USE_TBB="${TVM_USE_TBB:-1}"                          # Enable Intel T
 export TRITON_GPU_DEGREE_LOWERING="${TRITON_GPU_DEGREE_LOWERING:-1}"  # GPU degree lowering optimization
 export TRITON_GPU_U32="${TRITON_GPU_U32:-1}"                    # Use 32-bit operations on GPU
 export TVM_USE_RUST_TRACE="${TVM_USE_RUST_TRACE:-1}"            # Use Rust trace execution
-export TRITON_GPU_USE_RAM_OVERFLOW="${TRITON_GPU_USE_RAM_OVERFLOW:-1}"  # Use system RAM as VRAM buffer
-export TRITON_MULTI_GPU="${TRITON_MULTI_GPU:-0}"                # Disable multi-GPU (use single GPU)
-export TRITON_GPU_COUNT="${TRITON_GPU_COUNT:-1}"                # Number of GPUs to use
+export TRITON_GPU_USE_SYSTEM_RAM="${TRITON_GPU_USE_SYSTEM_RAM:-1}"  # Use system RAM as VRAM buffer
+export TRITON_MULTI_GPU="${TRITON_MULTI_GPU:-0}"                # Disable multi-GPU (each GPU works independently)
+export TRITON_GPU_COUNT="${TRITON_GPU_COUNT:-2}"                # Number of GPUs to use
 export TRITON_NTT_REG6STAGE="${TRITON_NTT_REG6STAGE:-1}"        # NTT register optimization (6-stage)
 export TRITON_NTT_FUSED12="${TRITON_NTT_FUSED12:-1}"            # NTT fused kernel optimization
 export TRITON_NTT_COALESCED="${TRITON_NTT_COALESCED:-1}"        # NTT coalesced memory access
@@ -55,11 +56,12 @@ echo "  OMP Threads:    $OMP_NUM_THREADS"
 echo "  OMP Init:       $TRITON_OMP_INIT"
 echo "  Taskflow:       $TVM_USE_TASKFLOW"
 echo "  TBB:            $TVM_USE_TBB"
+echo "  Max CPU Jobs:   $TRITON_VM_MAX_CPU_JOBS"
 echo ""
 echo "GPU Optimizations:"
 echo "  Degree Lower:   $TRITON_GPU_DEGREE_LOWERING"
 echo "  U32 Mode:       $TRITON_GPU_U32"
-echo "  RAM Overflow:   $TRITON_GPU_USE_RAM_OVERFLOW"
+echo "  System RAM:     $TRITON_GPU_USE_SYSTEM_RAM"
 echo "  AUX CPU:        $TRITON_AUX_CPU"
 echo ""
 echo "NTT Optimizations:"
@@ -95,18 +97,67 @@ fi
 
 # Run xnt-core with GPU prover enabled
 # No separate prover server needed!
+#
+# === TPS OPTIMIZATION PARAMETERS ===
+#
+# --max-num-compose-mergers 1
+#   Composer handles only 1 transaction (no binary merging at composer).
+#   This separates responsibilities: proof-upgrader does merging, composer does composition.
+#
+# --max-parallel-upgrades 2
+#   Allow up to 2 parallel proof upgrade jobs in the proof-upgrader.
+#   With 2 GPUs, we can run 2 parallel upgrades (single proof generation).
+#   During merge phase: 2→1, utilizing both GPUs in parallel.
+#
+# --max-upgrade-merge-count 2
+#   Maximum transactions to merge in a single binary tree merge operation.
+#   When >=3, enables binary tree merging for efficient multi-tx processing.
+#   Set to 2 for pair-only merging, or higher (4, 8) for batch merging.
+#
+# --prioritize-upgrades
+#   When set, skip composing if there's work to do:
+#   - 2+ SingleProof transactions exist → merge them first
+#   - Any transactions need upgrading → upgrade them first
+#   Only compose when: 0-1 SingleProof AND 0 upgrades needed.
+#   This ensures all transactions are processed before creating a block.
+#
+# --restart-compose-on-new-tx (default: false)
+#   When set, cancel and restart compose when new tx arrives or proof is upgraded.
+#   Requires --prioritize-upgrades to be effective.
+#   Default false: compose continues until completion without interruption.
+#
+# --upgrade-all-proof-collections (default: false)
+#   When set, upgrade ALL peer ProofCollection transactions to SingleProof,
+#   regardless of the gobbling fee incentive (bypasses min-gobbling-fee check).
+#   Useful to help the network by upgrading low-fee peer transactions.
+#
+# --max-num-proofs (default: 16)
+#   Maximum number of proofs in a ProofCollection that can be upgraded.
+#   A transaction with N inputs has approximately N+5 proofs (one per lock script).
+#   Set high enough to handle large transactions (e.g., 100 for up to ~95 inputs).
+#
 exec "$XNT_CORE_PATH" \
   --network main \
   --peer 161.97.150.88:9898 \
   --peer 154.38.160.61:9898 \
   --peer 103.78.0.72:9898 \
   --peer 5.21.91.33:9898 \
+  --peer 154.7.90.1:9898 \
+  --peer [::ffff:176.97.248.147]:9898 \
+  --peer 199.127.60.95:9898 \
+  --peer 172.96.172.242:9898 \
   --compose \
   --guesser-fraction 0.5 \
+  --max-num-compose-mergers 1 \
+  --max-parallel-upgrades 2 \
+  --max-upgrade-merge-count 2 \
   --tx-proof-upgrading \
   --tx-proving-capability=singleproof \
   --gobbling-fraction=0.6 \
   --min-gobbling-fee=0.0001 \
   --tx-upgrade-filter=1:0 \
-  --max-num-peers 20 \
+  --prioritize-upgrades \
+  --upgrade-all-proof-collections \
+  --restart-compose-on-new-tx \
+  --max-num-proofs 100 \
   "$@"

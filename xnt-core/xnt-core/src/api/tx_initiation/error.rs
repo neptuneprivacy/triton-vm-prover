@@ -76,6 +76,9 @@ pub enum CreateProofError {
     #[error("target proof type {0} is not a triton-vm proof.")]
     NotVmProof(TransactionProofType),
 
+    #[error("cannot create proof: {0}")]
+    CannotProve(String),
+
     #[error(transparent)]
     AddJobError(#[from] AddJobError),
 

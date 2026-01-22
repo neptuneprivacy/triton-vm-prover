@@ -3,6 +3,7 @@ build/
 cmake-build-*/
 _build/
 out/
+built_kernels/
 
 # CMake generated files
 CMakeCache.txt
@@ -60,6 +61,10 @@ ENV/
 
 # Rust target directories
 rust/*/target/
+target/release/
+**/target/release/
+triton-vm/target/
+**/triton-vm/target/
 
 # OS files
 Thumbs.db
@@ -71,6 +76,9 @@ Thumbs.db
 *.bak
 *.backup
 *~
+
+# Patch files
+*.patch
 
 # Log files
 *.log

@@ -927,6 +927,7 @@ mod tests {
                     expected_utxo.sender_randomness,
                     alice_key.receiver_preimage(),
                     UtxoNotifier::OwnMinerComposeBlock,
+                    tasm_lib::triton_vm::prelude::BFieldElement::ZERO,
                 )
             })
             .collect_vec();
@@ -942,6 +943,7 @@ mod tests {
             receiver_data_1_to_alice_new.sender_randomness(),
             alice_key.receiver_preimage(),
             UtxoNotifier::Cli,
+            tasm_lib::triton_vm::prelude::BFieldElement::ZERO,
         );
         alice
             .lock_guard_mut()

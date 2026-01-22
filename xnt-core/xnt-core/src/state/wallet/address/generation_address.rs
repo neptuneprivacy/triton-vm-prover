@@ -25,6 +25,7 @@ use arbitrary::Arbitrary;
 use bech32::FromBase32;
 use bech32::ToBase32;
 use bech32::Variant;
+use num_traits::Zero;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 use tasm_lib::prelude::Tip5;
@@ -46,6 +47,10 @@ use crate::state::wallet::utxo_notification::UtxoNotificationPayload;
 
 pub(super) const GENERATION_FLAG_U8: u8 = 79;
 pub const GENERATION_FLAG: BFieldElement = BFieldElement::new(GENERATION_FLAG_U8 as u64);
+
+pub(super) const GENERATION_SUBADDR_FLAG_U8: u8 = 179;
+pub const GENERATION_SUBADDR_FLAG: BFieldElement =
+    BFieldElement::new(GENERATION_SUBADDR_FLAG_U8 as u64);
 
 // note: we serde(skip) fields that can be computed from the seed in order to
 // keep the serialized (including bech32m) representation small.
@@ -422,6 +427,142 @@ impl GenerationReceivingAddress {
     /// returns the `spending_lock`
     pub fn spending_lock(&self) -> Digest {
         self.lock_postimage
+    }
+
+    /// Create a subaddress with the given payment_id
+    ///
+    /// # Errors
+    /// Returns error if payment_id is zero.
+    pub fn with_payment_id(&self, payment_id: BFieldElement) -> Result<GenerationSubAddress> {
+        GenerationSubAddress::new(*self, payment_id)
+    }
+
+    /// Create a subaddress with an index-derived payment_id
+    ///
+    /// # Errors
+    /// Returns error if index is zero.
+    pub fn subaddress(&self, index: u64) -> Result<GenerationSubAddress> {
+        GenerationSubAddress::from_index(*self, index)
+    }
+}
+
+/// A subaddress combining a base address with a payment_id.
+///
+/// SubAddress = GenerationReceivingAddress + payment_id
+///
+/// The subaddress can be converted to/from (address, payment_id) pair.
+/// When encoded as bech32m, it includes both the base address and payment_id.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenerationSubAddress {
+    /// The base receiving address
+    base: GenerationReceivingAddress,
+
+    /// The payment identifier for this subaddress
+    payment_id: BFieldElement,
+}
+
+impl GenerationSubAddress {
+    /// Create a new subaddress from a base address and payment_id.
+    ///
+    /// # Errors
+    /// Returns error if payment_id is zero - use base address directly for zero payment_id.
+    pub fn new(base: GenerationReceivingAddress, payment_id: BFieldElement) -> Result<Self> {
+        ensure!(
+            !payment_id.is_zero(),
+            "payment_id must be non-zero for subaddresses; use base address directly"
+        );
+        Ok(Self { base, payment_id })
+    }
+
+    /// Create a subaddress with an index-derived payment_id.
+    ///
+    /// # Errors
+    /// Returns error if index is zero - use base address directly for zero payment_id.
+    pub fn from_index(base: GenerationReceivingAddress, index: u64) -> Result<Self> {
+        ensure!(index != 0, "index must be non-zero for subaddresses");
+        Self::new(base, BFieldElement::new(index))
+    }
+
+    /// Get the encryption key (same as base address)
+    pub fn encryption_key(&self) -> lattice::kem::PublicKey {
+        self.base.encryption_key
+    }
+
+    /// Get payment_id as u64
+    pub fn payment_id_u64(&self) -> u64 {
+        self.payment_id.value()
+    }
+
+    /// Get payment_id
+    pub fn payment_id(&self) -> BFieldElement {
+        self.payment_id
+    }
+
+    /// Get base address
+    pub fn base(&self) -> &GenerationReceivingAddress {
+        &self.base
+    }
+
+    /// Split into (base, payment_id)
+    pub fn split(self) -> (GenerationReceivingAddress, BFieldElement) {
+        (self.base, self.payment_id)
+    }
+
+    /// Returns human readable prefix (hrp) for this subaddress type
+    pub(super) fn get_hrp(network: Network) -> String {
+        let mut hrp = "xntsa".to_string();
+        let network_byte = common::network_hrp_char(network);
+        hrp.push(network_byte);
+        hrp
+    }
+
+    /// Encode subaddress as bech32m string
+    pub fn to_bech32m(&self, network: Network) -> Result<String> {
+        let hrp = Self::get_hrp(network);
+        let payload = bincode::serialize(self)?;
+        let variant = Variant::Bech32m;
+        match bech32::encode(&hrp, payload.to_base32(), variant) {
+            Ok(enc) => Ok(enc),
+            Err(e) => bail!("Could not encode subaddress as bech32m because error: {e}"),
+        }
+    }
+
+    /// Decode subaddress from bech32m string
+    pub fn from_bech32m(encoded: &str, network: Network) -> Result<Self> {
+        let expected_hrp = Self::get_hrp(network);
+        let (hrp, data, variant) = bech32::decode(encoded)?;
+
+        ensure!(
+            variant == Variant::Bech32m,
+            "Can only decode bech32m subaddresses.",
+        );
+        ensure!(
+            hrp == expected_hrp,
+            "Invalid prefix for subaddress. Expected: {expected_hrp}, got: {hrp}",
+        );
+
+        let payload = Vec::<u8>::from_base32(&data)?;
+        bincode::deserialize(&payload)
+            .map_err(|e| anyhow!("Could not decode bech32m subaddress because of error: {e}"))
+    }
+
+    /// Get receiver_identifier (same as base)
+    pub fn receiver_identifier(&self) -> BFieldElement {
+        self.base.receiver_identifier
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary-impls"))]
+impl<'a> Arbitrary<'a> for GenerationSubAddress {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let base = GenerationReceivingAddress::arbitrary(u)?;
+        // payment_id must be non-zero for subaddresses
+        let mut payment_id = BFieldElement::arbitrary(u)?;
+        if payment_id.is_zero() {
+            payment_id = BFieldElement::new(1);
+        }
+        // unwrap is safe here because we ensured payment_id is non-zero
+        Ok(Self::new(base, payment_id).unwrap())
     }
 }
 

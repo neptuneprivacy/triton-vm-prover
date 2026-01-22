@@ -23,6 +23,13 @@ pub(crate) enum MainToMiner {
     /// Communicates that a new block is now considered canonical
     NewBlock,
 
+    /// Communicates that the mempool changed (tx added/removed/upgraded/merged).
+    ///
+    /// Used to allow the miner to re-evaluate whether it should keep composing,
+    /// or stop composing to prioritize upgrades/merges when `--prioritize-upgrades`
+    /// is enabled.
+    MempoolChanged,
+
     Shutdown,
 
     /// Communicates to miner that it should work on a new block proposal.
@@ -50,6 +57,7 @@ impl MainToMiner {
     pub(crate) fn get_type(&self) -> &str {
         match self {
             MainToMiner::NewBlock => "new block",
+            MainToMiner::MempoolChanged => "mempool changed",
             MainToMiner::Shutdown => "shutdown",
             MainToMiner::NewBlockProposal => "new block proposal",
             MainToMiner::WaitForContinue => "wait for continue",

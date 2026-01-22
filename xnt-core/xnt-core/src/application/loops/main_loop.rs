@@ -2,6 +2,7 @@ pub mod proof_upgrader;
 pub(crate) mod upgrade_incentive;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::process::Stdio;
@@ -65,6 +66,7 @@ use crate::state::mempool::mempool_update_job_result::MempoolUpdateJobResult;
 use crate::state::mempool::upgrade_priority::UpgradePriority;
 use crate::state::mining::block_proposal::BlockProposal;
 use crate::state::networking_state::SyncAnchor;
+use crate::state::transaction::transaction_kernel_id::TransactionKernelId;
 use crate::state::transaction::tx_proving_capability::TxProvingCapability;
 use crate::state::GlobalState;
 use crate::state::GlobalStateLock;
@@ -74,7 +76,7 @@ const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(2 * 60);
 const SYNC_REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 const MEMPOOL_PRUNE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MP_RESYNC_INTERVAL: Duration = Duration::from_secs(59);
-const PROOF_UPGRADE_INTERVAL: Duration = Duration::from_secs(10);
+const PROOF_UPGRADE_INTERVAL: Duration = Duration::from_secs(2);
 const EXPECTED_UTXOS_PRUNE_INTERVAL: Duration = Duration::from_secs(19 * 60);
 
 const SANCTION_PEER_TIMEOUT_FACTOR: u64 = 40;
@@ -141,6 +143,9 @@ pub struct MainLoopHandler {
     mock_now: Option<SystemTime>,
 }
 
+/// Channel capacity for upgrade completion signals
+const UPGRADE_COMPLETION_CHANNEL_CAPACITY: usize = 64;
+
 /// The mutable part of the main loop function
 struct MutableMainLoopState {
     /// Information used to batch-download blocks.
@@ -152,8 +157,14 @@ struct MutableMainLoopState {
     /// A list of join-handles to spawned tasks.
     task_handles: Vec<JoinHandle<()>>,
 
-    /// A join-handle to a task performing transaction-proof upgrades.
-    proof_upgrader_task: Option<JoinHandle<()>>,
+    /// Join-handles to tasks performing transaction-proof upgrades, paired with their affected txids.
+    /// Supports parallel processing of multiple upgrade jobs.
+    /// When a task finishes, we remove its txids from in_progress tracking.
+    proof_upgrader_tasks: Vec<(JoinHandle<()>, Vec<TransactionKernelId>)>,
+
+    /// Track which transactions are currently being upgraded to prevent duplicate work.
+    /// Maps transaction IDs to the number of tasks working on them.
+    in_progress_txids: std::collections::HashSet<TransactionKernelId>,
 
     /// A join-handle to a task running the update of the mempool transactions.
     update_mempool_txs_handle: Option<JoinHandle<()>>,
@@ -161,19 +172,29 @@ struct MutableMainLoopState {
     /// A channel that the task updating mempool transactions can use to
     /// communicate its result.
     update_mempool_receiver: mpsc::Receiver<Vec<MempoolUpdateJobResult>>,
+
+    /// Channel for signaling when an upgrade task completes, so we can
+    /// immediately look for more work instead of waiting for the next timer tick.
+    upgrade_completion_sender: mpsc::Sender<()>,
+    upgrade_completion_receiver: mpsc::Receiver<()>,
 }
 
 impl MutableMainLoopState {
     fn new(task_handles: Vec<JoinHandle<()>>) -> Self {
         let (_dummy_sender, dummy_receiver) =
             mpsc::channel::<Vec<MempoolUpdateJobResult>>(TX_UPDATER_CHANNEL_CAPACITY);
+        let (upgrade_completion_sender, upgrade_completion_receiver) =
+            mpsc::channel::<()>(UPGRADE_COMPLETION_CHANNEL_CAPACITY);
         Self {
             sync_state: SyncState::default(),
             potential_peers: PotentialPeersState::default(),
             task_handles,
-            proof_upgrader_task: None,
+            proof_upgrader_tasks: Vec::new(),
+            in_progress_txids: HashSet::new(),
             update_mempool_txs_handle: None,
             update_mempool_receiver: dummy_receiver,
+            upgrade_completion_sender,
+            upgrade_completion_receiver,
         }
     }
 }
@@ -627,6 +648,10 @@ impl MainLoopHandler {
             }
         }
 
+        // Mempool was updated (tx removed/updated/inserted). Notify miner so it can
+        // re-evaluate whether to keep composing or prioritize upgrades/merges.
+        self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
+
         // Tell miner that it can now continue either composing or guessing.
         self.main_to_miner_tx.send(MainToMiner::Continue);
     }
@@ -1034,6 +1059,10 @@ impl MainLoopHandler {
                         )
                         .await;
                 }
+
+                // Transaction was added to mempool. Notify miner so it can cancel composing
+                // if `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 let is_nop = pt2m_transaction.transaction.kernel.inputs.is_empty()
                     && pt2m_transaction.transaction.kernel.outputs.is_empty()
@@ -1490,67 +1519,142 @@ impl MainLoopHandler {
     /// the main loop. The MutableMainLoopState gets the JoinHandle of the
     /// spawned upgrade task such that its status can be expected.
     async fn proof_upgrader(&mut self, main_loop_state: &mut MutableMainLoopState) -> Result<()> {
-        fn attempt_upgrade(
+        fn can_attempt_upgrade(
             global_state: &GlobalState,
-            main_loop_state: &MutableMainLoopState,
+            _main_loop_state: &MutableMainLoopState,
         ) -> bool {
-            let previous_upgrade_task_is_still_running = main_loop_state
-                .proof_upgrader_task
-                .as_ref()
-                .is_some_and(|x| !x.is_finished());
+            // Don't run proof upgrader if binary merge is active - this prevents
+            // the upgrader from interfering with the parallel merge process
+            let binary_merge_active = global_state
+                .mining_state
+                .mining_status
+                .is_binary_merge_active();
+
+            if binary_merge_active {
+                debug!("Skipping proof upgrade: binary merge is active");
+                return false;
+            }
+
             global_state.cli().tx_proof_upgrading
                 && global_state.net.sync_anchor.is_none()
                 && global_state.proving_capability() == TxProvingCapability::SingleProof
-                && !previous_upgrade_task_is_still_running
         }
 
         trace!("Running proof upgrader scheduled task");
 
-        // Check if it's time to run the proof-upgrader, and if we're capable
-        // of upgrading a transaction proof.
-        let upgrade_candidate = {
-            let mut global_state = self.global_state_lock.lock_guard_mut().await;
-            if !attempt_upgrade(&global_state, main_loop_state) {
+        // Clean up finished tasks and their associated txids
+        let mut txids_to_remove = Vec::new();
+        main_loop_state
+            .proof_upgrader_tasks
+            .retain(|(task, txids)| {
+                if task.is_finished() {
+                    // Task finished - mark its txids for removal from in_progress tracking
+                    txids_to_remove.extend(txids.iter().cloned());
+                    false // Remove this task
+                } else {
+                    true // Keep this task
+                }
+            });
+        
+        // Remove finished task txids from in_progress tracking
+        if !txids_to_remove.is_empty() {
+            debug!("Cleaning up {} txid(s) from finished tasks", txids_to_remove.len());
+            for txid in txids_to_remove {
+                main_loop_state.in_progress_txids.remove(&txid);
+            }
+        }
+
+        // Check if we can attempt upgrades
+        let max_parallel = {
+            let global_state = self.global_state_lock.lock_guard().await;
+            if !can_attempt_upgrade(&global_state, main_loop_state) {
                 trace!("Not attempting upgrade.");
                 return Ok(());
             }
-
-            debug!("Attempting to run transaction-proof-upgrade");
-
-            // Find a candidate for proof upgrade
-            let Some(upgrade_candidate) = get_upgrade_task_from_mempool(&mut global_state).await
-            else {
-                debug!("Found no transaction-proof to upgrade");
-                return Ok(());
-            };
-
-            upgrade_candidate
+            global_state.cli().max_parallel_upgrades.get()
         };
 
-        info!(
-            "Attempting to upgrade transaction proofs of: {}",
-            upgrade_candidate.affected_txids().iter().join("; ")
-        );
+        // Check how many tasks we can spawn
+        let current_running = main_loop_state.proof_upgrader_tasks.len();
+        if current_running >= max_parallel {
+            trace!(
+                "Already at max parallel upgrades ({}), skipping new spawns",
+                max_parallel
+            );
+            return Ok(());
+        }
 
-        // Perform the upgrade, if we're not using the prover for anything else,
-        // like mining, or proving our own transaction. Running the prover takes
-        // a long time (minutes), so we spawn a task for this such that we do
-        // not block the main loop.
+        let tasks_to_spawn = max_parallel - current_running;
         let vm_job_queue = vm_job_queue();
+        let mut spawned_count = 0;
 
-        let global_state_lock_clone = self.global_state_lock.clone();
-        let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
-        let proof_upgrader_task = tokio::task::spawn(async move {
-            upgrade_candidate
-                .handle_upgrade(
-                    vm_job_queue,
-                    global_state_lock_clone,
-                    main_to_peer_broadcast_tx_clone,
-                )
-                .await
-        });
+        // Try to spawn multiple upgrade tasks
+        for _ in 0..tasks_to_spawn {
+            let (upgrade_candidate, affected_txids) = {
+                let mut global_state = self.global_state_lock.lock_guard_mut().await;
 
-        main_loop_state.proof_upgrader_task = Some(proof_upgrader_task);
+                // Re-check conditions in case something changed
+                if !can_attempt_upgrade(&global_state, main_loop_state) {
+                    break;
+                }
+
+                debug!("Attempting to run transaction-proof-upgrade");
+
+                // Find a candidate for proof upgrade, excluding transactions already in progress
+                // This allows finding different candidates in each iteration
+                let Some(upgrade_candidate) =
+                    get_upgrade_task_from_mempool(&mut global_state, &main_loop_state.in_progress_txids).await
+                else {
+                    debug!("Found no transaction-proof to upgrade");
+                    break;
+                };
+
+                // Get affected txids and mark them as in-progress
+                let affected_txids = upgrade_candidate.affected_txids();
+                for txid in &affected_txids {
+                    main_loop_state.in_progress_txids.insert(*txid);
+                }
+                (upgrade_candidate, affected_txids)
+            };
+
+            info!(
+                "Attempting to upgrade transaction proofs of: {}",
+                affected_txids.iter().join("; ")
+            );
+
+            // Perform the upgrade, if we're not using the prover for anything else,
+            // like mining, or proving our own transaction. Running the prover takes
+            // a long time (minutes), so we spawn a task for this such that we do
+            // not block the main loop.
+            let vm_job_queue_clone = vm_job_queue.clone();
+            let global_state_lock_clone = self.global_state_lock.clone();
+            let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+            let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
+            let completion_sender = main_loop_state.upgrade_completion_sender.clone();
+            let proof_upgrader_task = tokio::task::spawn(async move {
+                upgrade_candidate
+                    .handle_upgrade(
+                        vm_job_queue_clone,
+                        global_state_lock_clone,
+                        main_to_peer_broadcast_tx_clone,
+                        main_to_miner_tx_clone,
+                    )
+                    .await;
+                // Signal that this upgrade task has completed so the main loop
+                // can immediately look for more work instead of waiting for the timer
+                let _ = completion_sender.send(()).await;
+            });
+
+            // Store both the task handle and its affected txids for cleanup tracking
+            main_loop_state
+                .proof_upgrader_tasks
+                .push((proof_upgrader_task, affected_txids));
+            spawned_count += 1;
+        }
+
+        if spawned_count > 0 {
+            info!("Spawned {} parallel upgrade task(s)", spawned_count);
+        }
 
         Ok(())
     }
@@ -1874,6 +1978,15 @@ impl MainLoopHandler {
                     self.proof_upgrader(&mut main_loop_state).await?;
                 }
 
+                // Handle upgrade task completion - immediately look for more work
+                // This ensures GPUs don't sit idle waiting for the next timer tick
+                _ = main_loop_state.upgrade_completion_receiver.recv() => {
+                    log_slow_scope!(fn_name!() + "::select::upgrade_completion");
+
+                    trace!("Upgrade task completed, checking for more work");
+                    self.proof_upgrader(&mut main_loop_state).await?;
+                }
+
             }
         };
 
@@ -1901,6 +2014,11 @@ impl MainLoopHandler {
 
                 // note: this Tx must already have been added to the mempool by
                 // sender.  This occurs in GlobalStateLock::record_transaction().
+                //
+                // Since this code path bypasses the mempool insert handlers in main_loop,
+                // we must still notify the miner that the mempool changed so it can cancel
+                // composing when `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 // Is this a transaction we can share with peers? If so, share
                 // it immediately.
@@ -1928,12 +2046,14 @@ impl MainLoopHandler {
 
                     let global_state_lock_clone = self.global_state_lock.clone();
                     let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+                    let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
                     let _proof_upgrader_task = tokio::task::spawn(async move {
                         upgrade_job
                             .handle_upgrade(
                                 vm_job_queue.clone(),
                                 global_state_lock_clone,
                                 main_to_peer_broadcast_tx_clone,
+                                main_to_miner_tx_clone,
                             )
                             .await
                     });
@@ -1950,6 +2070,7 @@ impl MainLoopHandler {
                 let vm_job_queue = vm_job_queue();
                 let global_state_lock_clone = self.global_state_lock.clone();
                 let main_to_peer_broadcast_tx_clone = self.main_to_peer_broadcast_tx.clone();
+                let main_to_miner_tx_clone = self.main_to_miner_tx.0.clone();
                 info!(
                     "Attempting to upgrade transactions: {}",
                     upgrade_job.affected_txids().iter().join(", ")
@@ -1960,6 +2081,7 @@ impl MainLoopHandler {
                             vm_job_queue,
                             global_state_lock_clone,
                             main_to_peer_broadcast_tx_clone,
+                            main_to_miner_tx_clone,
                         )
                         .await
                 });
@@ -2080,6 +2202,10 @@ impl MainLoopHandler {
                         .mempool_insert(*transaction, UpgradePriority::Critical)
                         .await;
                 }
+
+                // Transaction was added to mempool via RPC. Notify miner so it can cancel composing
+                // if `--prioritize-upgrades` conditions become true.
+                self.main_to_miner_tx.send(MainToMiner::MempoolChanged);
 
                 // If transaction can be sent thru P2P, submit instantly.
                 // This might be mempools responsibility but for now...
@@ -2656,12 +2782,17 @@ mod tests {
                 "Scheduled task must return OK when it's time to upgrade"
             );
 
-            // Wait for upgrade task to finish.
-            let handle = mutable_main_loop_state.proof_upgrader_task.unwrap().await;
+            // Wait for upgrade task(s) to finish.
             assert!(
-                handle.is_ok(),
-                "Proof-upgrade task must finish successfully."
+                !mutable_main_loop_state.proof_upgrader_tasks.is_empty(),
+                "At least one upgrade task should be spawned"
             );
+            for (handle, _txids) in mutable_main_loop_state.proof_upgrader_tasks {
+                assert!(
+                    handle.await.is_ok(),
+                    "Proof-upgrade task must finish successfully."
+                );
+            }
 
             // At this point there should be one transaction in the mempool,
             // which is (if all is well) the merger of the ProofCollection

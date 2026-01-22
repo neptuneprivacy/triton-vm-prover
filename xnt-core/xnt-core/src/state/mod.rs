@@ -29,6 +29,7 @@ use light_state::LightState;
 use mempool::Mempool;
 use mining::block_proposal::BlockProposal;
 use mining::mining_state::MiningState;
+use mining::mining_status::BinaryMergeStage;
 use mining::mining_status::ComposingWorkInfo;
 use mining::mining_status::GuessingWorkInfo;
 use mining::mining_status::MiningStatus;
@@ -216,6 +217,41 @@ impl GlobalStateLock {
         let work_info = ComposingWorkInfo::new(now);
         self.lock_guard_mut().await.mining_state.mining_status = MiningStatus::Composing(work_info);
         tracing::debug!("set mining status: composing");
+    }
+
+    /// Update the binary merge stage in the mining status.
+    /// Only has effect if currently in Composing state.
+    ///
+    /// This method uses `&self` rather than `&mut self` because it needs to be
+    /// callable from cloned GlobalStateLock instances during binary merge operations.
+    /// The underlying AtomicRw uses Arc<RwLock> so this is thread-safe.
+    pub async fn set_binary_merge_stage(&self, stage: BinaryMergeStage) {
+        // Use the underlying Arc<RwLock> directly since we need &self access
+        // for cloned GlobalStateLock instances used in binary_tree_merge
+        let mut guard = self.global_state_lock.inner().write().await;
+        if let MiningStatus::Composing(ref mut info) = guard.mining_state.mining_status {
+            *info = info.with_binary_merge_stage(stage);
+            tracing::debug!("set binary merge stage: {}", stage);
+        }
+    }
+
+    /// Check if a binary merge is currently active.
+    /// Returns true if the miner is composing and a binary merge is in progress.
+    pub async fn is_binary_merge_active(&self) -> bool {
+        self.lock(|s| s.mining_state.mining_status.is_binary_merge_active())
+            .await
+    }
+
+    /// Check if binary merge Level 1 is complete (Level 2 is in progress).
+    /// This is used to decide whether to cancel the composing task -
+    /// if Level 1 is complete, Level 2 is typically fast and worth completing.
+    pub async fn is_binary_merge_level1_complete(&self) -> bool {
+        self.lock(|s| {
+            s.mining_state
+                .mining_status
+                .is_binary_merge_level1_complete()
+        })
+        .await
     }
 
     // persist wallet state to disk
@@ -1268,6 +1304,7 @@ impl GlobalState {
                 incoming_utxo.aocl_index,
                 restored_msmp.sender_randomness,
                 restored_msmp.receiver_preimage,
+                num_traits::ConstZero::ZERO,
                 (
                     confirming_block_digest,
                     confirming_block_header.timestamp,
@@ -2173,6 +2210,16 @@ impl GlobalState {
         proof: ProofCollection,
         upgrade_incentive: UpgradeIncentive,
     ) -> Result<ProofCollectionToSingleProof> {
+        // Merged transactions (merge_bit=true) cannot be upgraded through the
+        // ProofCollection→SingleProof path because ProofCollection verification
+        // explicitly requires merge_bit=false. Merged transactions already have
+        // valid SingleProofs generated through the MergeWitness path.
+        ensure!(
+            !kernel.merge_bit,
+            "Cannot upgrade merged transactions (merge_bit=true) through ProofCollection path. \
+             Merged transactions already have SingleProofs from the merge operation."
+        );
+
         let msa_lookup_result = self
             .chain
             .archival_state_mut()

@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-triton-vm = { path = "../../triton-vm-1.0.0/triton-vm" }
-ndarray = { version = "0.16.1", features = ["rayon", "serde"] }
-strum = { version = "0.26", features = ["derive"] }
-triton-air = { path = "../../triton-vm-1.0.0/triton-air" }
-twenty-first = "1.0.0"
+triton-vm = { path = "../../triton-vm/triton-vm" }
+ndarray = { version = "0.17", features = ["rayon", "serde"] }
+strum = { version = "0.27", features = ["derive"] }
+triton-air = { path = "../../triton-vm/triton-air" }
+twenty-first = { path = "../../triton-vm/twenty-first-local/twenty-first" }

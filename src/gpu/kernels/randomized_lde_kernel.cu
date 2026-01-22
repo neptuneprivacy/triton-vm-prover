@@ -1460,6 +1460,204 @@ void randomized_xfe_lde_batch_gpu(
     cudaFree(d_bfe_randomizers);
 }
 
+// ============================================================================
+// Two-Phase LDE: Optimized for multi-coset evaluation
+// ============================================================================
+
+__global__ void randomizer_pad_scale_kernel(
+    const uint64_t* __restrict__ d_randomizer_coeffs, // [num_cols * randomizer_len]
+    const uint64_t* __restrict__ d_powers,            // [target_len]
+    size_t randomizer_len,
+    size_t target_len,
+    size_t num_cols,
+    uint64_t* __restrict__ d_output  // [num_cols * target_len] - PRE-ZEROED!
+) {
+    size_t idx = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x);
+    size_t total = num_cols * randomizer_len;
+    if (idx >= total) return;
+    
+    size_t col = idx / randomizer_len;
+    size_t row = idx % randomizer_len;
+    
+    uint64_t coeff = d_randomizer_coeffs[col * randomizer_len + row];
+    d_output[col * target_len + row] = bfield_mul_impl(coeff, d_powers[row]);
+}
+
+__global__ void add_scaled_kernel(
+    uint64_t* __restrict__ d_output,
+    const uint64_t* __restrict__ d_tail,
+    uint64_t scale,
+    size_t total
+) {
+    size_t idx = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x);
+    if (idx >= total) return;
+    uint64_t term = bfield_mul_impl(d_tail[idx], scale);
+    d_output[idx] = bfield_add_impl(d_output[idx], term);
+}
+
+/**
+ * Phase 1: Compute polynomial coefficients from trace
+ * 
+ * Does the expensive work (memcpy + INTT + trace_offset scaling) that is
+ * IDENTICAL for all cosets. Call this once, then call evaluate_coset_from_coefficients_gpu
+ * multiple times with different coset offsets.
+ */
+void compute_trace_coefficients_gpu(
+    const uint64_t* d_trace_table,
+    size_t num_cols,
+    size_t trace_len,
+    uint64_t trace_offset,
+    uint64_t* d_coefficients,
+    cudaStream_t stream
+) {
+    constexpr int BLOCK_SIZE = 256;
+    const bool profile = TRITON_PROFILE_ENABLED();
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto elapsed = [&t0]() {
+        auto now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - t0).count();
+        t0 = now;
+        return ms;
+    };
+    
+    // Step 1: Copy trace to coefficients buffer
+    cudaMemcpyAsync(d_coefficients, d_trace_table, 
+                    num_cols * trace_len * sizeof(uint64_t),
+                    cudaMemcpyDeviceToDevice, stream);
+    if (profile) { cudaStreamSynchronize(stream); printf("      [COEFFS] memcpy: %.2f ms\n", elapsed()); }
+    
+    // Step 2: Batched INTT to get polynomial coefficients
+    ntt_inverse_batched_gpu(d_coefficients, trace_len, num_cols, stream);
+    if (profile) { cudaStreamSynchronize(stream); printf("      [COEFFS] INTT (%zu cols x %zu): %.2f ms\n", num_cols, trace_len, elapsed()); }
+    
+    // Step 3: Apply trace_offset coset scaling (scale by offset^(-i))
+    uint64_t offset_inv = bfield_inv_host(trace_offset);
+    
+    uint64_t* d_interp_powers;
+    cudaMalloc(&d_interp_powers, trace_len * sizeof(uint64_t));
+    
+    constexpr size_t INTERP_CHUNK_SIZE = 4096;
+    size_t interp_num_chunks = (trace_len + INTERP_CHUNK_SIZE - 1) / INTERP_CHUNK_SIZE;
+    
+    uint64_t* d_interp_chunk_bases;
+    cudaMalloc(&d_interp_chunk_bases, interp_num_chunks * sizeof(uint64_t));
+    
+    int grid_bases = (interp_num_chunks + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    generate_chunk_bases_kernel<<<grid_bases, BLOCK_SIZE, 0, stream>>>(
+        d_interp_chunk_bases, interp_num_chunks, offset_inv, INTERP_CHUNK_SIZE
+    );
+    generate_powers_chunked_kernel<<<interp_num_chunks, 1, 0, stream>>>(
+        d_interp_powers, trace_len, offset_inv, INTERP_CHUNK_SIZE, d_interp_chunk_bases
+    );
+    cudaFree(d_interp_chunk_bases);
+    
+    constexpr int INTERP_ELEMS_PER_THREAD = 4;
+    int grid_interp = (num_cols * trace_len + BLOCK_SIZE * INTERP_ELEMS_PER_THREAD - 1) / (BLOCK_SIZE * INTERP_ELEMS_PER_THREAD);
+    batched_coset_interpolate_scale_kernel<<<grid_interp, BLOCK_SIZE, 0, stream>>>(
+        d_coefficients, trace_len, num_cols, d_interp_powers
+    );
+    cudaFree(d_interp_powers);
+    if (profile) { cudaStreamSynchronize(stream); printf("      [COEFFS] coset_scale: %.2f ms\n", elapsed()); }
+}
+
+/**
+ * Phase 2: Evaluate polynomial at a specific coset from pre-computed coefficients
+ * 
+ * This is much faster than the full LDE because it skips memcpy and INTT.
+ * Call this multiple times with different coset_offset values.
+ */
+void evaluate_coset_from_coefficients_gpu(
+    const uint64_t* d_coefficients,
+    size_t num_cols,
+    size_t trace_len,
+    const uint64_t* d_randomizer_coeffs,
+    size_t randomizer_len,
+    uint64_t trace_offset,
+    uint64_t coset_offset,
+    uint64_t* d_output,
+    uint64_t* d_tail_scratch,
+    cudaStream_t stream
+) {
+    constexpr int BLOCK_SIZE = 256;
+    const bool profile = TRITON_PROFILE_ENABLED();
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto elapsed = [&t0]() {
+        auto now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - t0).count();
+        t0 = now;
+        return ms;
+    };
+    
+    size_t zerofier_rand_len = trace_len + randomizer_len;
+    size_t poly_len = std::max(trace_len, zerofier_rand_len);
+    size_t target_len = trace_len;  // For frugal mode, target == trace
+    
+    uint64_t offset_pow_n = bfield_pow_host(trace_offset, trace_len);
+    
+    // Generate powers of coset_offset (length = target_len)
+    uint64_t* d_powers;
+    cudaMalloc(&d_powers, target_len * sizeof(uint64_t));
+    
+    constexpr size_t POWER_CHUNK_SIZE = 4096;
+    size_t num_chunks = (target_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+    
+    uint64_t* d_chunk_bases;
+    cudaMalloc(&d_chunk_bases, num_chunks * sizeof(uint64_t));
+    
+    int grid_bases = (num_chunks + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    generate_chunk_bases_kernel<<<grid_bases, BLOCK_SIZE, 0, stream>>>(
+        d_chunk_bases, num_chunks, coset_offset, POWER_CHUNK_SIZE
+    );
+    generate_powers_chunked_kernel<<<num_chunks, 1, 0, stream>>>(
+        d_powers, target_len, coset_offset, POWER_CHUNK_SIZE, d_chunk_bases
+    );
+    cudaFree(d_chunk_bases);
+    if (profile) { cudaStreamSynchronize(stream); printf("      [COSET] gen_powers: %.2f ms\n", elapsed()); }
+    
+    // Main chunk: coefficients 0..trace_len-1
+    // poly_len for this chunk is trace_len, so safe for sparse kernel
+    constexpr int SPARSE_ELEMS = 4;
+    int grid_sparse = (num_cols * trace_len + BLOCK_SIZE * SPARSE_ELEMS - 1) / (BLOCK_SIZE * SPARSE_ELEMS);
+    fused_zerofier_pad_scale_sparse_kernel<<<grid_sparse, BLOCK_SIZE, 0, stream>>>(
+        d_coefficients, d_randomizer_coeffs, d_powers,
+        trace_len, randomizer_len, trace_len, num_cols, target_len,
+        offset_pow_n, d_output
+    );
+    // Forward NTT for main chunk
+    ntt_forward_batched_gpu(d_output, target_len, num_cols, stream);
+    
+    // Tail chunk: coefficients trace_len..trace_len+randomizer_len-1
+    // Only needed if randomizer_len > 0
+    if (randomizer_len > 0) {
+        // d_tail_scratch is [num_cols * target_len]
+        CUDA_CHECK(cudaMemsetAsync(d_tail_scratch, 0, num_cols * target_len * sizeof(uint64_t), stream));
+        
+        int grid_tail = (num_cols * randomizer_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        randomizer_pad_scale_kernel<<<grid_tail, BLOCK_SIZE, 0, stream>>>(
+            d_randomizer_coeffs,
+            d_powers,
+            randomizer_len,
+            target_len,
+            num_cols,
+            d_tail_scratch
+        );
+        // Forward NTT for tail chunk
+        ntt_forward_batched_gpu(d_tail_scratch, target_len, num_cols, stream);
+        
+        // Add scaled tail evaluations: scale = coset_offset^trace_len
+        uint64_t coset_offset_pow_n = bfield_pow_host(coset_offset, trace_len);
+        size_t total = num_cols * target_len;
+        int grid_add = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        add_scaled_kernel<<<grid_add, BLOCK_SIZE, 0, stream>>>(
+            d_output, d_tail_scratch, coset_offset_pow_n, total
+        );
+    }
+    
+    if (profile) { cudaStreamSynchronize(stream); printf("      [COSET] eval_kernel: %.2f ms\n", elapsed()); }
+    
+    cudaFree(d_powers);
+}
+
 } // namespace kernels
 } // namespace gpu
 } // namespace triton_vm

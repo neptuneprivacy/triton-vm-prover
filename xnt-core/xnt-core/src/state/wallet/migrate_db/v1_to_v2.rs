@@ -94,6 +94,7 @@ pub(super) async fn migrate(storage: &mut SimpleRustyStorage) -> anyhow::Result<
             aocl_leaf_index,
             sender_randomness: msmp.sender_randomness,
             receiver_preimage: msmp.receiver_preimage,
+            payment_id: num_traits::ConstZero::ZERO,
             blockhash_to_membership_proof: mutxo_v1.blockhash_to_membership_proof,
             number_of_mps_per_utxo: mutxo_v1.number_of_mps_per_utxo,
             spent_in_block: mutxo_v1.spent_in_block,

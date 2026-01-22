@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -6,14 +7,17 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use tasm_lib::prelude::Digest;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+use tokio::sync::mpsc;
 
 use crate::api::tx_initiation::builder::transaction_proof_builder::TransactionProofBuilder;
 use crate::api::tx_initiation::builder::triton_vm_proof_job_options_builder::TritonVmProofJobOptionsBuilder;
 use crate::application::config::fee_notification_policy::FeeNotificationPolicy;
 use crate::application::config::network::Network;
+use crate::application::loops::channel::MainToMiner;
 use crate::application::loops::main_loop::upgrade_incentive::UpgradeIncentive;
 use crate::application::triton_vm_job_queue::TritonVmJobPriority;
 use crate::application::triton_vm_job_queue::TritonVmJobQueue;
@@ -61,6 +65,11 @@ pub enum UpgradeJob {
         right_kernel: TransactionKernel,
         single_proof_right: Proof,
         shuffle_seed: [u8; 32],
+        mutator_set: MutatorSetAccumulator,
+        upgrade_incentive: UpgradeIncentive,
+    },
+    BinaryTreeMerge {
+        transactions: Vec<(TransactionKernel, Proof)>,
         mutator_set: MutatorSetAccumulator,
         upgrade_incentive: UpgradeIncentive,
     },
@@ -220,14 +229,6 @@ impl UpdateMutatorSetDataJob {
         )
         .await?;
         info!("Proof-upgrader, update: Done");
-        
-        // Log GPU-UPGRADER completion message
-        let gpu_available = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok();
-        if gpu_available {
-            info!("[GPU-UPGRADER] MutatorSet update completed (GPU-accelerated)");
-        } else {
-            info!("[GPU-UPGRADER] MutatorSet update completed (CPU-only)");
-        }
 
         Ok(ret)
     }
@@ -289,6 +290,10 @@ impl UpgradeJob {
                 upgrade_incentive: UpgradeIncentive::Gobble(amount),
                 ..
             } => *amount,
+            UpgradeJob::BinaryTreeMerge {
+                upgrade_incentive: UpgradeIncentive::Gobble(amount),
+                ..
+            } => *amount,
             _ => NativeCurrencyAmount::zero(),
         }
     }
@@ -310,6 +315,11 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => Timestamp::max(left_kernel.timestamp, right_kernel.timestamp),
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => transactions
+                .iter()
+                .map(|(kernel, _)| kernel.timestamp)
+                .max()
+                .unwrap_or(Timestamp::zero()),
             UpgradeJob::UpdateMutatorSetData(update_mutator_set_data_job) => {
                 update_mutator_set_data_job.old_kernel.timestamp
             }
@@ -335,6 +345,9 @@ impl UpgradeJob {
             UpgradeJob::Merge {
                 upgrade_incentive, ..
             } => *upgrade_incentive,
+            UpgradeJob::BinaryTreeMerge {
+                upgrade_incentive, ..
+            } => *upgrade_incentive,
             UpgradeJob::UpdateMutatorSetData(UpdateMutatorSetDataJob {
                 upgrade_incentive, ..
             }) => *upgrade_incentive,
@@ -345,7 +358,7 @@ impl UpgradeJob {
     /// upgraded with this decision.
     ///
     /// Will return a list of length two in the case of merge, otherwise a list
-    /// of length one.
+    /// of length one. For binary tree merge, returns all transaction IDs.
     pub(super) fn affected_txids(&self) -> Vec<TransactionKernelId> {
         match self {
             UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
@@ -357,6 +370,10 @@ impl UpgradeJob {
                 right_kernel,
                 ..
             } => vec![left_kernel.txid(), right_kernel.txid()],
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => transactions
+                .iter()
+                .map(|(kernel, _)| kernel.txid())
+                .collect(),
             UpgradeJob::PrimitiveWitnessToProofCollection(pw_to_pc) => {
                 vec![pw_to_pc.primitive_witness.kernel.txid()]
             }
@@ -382,6 +399,7 @@ impl UpgradeJob {
                 ..
             }) => mutator_set.clone(),
             UpgradeJob::Merge { mutator_set, .. } => mutator_set.clone(),
+            UpgradeJob::BinaryTreeMerge { mutator_set, .. } => mutator_set.clone(),
             UpgradeJob::UpdateMutatorSetData(update_mutator_set_data_job) => {
                 let mut new_msa = update_mutator_set_data_job.old_mutator_set.clone();
                 update_mutator_set_data_job
@@ -401,6 +419,9 @@ impl UpgradeJob {
     fn double_spend_warn_msg(&self) -> &str {
         match self {
             UpgradeJob::Merge { .. } => "Maybe an input to the merge got mined already?",
+            UpgradeJob::BinaryTreeMerge { .. } => {
+                "Maybe an input to the binary tree merge got mined already?"
+            }
             UpgradeJob::PrimitiveWitnessToProofCollection { .. } => {
                 "Your own transaction already got mined?"
             }
@@ -418,16 +439,12 @@ impl UpgradeJob {
 
     /// Upgrade transaction proofs, inserts upgraded tx into the mempool and
     /// informs peers of this new transaction.
-    ///
-    /// GPU Acceleration:
-    /// - Automatically uses GPU if `TRITON_VM_PROVER_SOCKET` is set
-    /// - GPU provides ~2.3x speedup for single proof generation and merges
-    /// - Proof collections use CPU (faster on CPU, ~4x speedup)
     pub(crate) async fn handle_upgrade(
         self,
         triton_vm_job_queue: Arc<TritonVmJobQueue>,
         mut global_state_lock: GlobalStateLock,
         main_to_peer_channel: tokio::sync::broadcast::Sender<MainToPeerTask>,
+        main_to_miner_channel: Option<mpsc::Sender<MainToMiner>>,
     ) {
         let mut upgrade_job = self;
 
@@ -436,18 +453,6 @@ impl UpgradeJob {
             UpgradeIncentive::Critical => TritonVmJobPriority::High,
             _ => TritonVmJobPriority::Low,
         };
-
-        // Check GPU availability for logging
-        let gpu_available = std::env::var("TRITON_VM_PROVER_SOCKET").is_ok();
-        if gpu_available {
-            info!(
-                "[GPU-UPGRADER] GPU acceleration available - upgrades will use GPU for single proofs and merges"
-            );
-        } else {
-            info!(
-                "[GPU-UPGRADER] CPU-only mode - set TRITON_VM_PROVER_SOCKET to enable GPU acceleration"
-            );
-        }
 
         // process in a loop.  in case a new block comes in while processing
         // the current tx, then we can move on to the next, and so on.
@@ -460,49 +465,6 @@ impl UpgradeJob {
             // because TritonVmJobOptions::cancel_job_rx is None.
             // see how compose_task handles cancellation in mine_loop.
             let job_options = global_state_lock.cli().proof_job_options(priority);
-            
-            // Note: GPU usage is automatically handled by ProverJob based on:
-            // 1. TRITON_VM_PROVER_SOCKET environment variable (if set, GPU is used)
-            // 2. force_cpu flag in job_settings (default: false, so GPU is used if available)
-            // The proof upgrader doesn't need to explicitly set force_cpu=false because
-            // the default already enables GPU usage. Proof collections automatically
-            // set force_cpu=true in proof_collection.rs since CPU is faster for them.
-            
-            // Log upgrade type and GPU usage
-            match &upgrade_job {
-                UpgradeJob::ProofCollectionToSingleProof(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting ProofCollection→SingleProof upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting ProofCollection→SingleProof upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::Merge { .. } => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting Merge upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting Merge upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::UpdateMutatorSetData(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting MutatorSet update (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting MutatorSet update (CPU-only)");
-                    }
-                }
-                UpgradeJob::PrimitiveWitnessToSingleProof(_) => {
-                    if gpu_available {
-                        info!("[GPU-UPGRADER] Starting PrimitiveWitness→SingleProof upgrade (GPU-accelerated)");
-                    } else {
-                        info!("[GPU-UPGRADER] Starting PrimitiveWitness→SingleProof upgrade (CPU-only)");
-                    }
-                }
-                UpgradeJob::PrimitiveWitnessToProofCollection(_) => {
-                    // Proof collections are faster on CPU, so we don't use GPU
-                    info!("[GPU-UPGRADER] Starting PrimitiveWitness→ProofCollection upgrade (CPU-optimized)");
-                }
-            };
 
             // It's a important to *not* hold any locks when proving happens.
             // Otherwise, entire application freezes!!
@@ -529,17 +491,10 @@ impl UpgradeJob {
                 .await
             {
                 Ok((upgraded_tx, expected_utxos)) => {
-                    if gpu_available {
-                        info!(
-                            "[GPU-UPGRADER] Successfully upgraded transaction {} (GPU-accelerated)",
-                            upgraded_tx.kernel.txid()
-                        );
-                    } else {
-                        info!(
-                            "[GPU-UPGRADER] Successfully upgraded transaction {} (CPU-only)",
-                            upgraded_tx.kernel.txid()
-                        );
-                    }
+                    info!(
+                        "Successfully upgraded transaction {}",
+                        upgraded_tx.kernel.txid()
+                    );
                     (upgraded_tx, expected_utxos)
                 }
                 Err(e) => {
@@ -578,6 +533,13 @@ impl UpgradeJob {
                         let verbose_log_msg = upgrade_job.double_spend_warn_msg();
                         warn!("Upgraded transaction is no longer confirmable. {verbose_log_msg}");
                         global_state.mempool_remove(upgraded.kernel.txid()).await;
+
+                        // Mempool changed (tx removed). Notify miner so it can re-evaluate composing.
+                        if let Some(channel) = &main_to_miner_channel {
+                            if let Err(e) = channel.try_send(MainToMiner::MempoolChanged) {
+                                debug!("Failed to notify miner about mempool change: {e}");
+                            }
+                        }
                         return;
                     }
 
@@ -587,6 +549,14 @@ impl UpgradeJob {
                     global_state
                         .mempool_insert(upgraded.clone(), upgrade_incentive.into())
                         .await;
+
+                    // Mempool changed (tx inserted/upgraded/merged). Notify miner so it can
+                    // cancel composing if `--prioritize-upgrades` conditions become true.
+                    if let Some(channel) = &main_to_miner_channel {
+                        if let Err(e) = channel.try_send(MainToMiner::MempoolChanged) {
+                            debug!("Failed to notify miner about mempool change: {e}");
+                        }
+                    }
 
                     global_state
                         .wallet_state
@@ -662,6 +632,7 @@ impl UpgradeJob {
                         UpgradeJob::PrimitiveWitnessToSingleProof { .. } => unreachable!(),
                         UpgradeJob::ProofCollectionToSingleProof { .. } => unreachable!(),
                         UpgradeJob::Merge { .. } => unreachable!(),
+                        UpgradeJob::BinaryTreeMerge { .. } => unreachable!(),
                         UpgradeJob::UpdateMutatorSetData(_) => unreachable!(),
                     }
                 }
@@ -914,6 +885,83 @@ impl UpgradeJob {
                     .await?,
                 expected_utxos,
             )),
+            UpgradeJob::BinaryTreeMerge { transactions, .. } => {
+                info!(
+                    "Proof-upgrader: Start binary tree merge of {} transactions",
+                    transactions.len()
+                );
+
+                // Convert to Transaction objects
+                let mut txs: Vec<Transaction> = transactions
+                    .into_iter()
+                    .map(|(kernel, proof)| Transaction {
+                        kernel,
+                        proof: TransactionProof::SingleProof(proof),
+                    })
+                    .collect();
+
+                // Perform binary tree merge
+                let mut rng: StdRng = SeedableRng::from_seed(
+                    own_wallet_entropy.shuffle_seed(current_block_height.next()),
+                );
+
+                // Binary tree merge: recursively merge pairs
+                while txs.len() > 1 {
+                    let mut next_level = Vec::new();
+                    let mut i = 0;
+
+                    while i < txs.len() {
+                        if i + 1 < txs.len() {
+                            // Merge pair
+                            let left = txs[i].clone();
+                            let right = txs[i + 1].clone();
+                            let shuffle_seed: [u8; 32] = rng.random();
+
+                            let merged = Transaction::merge_with(
+                                left,
+                                right,
+                                shuffle_seed,
+                                triton_vm_job_queue.clone(),
+                                proof_job_options.clone(),
+                                consensus_rule_set,
+                            )
+                            .await?;
+
+                            next_level.push(merged);
+                            i += 2;
+                        } else {
+                            // Odd one out, carry forward
+                            next_level.push(txs[i].clone());
+                            i += 1;
+                        }
+                    }
+
+                    txs = next_level;
+                }
+
+                let mut ret = txs
+                    .into_iter()
+                    .next()
+                    .expect("Should have at least one transaction");
+                info!("Proof-upgrader, binary tree merge: Done");
+
+                // Merge with gobbler if present
+                if let Some(gobbler) = maybe_gobbler {
+                    info!("Proof-upgrader: Start merging with gobbler");
+                    ret = gobbler
+                        .merge_with(
+                            ret,
+                            gobble_shuffle_seed,
+                            triton_vm_job_queue,
+                            proof_job_options,
+                            consensus_rule_set,
+                        )
+                        .await?;
+                    info!("Proof-upgrader merging with gobbler: Done");
+                }
+
+                Ok((ret, expected_utxos))
+            }
             UpgradeJob::UpdateMutatorSetData(update_job) => {
                 let ret = update_job
                     .upgrade(triton_vm_job_queue, proof_job_options)
@@ -928,8 +976,12 @@ impl UpgradeJob {
 /// proof-quality of a transaction found in mempool. Also reports the value
 /// of this job to the wallet of this node. The value reported will be zero for
 /// all 3rd party transactions.
+///
+/// `exclude_txids` allows skipping transactions that are already being processed
+/// by other upgrade tasks, enabling parallel upgrade spawning.
 pub(super) async fn get_upgrade_task_from_mempool(
     global_state: &mut GlobalState,
+    exclude_txids: &HashSet<TransactionKernelId>,
 ) -> Option<UpgradeJob> {
     let tip_mutator_set = global_state
         .chain
@@ -941,11 +993,12 @@ pub(super) async fn get_upgrade_task_from_mempool(
     let num_proofs_threshold = global_state.max_num_proofs();
 
     let upgrade_filter = global_state.cli().tx_upgrade_filter;
+    let upgrade_all_proof_collections = global_state.cli().upgrade_all_proof_collections;
 
     // Do we have any `ProofCollection`s?
     let proof_collection_job = if let Some((kernel, proof, upgrade_priority)) = global_state
         .mempool
-        .preferred_proof_collection(num_proofs_threshold, upgrade_filter)
+        .preferred_proof_collection(num_proofs_threshold, upgrade_filter, exclude_txids)
     {
         if kernel.mutator_set_hash != tip_mutator_set.hash() {
             error!("Deprecated transaction found in mempool. Has ProofCollection in need of updating. Consider clearing mempool.");
@@ -955,7 +1008,11 @@ pub(super) async fn get_upgrade_task_from_mempool(
         let gobbling_potential = kernel.fee.lossy_f64_fraction_mul(gobbling_fraction);
         let upgrade_incentive =
             upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
-        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+
+        // Upgrade if incentive is worth it, OR if upgrade_all_proof_collections is enabled
+        // (bypasses the fee check for peer ProofCollections)
+        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) || upgrade_all_proof_collections
+        {
             let upgrade_job =
                 UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
                     kernel: kernel.to_owned(),
@@ -983,42 +1040,55 @@ pub(super) async fn get_upgrade_task_from_mempool(
         .await;
     let update_job = update_job.map(UpgradeJob::UpdateMutatorSetData);
 
-    // Can we merge two single proofs?
-    let merge_job = if let Some((
-        [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
-        upgrade_priority,
-    )) = global_state
-        .mempool
-        .preferred_single_proof_pair(upgrade_filter)
-    {
-        // Sanity check
-        assert_eq!(
-            left_kernel.mutator_set_hash, right_kernel.mutator_set_hash,
-            "Mempool must return transactions with matching mutator set hashes."
-        );
-        if left_kernel.mutator_set_hash != tip_mutator_set.hash() {
-            error!(
-                "Deprecated transactions returned by mempool for merging. This shouldn't happen."
-            );
-            return None;
-        }
+    // Can we do a binary tree merge of multiple single proofs?
+    let max_merge_count = global_state.cli().max_upgrade_merge_count.get();
+    debug!(
+        "Checking for binary tree merge: max_merge_count={}, synced_single_proof_count={}",
+        max_merge_count,
+        global_state
+            .mempool
+            .count_synced_single_proof_transactions()
+    );
+    let binary_tree_merge_job = if max_merge_count >= 3 {
+        if let Some((transactions, upgrade_priority)) = global_state
+            .mempool
+            .preferred_single_proof_batch(max_merge_count, upgrade_filter, exclude_txids)
+        {
+            // Sanity check: all transactions must have matching mutator set hashes
+            let first_hash = transactions[0].0.mutator_set_hash;
+            if !transactions
+                .iter()
+                .all(|(kernel, _)| kernel.mutator_set_hash == first_hash)
+            {
+                error!(
+                    "Mempool returned transactions with mismatched mutator set hashes for binary tree merge."
+                );
+                return None;
+            }
+            if first_hash != tip_mutator_set.hash() {
+                error!(
+                    "Deprecated transactions returned by mempool for binary tree merge. This shouldn't happen."
+                );
+                return None;
+            }
 
-        let gobbling_potential =
-            (left_kernel.fee + right_kernel.fee).lossy_f64_fraction_mul(gobbling_fraction);
-        let upgrade_incentive =
-            upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
-        if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
-            let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
-            let upgrade_decision = UpgradeJob::Merge {
-                left_kernel: left_kernel.to_owned(),
-                single_proof_left: left_single_proof.to_owned(),
-                right_kernel: right_kernel.to_owned(),
-                single_proof_right: right_single_proof.to_owned(),
-                shuffle_seed: rng.random(),
-                mutator_set: tip_mutator_set,
-                upgrade_incentive,
-            };
-            Some(upgrade_decision)
+            let total_fee: NativeCurrencyAmount =
+                transactions.iter().map(|(kernel, _)| kernel.fee).sum();
+            let gobbling_potential = total_fee.lossy_f64_fraction_mul(gobbling_fraction);
+            let upgrade_incentive =
+                upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
+            if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+                Some(UpgradeJob::BinaryTreeMerge {
+                    transactions: transactions
+                        .into_iter()
+                        .map(|(kernel, proof)| (kernel.to_owned(), proof.to_owned()))
+                        .collect(),
+                    mutator_set: tip_mutator_set.clone(),
+                    upgrade_incentive,
+                })
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1026,14 +1096,91 @@ pub(super) async fn get_upgrade_task_from_mempool(
         None
     };
 
+    // Can we merge two single proofs?
+    // Always try to merge if 2+ SingleProofs are available - keep GPUs busy
+    let merge_job = if let Some((
+            [(left_kernel, left_single_proof), (right_kernel, right_single_proof)],
+            upgrade_priority,
+        )) = global_state
+            .mempool
+            .preferred_single_proof_pair(upgrade_filter, exclude_txids)
+        {
+            // Sanity check
+            assert_eq!(
+                left_kernel.mutator_set_hash, right_kernel.mutator_set_hash,
+                "Mempool must return transactions with matching mutator set hashes."
+            );
+            if left_kernel.mutator_set_hash != tip_mutator_set.hash() {
+                error!(
+                    "Deprecated transactions returned by mempool for merging. This shouldn't happen."
+                );
+                return None;
+            }
+
+            let gobbling_potential =
+                (left_kernel.fee + right_kernel.fee).lossy_f64_fraction_mul(gobbling_fraction);
+            let upgrade_incentive =
+                upgrade_priority.incentive_given_gobble_potential(gobbling_potential);
+            if upgrade_incentive.upgrade_is_worth_it(min_gobbling_fee) {
+                let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
+                let upgrade_decision = UpgradeJob::Merge {
+                    left_kernel: left_kernel.to_owned(),
+                    single_proof_left: left_single_proof.to_owned(),
+                    right_kernel: right_kernel.to_owned(),
+                    single_proof_right: right_single_proof.to_owned(),
+                    shuffle_seed: rng.random(),
+                    mutator_set: tip_mutator_set,
+                    upgrade_incentive,
+                };
+                Some(upgrade_decision)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     // pick the most profitable option
-    let mut jobs = [proof_collection_job, merge_job, update_job]
-        .into_iter()
-        .flatten()
-        .collect_vec();
+    let mut jobs = [
+        proof_collection_job,
+        binary_tree_merge_job,
+        merge_job,
+        update_job,
+    ]
+    .into_iter()
+    .flatten()
+    .collect_vec();
+
+    debug!(
+        "Upgrade job candidates: {} total (proof_collection={}, binary_tree_merge={}, merge={}, update={})",
+        jobs.len(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::ProofCollectionToSingleProof(_))).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::BinaryTreeMerge { .. })).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::Merge { .. })).count(),
+        jobs.iter().filter(|j| matches!(j, UpgradeJob::UpdateMutatorSetData(_))).count(),
+    );
+
     jobs.sort_by_key(|job| job.upgrade_incentive());
 
-    jobs.first().cloned()
+    if let Some(selected) = jobs.last() {
+        info!(
+            "Selected upgrade job type: {} (highest priority from {} candidates)",
+            match selected {
+                UpgradeJob::ProofCollectionToSingleProof(_) => "ProofCollectionToSingleProof",
+                UpgradeJob::PrimitiveWitnessToSingleProof(_) => "PrimitiveWitnessToSingleProof",
+                UpgradeJob::PrimitiveWitnessToProofCollection(_) =>
+                    "PrimitiveWitnessToProofCollection",
+                UpgradeJob::Merge { .. } => "Merge (pair)",
+                UpgradeJob::BinaryTreeMerge { .. } => "BinaryTreeMerge",
+                UpgradeJob::UpdateMutatorSetData(_) => "UpdateMutatorSetData",
+            },
+            jobs.len()
+        );
+    } else {
+        debug!("No upgrade job candidates found");
+    }
+
+    jobs.last().cloned()
 }
 
 #[cfg(test)]
@@ -1132,11 +1279,12 @@ mod tests {
             rando
                 .mempool_insert(pc_tx_low_fee.clone().into(), upgrade_priority)
                 .await;
+            let no_exclusions = HashSet::new();
             assert!(
                 !upgrade_priority.is_irrelevant()
-                    && get_upgrade_task_from_mempool(&mut rando).await.is_some()
+                    && get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.is_some()
                     || upgrade_priority.is_irrelevant()
-                        && get_upgrade_task_from_mempool(&mut rando).await.is_none()
+                        && get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.is_none()
             );
 
             // A high-fee paying transaction must be returned for upgrading
@@ -1151,7 +1299,7 @@ mod tests {
             rando
                 .mempool_insert(pc_tx_high_fee.clone().into(), UpgradePriority::Irrelevant)
                 .await;
-            let job = get_upgrade_task_from_mempool(&mut rando).await.unwrap();
+            let job = get_upgrade_task_from_mempool(&mut rando, &no_exclusions).await.unwrap();
             let UpgradeJob::ProofCollectionToSingleProof(ProofCollectionToSingleProof {
                 kernel,
                 ..
@@ -1207,6 +1355,7 @@ mod tests {
                     TritonVmJobQueue::get_instance(),
                     alice.clone(),
                     main_to_peer_tx,
+                    None,
                 )
                 .await;
 
@@ -1314,6 +1463,7 @@ mod tests {
                     TritonVmJobQueue::get_instance(),
                     alice.clone(),
                     main_to_peer_tx,
+                    None,
                 )
                 .await;
 
@@ -1410,7 +1560,8 @@ mod tests {
 
         let merge_upgrade_job = {
             let mut alice = alice.lock_guard_mut().await;
-            get_upgrade_task_from_mempool(&mut alice).await.unwrap()
+            let no_exclusions = HashSet::new();
+            get_upgrade_task_from_mempool(&mut alice, &no_exclusions).await.unwrap()
         };
         assert!(
             matches!(merge_upgrade_job, UpgradeJob::Merge { .. }),
@@ -1446,6 +1597,7 @@ mod tests {
                 TritonVmJobQueue::get_instance(),
                 alice.clone(),
                 main_to_peer_tx.clone(),
+                None,
             )
             .await;
 
