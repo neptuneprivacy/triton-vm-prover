@@ -6996,11 +6996,35 @@ void GpuStark::step_open_trace_frugal() {
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx_->stream()));
 
+    // Two-phase optimization: compute coefficients once, then evaluate each coset
+    kernels::compute_trace_coefficients_gpu(
+        d_main_colmajor,
+        dims_.main_width,
+        trace_len,
+        dims_.trace_offset,
+        d_main_colmajor,
+        ctx_->stream()
+    );
+    kernels::compute_trace_coefficients_gpu(
+        d_aux_colmajor_components,
+        dims_.aux_width * 3,
+        trace_len,
+        dims_.trace_offset,
+        d_aux_colmajor_components,
+        ctx_->stream()
+    );
+
+    // Tail scratch buffers for coset evaluation (freed after loop)
+    uint64_t* d_main_tail = nullptr;
+    uint64_t* d_aux_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_main_tail, dims_.main_width * trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_tail, dims_.aux_width * 3 * trace_len * sizeof(uint64_t)));
+
     // Fill outputs by coset
     int grid_q = (int)((NUM_QUERIES + BLOCK - 1) / BLOCK);
     for (size_t coset = 0; coset < num_cosets; ++coset) {
         uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::randomized_lde_batch_gpu_preallocated(
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_main_colmajor,
             dims_.main_width,
             trace_len,
@@ -7008,13 +7032,11 @@ void GpuStark::step_open_trace_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_main(),
-            ctx_->d_working_main(), // scratch1
-            nullptr,
+            d_main_tail,
             ctx_->stream()
         );
-        kernels::randomized_lde_batch_gpu_preallocated(
+        kernels::evaluate_coset_from_coefficients_gpu(
             d_aux_colmajor_components,
             dims_.aux_width * 3,
             trace_len,
@@ -7022,10 +7044,8 @@ void GpuStark::step_open_trace_frugal() {
             dims_.num_trace_randomizers,
             dims_.trace_offset,
             coset_offset,
-            trace_len,
             ctx_->d_working_aux(),
-            ctx_->d_working_aux(), // scratch1
-            nullptr,
+            d_aux_tail,
             ctx_->stream()
         );
         qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, ctx_->stream()>>>(
@@ -7042,6 +7062,9 @@ void GpuStark::step_open_trace_frugal() {
             d_aux_rows
         );
     }
+
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
 
     // Quotient segment rows are already on full FRI domain
     kernels::gather_xfield_rows_colmajor_gpu(
