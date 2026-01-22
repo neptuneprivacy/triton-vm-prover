@@ -874,7 +874,6 @@ version = "1.0.0"
 dependencies = [
  "arbitrary",
  "colored",
- "cudarc",
  "get-size2",
  "indexmap",
  "itertools",
