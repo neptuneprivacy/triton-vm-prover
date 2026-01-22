@@ -1496,6 +1496,12 @@ GpuStark::GpuStark() {
 GpuStark::~GpuStark() = default;
 
 static bool use_lde_frugal_mode(size_t padded_height) {
+    const size_t FRUGAL_THRESHOLD = 1ULL << 22; // 2^22
+    // Mandatory frugal mode for very large instances.
+    if (padded_height >= FRUGAL_THRESHOLD) {
+        return true;
+    }
+
     const char* frugal_env = std::getenv("TRITON_GPU_LDE_FRUGAL");
     if (frugal_env) {
         if (strcmp(frugal_env, "1") == 0 || strcmp(frugal_env, "true") == 0) {
@@ -1505,8 +1511,7 @@ static bool use_lde_frugal_mode(size_t padded_height) {
             return false;
         }
     }
-    const size_t FRUGAL_THRESHOLD = 1ULL << 22; // 2^22
-    return padded_height >= FRUGAL_THRESHOLD;
+    return false;
 }
 
 size_t GpuStark::estimate_gpu_memory(size_t padded_height) {
