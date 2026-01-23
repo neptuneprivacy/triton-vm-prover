@@ -464,9 +464,9 @@ fn prove(flags: Flags, args: RunArgs, artifacts: ProofArtifacts) -> Result<ExitC
         if let Some(ref dir) = test_data_dir {
             let domain_data = serde_json::json!({
                 "padded_height": padded_height,
-                "trace_domain_length": domains.trace.length,
-                "quotient_domain_length": domains.quotient.length,
-                "fri_domain_length": domains.fri.length,
+                "trace_domain_length": domains.trace.len(),
+                "quotient_domain_length": domains.quotient.len(),
+                "fri_domain_length": domains.fri.len(),
                 "fri_expansion_factor": fri.expansion_factor,
                 "fri_num_rounds": fri.num_rounds(),
                 "num_trace_randomizers": stark.num_trace_randomizers,
@@ -809,7 +809,7 @@ fn verify(flags: Flags, artifacts: ProofArtifacts) -> Result<ExitCode> {
                             use triton_vm::proof_item::FriResponse;
                             
                             // Skip discriminant
-                            let mut decode_sequence = &item_encoding[1..];
+                            let decode_sequence = &item_encoding[1..];
                             eprintln!("    After skipping discriminant, sequence.len(): {}", decode_sequence.len());
                             
                             // Try to decode field 0 (auth_structure)
@@ -1289,7 +1289,7 @@ fn verify(flags: Flags, artifacts: ProofArtifacts) -> Result<ExitCode> {
 
 fn fri_domain_length(padded_height: usize) -> Result<usize> {
     let fri = Stark::default().fri(padded_height)?;
-    Ok(fri.domain.length)
+    Ok(fri.domain.len())
 }
 
 #[cfg(test)]

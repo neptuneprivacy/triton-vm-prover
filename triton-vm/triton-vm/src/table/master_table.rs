@@ -1374,12 +1374,12 @@ impl MasterMainTable {
     pub const NUM_COLUMNS: usize = <Self as MasterTable>::NUM_COLUMNS;
 
     /// Returns a view of the trace table.
-    pub fn trace_table(&self) -> ArrayView2<BFieldElement> {
+    pub fn trace_table(&self) -> ArrayView2<'_, BFieldElement> {
         self.trace_table.view()
     }
 
     /// Returns a mutable view of the trace table.
-    pub fn trace_table_mut(&mut self) -> ArrayViewMut2<BFieldElement> {
+    pub fn trace_table_mut(&mut self) -> ArrayViewMut2<'_, BFieldElement> {
         self.trace_table.view_mut()
     }
 

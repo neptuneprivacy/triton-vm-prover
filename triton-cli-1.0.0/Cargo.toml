@@ -32,7 +32,7 @@ regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 strum = "0.27.1"
-triton-vm = { path = "../triton-vm/triton-vm", default-features = false }
+triton-vm = { path = "../patch/triton-vm-patch/triton-vm", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.0"

@@ -399,17 +399,17 @@ pub unsafe extern "C" fn tvm_trace_and_pad_main_table_from_tasm_file(
     // Domains
     let d = master_main_table.domains();
     // trace
-    *out_trace_domain_3.add(0) = d.trace.length as u64;
-    *out_trace_domain_3.add(1) = d.trace.offset.value();
-    *out_trace_domain_3.add(2) = d.trace.generator.value();
+    *out_trace_domain_3.add(0) = d.trace.len() as u64;
+    *out_trace_domain_3.add(1) = d.trace.offset().value();
+    *out_trace_domain_3.add(2) = d.trace.generator().value();
     // quotient
-    *out_quotient_domain_3.add(0) = d.quotient.length as u64;
-    *out_quotient_domain_3.add(1) = d.quotient.offset.value();
-    *out_quotient_domain_3.add(2) = d.quotient.generator.value();
+    *out_quotient_domain_3.add(0) = d.quotient.len() as u64;
+    *out_quotient_domain_3.add(1) = d.quotient.offset().value();
+    *out_quotient_domain_3.add(2) = d.quotient.generator().value();
     // fri
-    *out_fri_domain_3.add(0) = d.fri.length as u64;
-    *out_fri_domain_3.add(1) = d.fri.offset.value();
-    *out_fri_domain_3.add(2) = d.fri.generator.value();
+    *out_fri_domain_3.add(0) = d.fri.len() as u64;
+    *out_fri_domain_3.add(1) = d.fri.offset().value();
+    *out_fri_domain_3.add(2) = d.fri.generator().value();
 
     // randomness seed
     std::ptr::copy_nonoverlapping(randomness_seed.as_ptr(), out_randomness_seed_32, 32);

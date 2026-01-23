@@ -140,7 +140,7 @@ pub struct Verifier {
 ///
 /// [lemma]: https://dl.acm.org/doi/pdf/10.1145/322217.322225
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub(crate) struct ProverDomains {
+pub struct ProverDomains {
     /// One of the most central domains.
     /// Its length is dictated by the [AET][AlgebraicExecutionTrace]: must be at
     /// least as long as the tallest column in the AET.

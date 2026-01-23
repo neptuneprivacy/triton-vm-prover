@@ -836,7 +836,22 @@ impl MasterMainTable {
     // Repeated to make the constant public despite the trait being private.
     pub const NUM_COLUMNS: usize = <Self as MasterTable>::NUM_COLUMNS;
 
-    pub(crate) fn new(
+    /// Returns a view of the trace table.
+    pub fn trace_table(&self) -> ArrayView2<'_, BFieldElement> {
+        self.trace_table.view()
+    }
+
+    /// Returns a mutable view of the trace table.
+    pub fn trace_table_mut(&mut self) -> ArrayViewMut2<'_, BFieldElement> {
+        self.trace_table.view_mut()
+    }
+
+    /// Returns a copy of the prover domains.
+    pub fn domains(&self) -> crate::stark::ProverDomains {
+        self.domains
+    }
+
+    pub fn new(
         aet: &AlgebraicExecutionTrace,
         domains: ProverDomains,
         num_trace_randomizers: usize,
