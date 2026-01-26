@@ -130,4 +130,3 @@ triton-constraint-circuit = { path = "../patch/triton-vm-patch/triton-constraint
 twenty-first = { path = "../triton-vm/twenty-first-local/twenty-first" }
 bfieldcodec_derive = { path = "../triton-vm/twenty-first-local/bfieldcodec_derive" }
 tasm-lib = { git = "https://github.com/neptuneprivacy/tasm-lib-patch.git", tag = "v1.0.1" }
-tasm-object-derive = { path = "../patch/tasm-lib-patch/tasm-object-derive" }
