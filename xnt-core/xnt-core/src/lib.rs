@@ -68,7 +68,9 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::debug;
 use tracing::info;
-use triton_vm::prelude::BFieldElement;
+
+// Re-export BFieldElement for use in consensus_rule_set
+pub use triton_vm::prelude::BFieldElement;
 
 use crate::application::config::data_directory::DataDirectory;
 use crate::application::json_rpc::server::rpc::RpcServer;

@@ -400,7 +400,7 @@ impl BuiltTransaction {
             .proving_capability(TxProvingCapability::ProofCollection)
             .build();
 
-        let proof_collection = ProofCollection::produce(&self.witness, job_queue, options)
+        let proof_collection: ProofCollection = ProofCollection::produce(&self.witness, job_queue, options)
             .await
             .map_err(|e| XntError::TransactionError(format!("proving failed: {e}")))?;
 

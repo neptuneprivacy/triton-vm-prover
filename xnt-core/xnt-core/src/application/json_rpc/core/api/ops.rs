@@ -106,11 +106,8 @@ pub enum RpcMethods {
     #[namespace(Namespace::Wallet)]
     GetBlocks,
 
-    #[namespace(Namespace::Wallet)]
+    #[namespace(Namespace::Archival)]
     RestoreMembershipProof,
-
-    #[namespace(Namespace::Wallet)]
-    SubmitTransaction,
 
     #[namespace(Namespace::Mining)]
     GetBlockTemplate,
@@ -126,6 +123,9 @@ pub enum RpcMethods {
 
     #[namespace(Namespace::Mempool)]
     GetTransactionProof,
+
+    #[namespace(Namespace::Mempool)]
+    SubmitTransaction,
 
     #[namespace(Namespace::Wallet)]
     GenerateAddress,
@@ -156,6 +156,18 @@ pub enum RpcMethods {
 
     #[namespace(Namespace::Wallet)]
     GenerateSubaddress,
+
+    #[namespace(Namespace::Archival)]
+    GetUtxosByReceiver,
+
+    #[namespace(Namespace::Archival)]
+    GetAoclLeafIndices,
+
+    #[namespace(Namespace::Archival)]
+    GetSpentStatus,
+
+    #[namespace(Namespace::Archival)]
+    GetArchivalMutatorSet,
 }
 
 #[cfg(test)]

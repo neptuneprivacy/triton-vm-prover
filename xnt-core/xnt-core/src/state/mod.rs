@@ -7,6 +7,7 @@ pub mod mining;
 pub mod networking_state;
 pub mod shared;
 pub mod transaction;
+pub mod utxo_indexer;
 pub mod wallet;
 
 use std::cmp::max;
@@ -644,6 +645,8 @@ pub struct GlobalState {
     /// The `mining_state` can be updated by main task, mining task, or RPC server.
     pub mining_state: MiningState,
 
+    utxo_indexer: Option<utxo_indexer::UtxoIndexerDatabase>,
+
     /// Force wallet to maintain its own membership proofs. These membership
     /// proofs will otherwise be read from the archival mutator set.
     #[cfg(test)]
@@ -720,7 +723,22 @@ impl GlobalState {
             chain.light_state(),
         );
 
-        Ok(Self::new(wallet_state, chain, net, cli, mempool))
+        // Initialize UTXO indexer if enabled via CLI flag
+        let utxo_indexer = if cli.utxo_indexer {
+            match Self::initialize_utxo_indexer(&data_directory).await {
+                Ok(indexer) => {
+                    info!("UTXO indexer initialized successfully");
+                    Some(indexer)
+                }
+                Err(e) => {
+                    bail!("Failed to initialize UTXO indexer: {e}");
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(Self::new_with_indexer(wallet_state, chain, net, cli, mempool, utxo_indexer))
     }
 
     pub fn new(
@@ -730,6 +748,17 @@ impl GlobalState {
         cli: cli_args::Args,
         mempool: Mempool,
     ) -> Self {
+        Self::new_with_indexer(wallet_state, chain, net, cli, mempool, None)
+    }
+
+    pub fn new_with_indexer(
+        wallet_state: WalletState,
+        chain: BlockchainState,
+        net: NetworkingState,
+        cli: cli_args::Args,
+        mempool: Mempool,
+        utxo_indexer: Option<utxo_indexer::UtxoIndexerDatabase>,
+    ) -> Self {
         Self {
             wallet_state,
             chain,
@@ -737,6 +766,7 @@ impl GlobalState {
             cli,
             mempool,
             mining_state: MiningState::default(),
+            utxo_indexer,
             #[cfg(test)]
             force_wallet_membership_proof_maintance: false,
         }
@@ -2176,6 +2206,40 @@ impl GlobalState {
     pub async fn mempool_clear(&mut self) {
         let events = self.mempool.clear();
         self.wallet_state.handle_mempool_events(events).await
+    }
+
+    pub fn utxo_indexer(&self) -> Option<&utxo_indexer::UtxoIndexerDatabase> {
+        self.utxo_indexer.as_ref()
+    }
+
+    #[inline]
+    pub fn utxo_indexer_mut(&mut self) -> Option<&mut utxo_indexer::UtxoIndexerDatabase> {
+        self.utxo_indexer.as_mut()
+    }
+
+    async fn initialize_utxo_indexer(
+        data_directory: &DataDirectory,
+    ) -> Result<utxo_indexer::UtxoIndexerDatabase> {
+        use crate::application::database::create_db_if_missing;
+        use crate::application::database::NeptuneLevelDb;
+
+        let db_path = data_directory.utxo_indexer_database_dir_path();
+        DataDirectory::create_dir_if_not_exists(&db_path).await?;
+
+        debug!("Opening UTXO indexer database at: {}", db_path.display());
+
+        let db = NeptuneLevelDb::new(&db_path, &create_db_if_missing()).await?;
+
+        let indexer = utxo_indexer::UtxoIndexerDatabase::try_connect_and_migrate(db)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        debug!(
+            "UTXO indexer connected. Sync height: {:?}",
+            indexer.get_sync_height()
+        );
+
+        Ok(indexer)
     }
 
     /// adds Tx to mempool and notifies wallet of change. value represents

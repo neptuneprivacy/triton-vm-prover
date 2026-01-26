@@ -1514,21 +1514,36 @@ static bool use_lde_frugal_mode(size_t padded_height) {
     return false;
 }
 
-size_t GpuStark::estimate_gpu_memory(size_t padded_height) {
+ size_t GpuStark::estimate_gpu_memory(size_t padded_height) {
     size_t fri_length = padded_height * 8;
     size_t main_width = 379;
     size_t aux_width = 88;
     size_t num_fri_rounds = static_cast<size_t>(std::log2(fri_length)) - 9;
     
+    // Check if frugal mode will be enabled (same logic as use_lde_frugal_mode)
+    bool frugal_mode = use_lde_frugal_mode(padded_height);
+    
     size_t estimate = 0;
     
     // Main tables
     estimate += padded_height * main_width * sizeof(uint64_t);
-    estimate += fri_length * main_width * sizeof(uint64_t);
+    if (frugal_mode) {
+        // Frugal mode: use working buffer instead of full FRI LDE cache
+        estimate += padded_height * main_width * sizeof(uint64_t);  // working_main buffer
+    } else {
+        // Cached mode: full FRI LDE
+        estimate += fri_length * main_width * sizeof(uint64_t);
+    }
     
     // Aux tables (XFE = 3x)
     estimate += padded_height * aux_width * 3 * sizeof(uint64_t);
-    estimate += fri_length * aux_width * 3 * sizeof(uint64_t);
+    if (frugal_mode) {
+        // Frugal mode: use working buffer instead of full FRI LDE cache
+        estimate += padded_height * aux_width * 3 * sizeof(uint64_t);  // working_aux buffer
+    } else {
+        // Cached mode: full FRI LDE
+        estimate += fri_length * aux_width * 3 * sizeof(uint64_t);
+    }
     
     // Quotient segments
     estimate += fri_length * 4 * 3 * sizeof(uint64_t);

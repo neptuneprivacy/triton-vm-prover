@@ -364,7 +364,17 @@ pub struct RestoreMembershipProofResponse {
     pub snapshot: RpcMsMembershipSnapshot,
 }
 
-#[derive(Clone, Debug, Serialize_tuple, Deserialize_tuple)]
+#[derive(Clone, Copy, Debug, Serialize_tuple, Deserialize_tuple)]
+#[serde(rename_all = "camelCase")]
+pub struct GetArchivalMutatorSetRequest {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetArchivalMutatorSetResponse {
+    pub archival_mutator_set: RpcMutatorSetAccumulator,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitTransactionRequest {
     pub transaction: RpcTransaction,
@@ -664,4 +674,61 @@ pub struct GenerateSubaddressResponse {
     pub address: String,
     pub payment_id: u64,
     pub base_address: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetUtxosByReceiverRequest {
+    pub receiver_id_hash: Digest,
+    pub from_block_height: BlockHeight,
+    pub to_block_height: BlockHeight,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcIndexedUtxo {
+    pub block_height: BlockHeight,
+    pub block_digest: Digest,
+    pub ciphertext: Vec<BFieldElement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetUtxosByReceiverResponse {
+    pub utxos: Vec<RpcIndexedUtxo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAoclLeafIndicesRequest {
+    pub commitments: Vec<Digest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAoclLeafIndicesResponse {
+    pub indices: Vec<Option<u64>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetSpentStatusRequest {
+    pub absolute_index_set_hashes: Vec<Digest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetSpentStatusResponse {
+    /// For each hash: Some(height) if spent (and not orphaned), None if unspent
+    pub spent_at_heights: Vec<Option<BlockHeight>>,
+}
+
+impl From<crate::state::utxo_indexer::IndexedUtxo> for RpcIndexedUtxo {
+    fn from(utxo: crate::state::utxo_indexer::IndexedUtxo) -> Self {
+        RpcIndexedUtxo {
+            block_height: utxo.block_height,
+            block_digest: utxo.block_digest,
+            ciphertext: utxo.ciphertext,
+        }
+    }
 }

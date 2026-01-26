@@ -104,6 +104,9 @@ pub struct IncomingUtxoRecoveryData {
     pub sender_randomness: Digest,
     pub receiver_preimage: Digest,
     pub aocl_index: u64,
+    /// Payment ID from subaddress announcement. Zero for base address UTXOs.
+    #[serde(default)]
+    pub payment_id: BFieldElement,
 }
 
 impl IncomingUtxoRecoveryData {
@@ -126,6 +129,7 @@ impl TryFrom<&MonitoredUtxo> for IncomingUtxoRecoveryData {
             sender_randomness: msmp.sender_randomness,
             receiver_preimage: msmp.receiver_preimage,
             aocl_index: msmp.aocl_leaf_index,
+            payment_id: value.payment_id,
         })
     }
 }
@@ -520,6 +524,7 @@ impl WalletState {
 
                 let own_utxos = announced_utxos_from_announcements
                     .chain(own_utxos_from_expected_utxos)
+                    .unique_by(|iu| iu.addition_record())
                     .collect_vec();
 
                 let tx_id = tx_kernel.txid();
@@ -993,7 +998,9 @@ impl WalletState {
         key_type: KeyType,
     ) -> Box<dyn Iterator<Item = SpendingKey> + '_> {
         match key_type {
-            KeyType::Generation => Box::new(self.get_known_generation_spending_keys()),
+            KeyType::Generation | KeyType::GenerationSubAddr => {
+                Box::new(self.get_known_generation_spending_keys())
+            }
             KeyType::Symmetric => Box::new(self.get_known_symmetric_keys()),
         }
     }
@@ -1004,7 +1011,9 @@ impl WalletState {
         key_type: KeyType,
     ) -> Box<dyn Iterator<Item = SpendingKey> + '_> {
         match key_type {
-            KeyType::Generation => Box::new(self.get_known_generation_spending_keys()),
+            KeyType::Generation | KeyType::GenerationSubAddr => {
+                Box::new(self.get_known_generation_spending_keys())
+            }
             KeyType::Symmetric => Box::new(self.get_known_symmetric_keys()),
         }
     }
@@ -1042,7 +1051,9 @@ impl WalletState {
     /// important to write to disk afterward to avoid possible funds loss.
     pub async fn next_unused_spending_key(&mut self, key_type: KeyType) -> SpendingKey {
         match key_type {
-            KeyType::Generation => self.next_unused_generation_spending_key().await.into(),
+            KeyType::Generation | KeyType::GenerationSubAddr => {
+                self.next_unused_generation_spending_key().await.into()
+            }
             KeyType::Symmetric => self.next_unused_symmetric_key().await.into(),
         }
     }
@@ -1053,7 +1064,7 @@ impl WalletState {
 
         if current_counter < new_counter {
             match key_type {
-                KeyType::Generation => {
+                KeyType::Generation | KeyType::GenerationSubAddr => {
                     self.wallet_db.set_generation_key_counter(new_counter).await;
 
                     for idx in current_counter..new_counter {
@@ -1076,7 +1087,9 @@ impl WalletState {
     /// Get index of the next unused spending key of a given type.
     pub fn spending_key_counter(&self, key_type: KeyType) -> u64 {
         match key_type {
-            KeyType::Generation => self.wallet_db.get_generation_key_counter(),
+            KeyType::Generation | KeyType::GenerationSubAddr => {
+                self.wallet_db.get_generation_key_counter()
+            }
             KeyType::Symmetric => self.wallet_db.get_symmetric_key_counter(),
         }
     }
@@ -1084,7 +1097,7 @@ impl WalletState {
     /// Get the nth derived spending key of a given type.
     pub fn nth_spending_key(&self, key_type: KeyType, index: u64) -> SpendingKey {
         match key_type {
-            KeyType::Generation => self
+            KeyType::Generation | KeyType::GenerationSubAddr => self
                 .wallet_entropy
                 .nth_generation_spending_key(index)
                 .into(),
@@ -1452,6 +1465,7 @@ impl WalletState {
                             sender_randomness,
                             receiver_preimage,
                             aocl_index,
+                            payment_id,
                         };
                         incoming_utxo_recovery_data_list.push(utxo_ms_recovery_data);
                     }
@@ -1595,6 +1609,7 @@ impl WalletState {
                             sender_randomness,
                             receiver_preimage,
                             aocl_index,
+                            payment_id,
                         };
                         recovery_data.push(utxo_ms_recovery_data);
                     }
@@ -1800,22 +1815,31 @@ impl WalletState {
 
         while let Some((_i, mutxo)) = stream.next().await {
             let utxo = mutxo.utxo.clone();
+            let payment_id = mutxo.payment_id;
             if let Some(mp) = mutxo.get_membership_proof_for_block(tip_digest) {
                 // To determine whether the UTXO was spent, we cannot rely on
                 // the `spent_in_block` which might be set to blocks that have
                 // since been reorganized away.
                 let spent = !mutator_set_accumulator.verify(Tip5::hash(&mutxo.utxo), &mp);
                 if spent {
-                    synced_spent.push(WalletStatusElement::new(mp.aocl_leaf_index, utxo));
+                    synced_spent.push(WalletStatusElement::new(
+                        mp.aocl_leaf_index,
+                        utxo,
+                        payment_id,
+                    ));
                 } else {
                     synced_unspent.push((
-                        WalletStatusElement::new(mp.aocl_leaf_index, utxo),
+                        WalletStatusElement::new(mp.aocl_leaf_index, utxo, payment_id),
                         mp.clone(),
                     ));
                 }
             } else {
                 let any_mp = &mutxo.blockhash_to_membership_proof.iter().next().unwrap().1;
-                unsynced.push(WalletStatusElement::new(any_mp.aocl_leaf_index, utxo));
+                unsynced.push(WalletStatusElement::new(
+                    any_mp.aocl_leaf_index,
+                    utxo,
+                    payment_id,
+                ));
             }
         }
 
@@ -4050,6 +4074,7 @@ pub(crate) mod tests {
                         rand::random(),
                         rand::random(),
                         UtxoNotifier::Myself,
+                        BFieldElement::ZERO,
                     ))
                     .await;
 
@@ -5029,7 +5054,7 @@ pub(crate) mod tests {
             let (channel_to_nowhere_one, nowhere_one) =
                 broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
             upgrade_job_one
-                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_one, None)
+                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_one)
                 .await;
             drop(nowhere_one); // drop must occur after message is sent
 
@@ -5088,7 +5113,7 @@ pub(crate) mod tests {
             let (channel_to_nowhere_two, nowhere_two) =
                 broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
             upgrade_job_two
-                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_two, None)
+                .handle_upgrade(dummy_queue.clone(), rando.clone(), channel_to_nowhere_two)
                 .await;
             drop(nowhere_two); // drop must occur after message is sent
 
