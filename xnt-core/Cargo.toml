@@ -7,6 +7,7 @@ members = [
     "xnt-dashboard",
     "xnt-rpc/macros",
     "xnt-rpc/client",
+    "xnt-sdk",
 ]
 
 [workspace.lints.rust]
@@ -128,5 +129,5 @@ triton-constraint-builder = { path = "../patch/triton-vm-patch/triton-constraint
 triton-constraint-circuit = { path = "../patch/triton-vm-patch/triton-constraint-circuit" }
 twenty-first = { path = "../triton-vm/twenty-first-local/twenty-first" }
 bfieldcodec_derive = { path = "../triton-vm/twenty-first-local/bfieldcodec_derive" }
-tasm-lib = { path = "../patch/tasm-lib-patch/tasm-lib" }
+tasm-lib = { git = "https://github.com/neptuneprivacy/tasm-lib-patch.git", tag = "v1.0.1" }
 tasm-object-derive = { path = "../patch/tasm-lib-patch/tasm-object-derive" }

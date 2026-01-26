@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 use tasm_lib::prelude::Digest;
+use tasm_lib::triton_vm::prelude::BFieldElement;
 
 use crate::protocol::consensus::transaction::utxo::Utxo;
 use crate::state::wallet::address::ReceivingAddress;
@@ -53,6 +54,10 @@ impl UtxoNotificationMethod {
 pub struct UtxoNotificationPayload {
     pub(crate) utxo: Utxo,
     pub(crate) sender_randomness: Digest,
+    /// Payment ID for subaddress support. Defaults to 0 for base addresses.
+    /// This is encrypted inside the ciphertext for privacy.
+    #[serde(default)]
+    pub(crate) payment_id: BFieldElement,
 }
 
 impl UtxoNotificationPayload {
@@ -60,7 +65,35 @@ impl UtxoNotificationPayload {
         Self {
             utxo,
             sender_randomness,
+            payment_id: BFieldElement::new(0),
         }
+    }
+
+    pub(crate) fn with_payment_id(
+        utxo: Utxo,
+        sender_randomness: Digest,
+        payment_id: BFieldElement,
+    ) -> Self {
+        Self {
+            utxo,
+            sender_randomness,
+            payment_id,
+        }
+    }
+
+    /// Get the UTXO
+    pub fn utxo(&self) -> &Utxo {
+        &self.utxo
+    }
+
+    /// Get the sender randomness
+    pub fn sender_randomness(&self) -> Digest {
+        self.sender_randomness
+    }
+
+    /// Get the payment ID
+    pub fn payment_id(&self) -> BFieldElement {
+        self.payment_id
     }
 }
 

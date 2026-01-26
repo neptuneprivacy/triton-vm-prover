@@ -3,14 +3,14 @@
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use num_traits::ConstZero;
 use serde::Deserialize;
 use serde::Serialize;
+use tasm_lib::triton_vm::prelude::BFieldElement;
 
 use super::utxo_notification::UtxoNotificationMethod;
 use crate::application::config::network::Network;
 use crate::prelude::twenty_first::prelude::Digest;
-use num_traits::ConstZero;
-use tasm_lib::triton_vm::prelude::BFieldElement;
 use crate::protocol::consensus::transaction::announcement::Announcement;
 use crate::protocol::consensus::transaction::utxo::Utxo;
 use crate::protocol::consensus::transaction::utxo_triple::UtxoTriple;
@@ -63,10 +63,7 @@ impl TxOutput {
     }
 
     fn notification_payload(&self) -> UtxoNotificationPayload {
-        UtxoNotificationPayload {
-            utxo: self.utxo(),
-            sender_randomness: self.sender_randomness(),
-        }
+        UtxoNotificationPayload::new(self.utxo(), self.sender_randomness())
     }
 
     /// automatically generates [TxOutput] using some heuristics
@@ -229,9 +226,9 @@ impl TxOutput {
         }
     }
 
-    /// Instantiate a [TxOutput] for native currency intended fro on-chain UTXO
+    /// Instantiate a [TxOutput] for native currency intended for on-chain UTXO
     /// notification.
-    pub(crate) fn onchain_native_currency(
+    pub fn onchain_native_currency(
         amount: NativeCurrencyAmount,
         sender_randomness: Digest,
         receiving_address: ReceivingAddress,
@@ -248,9 +245,9 @@ impl TxOutput {
         }
     }
 
-    /// Instantiate a [TxOutput] for native currency intended fro on-chain UTXO
-    /// notification.
-    pub(crate) fn onchain_native_currency_as_change(
+    /// Instantiate a [TxOutput] for native currency intended for on-chain UTXO
+    /// notification, marked as change.
+    pub fn onchain_native_currency_as_change(
         amount: NativeCurrencyAmount,
         sender_randomness: Digest,
         receiving_address: ReceivingAddress,
@@ -328,6 +325,14 @@ impl TxOutput {
 
     pub fn is_owned(&self) -> bool {
         self.owned
+    }
+
+    /// Get receiving address if available
+    pub fn receiving_address(&self) -> Option<&ReceivingAddress> {
+        match &self.notification_method {
+            UtxoNotificationMethod::OnChain(addr) | UtxoNotificationMethod::OffChain(addr) => Some(addr),
+            UtxoNotificationMethod::None => None,
+        }
     }
 
     /// Determine whether there is a time-lock, with any release date, on the

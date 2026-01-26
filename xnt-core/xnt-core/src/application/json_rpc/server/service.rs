@@ -1042,108 +1042,46 @@ impl RpcApi for RpcServer {
     async fn validate_address_call(
         &self,
         request: ValidateAddressRequest,
-        ) -> RpcResult<ValidateAddressResponse> {
+    ) -> RpcResult<ValidateAddressResponse> {
+        use crate::state::wallet::address::SubAddress;
         let network = self.state.cli().network;
 
-        let ret = ReceivingAddress::from_bech32m(&request.address_string, network).ok();
+        let parsed = ReceivingAddress::from_bech32m(&request.address_string, network).ok();
 
-        let address = ret.as_ref().and_then(|addr| addr.to_bech32m(network).ok());
-        let address_type = ret.as_ref().map(|addr| {
-            match addr {
-                crate::state::wallet::address::ReceivingAddress::Generation(_) => "Generation",
-                crate::state::wallet::address::ReceivingAddress::Symmetric(_) => "Symmetric",
-            }
-            .to_string()
-        });
-        let receiver_identifier = ret.as_ref().map(|addr| addr.receiver_identifier().value());
-        let base_address = None;
-        let payment_id = None;
+        match parsed {
+            Some(addr) => {
+                let address = addr.to_bech32m(network).ok();
+                let address_type = Some(match &addr {
+                    ReceivingAddress::Generation(_) => "generation".to_string(),
+                    ReceivingAddress::Symmetric(_) => "symmetric".to_string(),
+                    ReceivingAddress::GenerationSubAddr(_) => "generation_subaddress".to_string(),
+                });
+                let receiver_identifier = Some(addr.receiver_identifier().value());
 
-        Ok(ValidateAddressResponse {
-            address,
-            address_type,
-            receiver_identifier,
-            base_address,
-            payment_id,
-        })
-    }
+                // For subaddresses, include base_address and payment_id
+                let (base_address, payment_id) = match &addr {
+                    ReceivingAddress::GenerationSubAddr(subaddr) => {
+                        let (base, pid) = subaddr.clone().split();
+                        (base.to_bech32m(network).ok(), Some(pid.value()))
+                    }
+                    _ => (None, None),
+                };
 
-    async fn generate_subaddress_call(
-        &self,
-        request: GenerateSubaddressRequest,
-    ) -> RpcResult<GenerateSubaddressResponse> {
-        use crate::state::wallet::address::GenerationSubAddress;
-        use tasm_lib::triton_vm::prelude::BFieldElement;
-
-        let network = self.state.cli().network;
-        let payment_id = request.payment_id;
-
-        // payment_id must be non-zero for subaddresses
-        if payment_id == 0 {
-            return Err(RpcError::Server(JsonError::Custom {
-                code: -32602,
-                message: "payment_id must be non-zero for subaddresses; use base address for payment_id 0".to_string(),
-                data: None,
-            }));
-        }
-
-        let state = self.state.lock_guard().await;
-
-        // Get the latest spending key of Generation type
-        let current_counter = state.wallet_state.spending_key_counter(KeyType::Generation);
-        let index = current_counter.checked_sub(1).ok_or_else(|| {
-            RpcError::Server(JsonError::Custom {
-                code: -32000,
-                message: "No generation keys available".to_string(),
-                data: None,
-            })
-        })?;
-        let spending_key = state
-            .wallet_state
-            .nth_spending_key(KeyType::Generation, index);
-
-        // Get the receiving address and create the subaddress
-        let receiving_address = spending_key.to_address();
-        match receiving_address {
-            crate::state::wallet::address::ReceivingAddress::Generation(gen_addr) => {
-                let subaddress =
-                    GenerationSubAddress::new(*gen_addr, BFieldElement::new(payment_id)).map_err(
-                        |e: anyhow::Error| {
-                            RpcError::Server(JsonError::Custom {
-                                code: -32000,
-                                message: e.to_string(),
-                                data: None,
-                            })
-                        },
-                    )?;
-
-                let address = subaddress.to_bech32m(network).map_err(|e| {
-                    RpcError::Server(JsonError::Custom {
-                        code: -32000,
-                        message: format!("Failed to encode subaddress: {}", e),
-                        data: None,
-                    })
-                })?;
-
-                let base_address = gen_addr.to_bech32m(network).map_err(|e| {
-                    RpcError::Server(JsonError::Custom {
-                        code: -32000,
-                        message: format!("Failed to encode base address: {}", e),
-                        data: None,
-                    })
-                })?;
-
-                Ok(GenerateSubaddressResponse {
+                Ok(ValidateAddressResponse {
                     address,
-                    payment_id,
+                    address_type,
+                    receiver_identifier,
                     base_address,
+                    payment_id,
                 })
             }
-            _ => Err(RpcError::Server(JsonError::Custom {
-                code: -32000,
-                message: "Subaddresses are only supported for Generation addresses".to_string(),
-                data: None,
-            })),
+            None => Ok(ValidateAddressResponse {
+                address: None,
+                address_type: None,
+                receiver_identifier: None,
+                base_address: None,
+                payment_id: None,
+            }),
         }
     }
 
@@ -1172,6 +1110,17 @@ impl RpcApi for RpcServer {
                 data: None,
             }));
         };
+
+        // Debug logging to see what address type is being used
+        tracing::info!(
+            "send_tx: parsed address as {:?}, receiver_id: {}",
+            match &to_address {
+                ReceivingAddress::Generation(_) => "Generation",
+                ReceivingAddress::Symmetric(_) => "Symmetric",
+                ReceivingAddress::GenerationSubAddr(_) => "GenerationSubAddr",
+            },
+            to_address.receiver_identifier()
+        );
 
         let outputs: Vec<OutputFormat> = vec![OutputFormat::AddressAndAmountAndMedium(
             to_address,
@@ -1265,6 +1214,155 @@ impl RpcApi for RpcServer {
 
         Ok(utxos)
     }
+
+    async fn generate_subaddress_call(
+        &self,
+        request: GenerateSubaddressRequest,
+    ) -> RpcResult<GenerateSubaddressResponse> {
+        use crate::state::wallet::address::generation_address::GenerationSubAddress;
+        use tasm_lib::triton_vm::prelude::BFieldElement;
+
+        let network = self.state.cli().network;
+        let payment_id = request.payment_id;
+
+        // payment_id must be non-zero for subaddresses
+        if payment_id == 0 {
+            return Err(RpcError::Server(JsonError::Custom {
+                code: -32602,
+                message: "payment_id must be non-zero for subaddresses; use base address for payment_id 0".to_string(),
+                data: None,
+            }));
+        }
+
+        let state = self.state.lock_guard().await;
+
+        // Get the latest spending key of Generation type
+        let current_counter = state.wallet_state.spending_key_counter(KeyType::Generation);
+        let index = current_counter.checked_sub(1).ok_or_else(|| {
+            RpcError::Server(JsonError::Custom {
+                code: -32000,
+                message: "No generation keys available".to_string(),
+                data: None,
+            })
+        })?;
+        let spending_key = state
+            .wallet_state
+            .nth_spending_key(KeyType::Generation, index);
+
+        // Get the receiving address and create the subaddress
+        let receiving_address = spending_key.to_address();
+        match receiving_address {
+            ReceivingAddress::Generation(gen_addr) => {
+                let subaddress =
+                    GenerationSubAddress::new(*gen_addr, BFieldElement::new(payment_id)).map_err(
+                        |e| {
+                            RpcError::Server(JsonError::Custom {
+                                code: -32000,
+                                message: e.to_string(),
+                                data: None,
+                            })
+                        },
+                    )?;
+
+                let address = subaddress.to_bech32m(network).map_err(|e| {
+                    RpcError::Server(JsonError::Custom {
+                        code: -32000,
+                        message: format!("Failed to encode subaddress: {}", e),
+                        data: None,
+                    })
+                })?;
+
+                let base_address = gen_addr.to_bech32m(network).map_err(|e| {
+                    RpcError::Server(JsonError::Custom {
+                        code: -32000,
+                        message: format!("Failed to encode base address: {}", e),
+                        data: None,
+                    })
+                })?;
+
+                Ok(GenerateSubaddressResponse {
+                    address,
+                    payment_id,
+                    base_address,
+                })
+            }
+            _ => Err(RpcError::Server(JsonError::Custom {
+                code: -32000,
+                message: "Subaddresses are only supported for Generation addresses".to_string(),
+                data: None,
+            })),
+        }
+    }
+
+    async fn get_utxos_by_receiver_call(
+        &self,
+        request: GetUtxosByReceiverRequest,
+    ) -> RpcResult<GetUtxosByReceiverResponse> {
+        const MAX_BLOCK_RANGE: u64 = 10000;
+
+        let from = u64::from(request.from_block_height);
+        let to = u64::from(request.to_block_height);
+        if to > from && (to - from) > MAX_BLOCK_RANGE {
+            return Err(RpcError::BlockRangeExceedsLimit(MAX_BLOCK_RANGE));
+        }
+
+        let state = self.state.lock_guard().await;
+
+        let indexer = state.utxo_indexer().ok_or(RpcError::UtxoIndexerDisabled)?;
+
+        let utxos: Vec<_> = indexer
+            .get_utxos_in_range(
+                &request.receiver_id_hash,
+                request.from_block_height,
+                request.to_block_height,
+            )
+            .await;
+
+        Ok(GetUtxosByReceiverResponse {
+            utxos: utxos.into_iter().map(RpcIndexedUtxo::from).collect(),
+        })
+    }
+
+    async fn get_aocl_leaf_indices_call(
+        &self,
+        request: GetAoclLeafIndicesRequest,
+    ) -> RpcResult<GetAoclLeafIndicesResponse> {
+        let state = self.state.lock_guard().await;
+
+        let indexer = state.utxo_indexer().ok_or(RpcError::UtxoIndexerDisabled)?;
+
+        let indices = indexer.get_aocl_leaf_indices(&request.commitments).await;
+
+        Ok(GetAoclLeafIndicesResponse { indices })
+    }
+
+    async fn get_spent_status_call(
+        &self,
+        request: GetSpentStatusRequest,
+    ) -> RpcResult<GetSpentStatusResponse> {
+        let state = self.state.lock_guard().await;
+
+        let indexer = state.utxo_indexer().ok_or(RpcError::UtxoIndexerDisabled)?;
+
+        let spent_at_heights = indexer
+            .get_spent_statuses(&request.absolute_index_set_hashes)
+            .await;
+
+        Ok(GetSpentStatusResponse { spent_at_heights })
+    }
+
+    async fn get_archival_mutator_set_call(
+        &self,
+        _: GetArchivalMutatorSetRequest,
+    ) -> RpcResult<GetArchivalMutatorSetResponse> {
+        let state = self.state.lock_guard().await;
+        let archival_mutator_set = state.chain.archival_state().archival_mutator_set.ams();
+        let accumulator = archival_mutator_set.accumulator().await;
+
+        Ok(GetArchivalMutatorSetResponse {
+            archival_mutator_set: (&accumulator).into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1287,6 +1385,7 @@ pub mod tests {
     use crate::application::json_rpc::core::api::rpc::RpcApi;
     use crate::application::json_rpc::core::api::rpc::RpcError;
     use crate::application::json_rpc::core::model::common::RpcBlockSelector;
+    use crate::application::json_rpc::core::model::message::GetUtxoDigestRequest;
     use crate::application::json_rpc::core::model::mining::template::RpcBlockTemplate;
     use crate::application::json_rpc::server::rpc::RpcServer;
     use crate::protocol::consensus::block::block_height::BlockHeight;
@@ -1531,7 +1630,9 @@ pub mod tests {
         for (i, output) in block.body().transaction_kernel().outputs.iter().enumerate() {
             let utxo_index = num_aocl_leaves + i as u64;
             let digest_entry = rpc_server
-                .get_utxo_digest(utxo_index)
+                .get_utxo_digest_call(GetUtxoDigestRequest {
+                    leaf_index: utxo_index,
+                })
                 .await
                 .expect("failed to get utxo digest");
 
