@@ -163,6 +163,40 @@ void evaluate_coset_from_coefficients_gpu(
 );
 
 /**
+ * Optimized version that reuses pre-allocated power buffers across cosets.
+ * 
+ * This avoids expensive cudaMalloc/cudaFree overhead for each coset evaluation.
+ * Powers are only recomputed when coset_offset changes.
+ * 
+ * @param d_powers_cache Pre-allocated buffer: [trace_len] elements
+ * @param d_chunk_bases_cache Pre-allocated buffer: [(trace_len + 4095) / 4096] elements
+ * @param last_coset_offset In/out: tracks last coset_offset for caching (initialize to UINT64_MAX)
+ * 
+ * Usage pattern:
+ *   uint64_t last_coset = UINT64_MAX;
+ *   uint64_t* d_powers = ...; // Allocate once before loop
+ *   uint64_t* d_chunk_bases = ...; // Allocate once before loop
+ *   for (each coset) {
+ *     evaluate_coset_from_coefficients_gpu_cached(..., d_powers, d_chunk_bases, &last_coset, stream);
+ *   }
+ */
+void evaluate_coset_from_coefficients_gpu_cached(
+    const uint64_t* d_coefficients,
+    size_t num_cols,
+    size_t trace_len,
+    const uint64_t* d_randomizer_coeffs,
+    size_t randomizer_len,
+    uint64_t trace_offset,
+    uint64_t coset_offset,
+    uint64_t* d_output,
+    uint64_t* d_tail_scratch,
+    uint64_t* d_powers_cache,
+    uint64_t* d_chunk_bases_cache,
+    uint64_t* last_coset_offset,
+    cudaStream_t stream = 0
+);
+
+/**
  * Batch randomized LDE for XFieldElement columns (aux table)
  *
  * Each XFE column is processed as 3 BFE components.

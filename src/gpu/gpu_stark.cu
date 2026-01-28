@@ -18,6 +18,7 @@
 #include "proof_stream/proof_stream.hpp"  // For ProofItem encoding
 #include <fstream>
 #include <iomanip>
+#include <cstdint>
 
 // Include all kernel headers
 #include "gpu/kernels/lde_kernel.cuh"
@@ -2380,11 +2381,21 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
             int grid_digest = (int)((trace_len + DIGEST_BLOCK - 1) / DIGEST_BLOCK);
 
             // Phase 2: Evaluate at each coset (fast: ~20ms each)
+            // OPTIMIZATION: Pre-allocate power buffers to avoid malloc/free overhead per coset
+            constexpr size_t POWER_CHUNK_SIZE = 4096;
+            size_t num_chunks = (trace_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+            uint64_t* d_powers_cache = nullptr;
+            uint64_t* d_chunk_bases_cache = nullptr;
+            uint64_t last_coset_offset = UINT64_MAX;
+            
+            CUDA_CHECK(cudaMalloc(&d_powers_cache, trace_len * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMalloc(&d_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
+            
             if (profile_main) { std::cout << "    [Main] FRUGAL Phase 2: Evaluating " << num_cosets << " cosets...\n"; }
             for (size_t coset = 0; coset < num_cosets; ++coset) {
                 uint64_t coset_offset = (BFieldElement(fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
 
-                kernels::evaluate_coset_from_coefficients_gpu(
+                kernels::evaluate_coset_from_coefficients_gpu_cached(
                     d_coefficients,
                     width,
                     trace_len,
@@ -2394,6 +2405,9 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
                     coset_offset,
                     d_working,
                     d_tail_scratch,
+                    d_powers_cache,
+                    d_chunk_bases_cache,
+                    &last_coset_offset,
                     ctx_->stream()
                 );
 
@@ -2414,6 +2428,8 @@ void GpuStark::step_main_table_commitment(const std::vector<uint64_t>& main_rand
                 );
             }
             
+            CUDA_CHECK(cudaFree(d_powers_cache));
+            CUDA_CHECK(cudaFree(d_chunk_bases_cache));
             CUDA_CHECK(cudaFree(d_tail_scratch));
 
             if (profile_main) { ctx_->synchronize(); std::cout << "    [Main] FRUGAL cosets LDE+hash+scatter (2-phase): " << elapsed_ms(t_stream) << " ms\n"; }
@@ -4198,6 +4214,12 @@ void GpuStark::step_quotient_commitment() {
     CUDA_CHECK(cudaFree(d_out_tran));
     for (int i = 0; i < 4; ++i) CUDA_CHECK(cudaFree(d_tran_parts_window[i]));
     CUDA_CHECK(cudaFree(d_quotient));
+    CUDA_CHECK(cudaFree(d_main_powers_cache));
+    CUDA_CHECK(cudaFree(d_main_chunk_bases_cache));
+    CUDA_CHECK(cudaFree(d_aux_powers_cache));
+    CUDA_CHECK(cudaFree(d_aux_chunk_bases_cache));
+    CUDA_CHECK(cudaFree(d_main_tail));
+    CUDA_CHECK(cudaFree(d_aux_tail));
 }
 
 void GpuStark::step_quotient_commitment_frugal() {
@@ -4278,6 +4300,21 @@ void GpuStark::step_quotient_commitment_frugal() {
     uint64_t* d_aux_tail = nullptr;
     CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
+    
+    // OPTIMIZATION: Pre-allocate power buffers to avoid malloc/free overhead per coset
+    constexpr size_t POWER_CHUNK_SIZE = 4096;
+    size_t num_chunks = (trace_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+    uint64_t* d_main_powers_cache = nullptr;
+    uint64_t* d_main_chunk_bases_cache = nullptr;
+    uint64_t* d_aux_powers_cache = nullptr;
+    uint64_t* d_aux_chunk_bases_cache = nullptr;
+    uint64_t last_main_coset_offset = UINT64_MAX;
+    uint64_t last_aux_coset_offset = UINT64_MAX;
+    
+    CUDA_CHECK(cudaMalloc(&d_main_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_main_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
 
     // Per-coset buffers (reused each coset)
     uint64_t* d_domain_x = nullptr;
@@ -4342,7 +4379,7 @@ void GpuStark::step_quotient_commitment_frugal() {
         );
 
         // Evaluate main/aux on this coset from pre-computed coefficients.
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_main_colmajor,
             main_width,
             trace_len,
@@ -4352,10 +4389,13 @@ void GpuStark::step_quotient_commitment_frugal() {
             coset_offset,
             ctx_->d_working_main(),
             d_main_tail,
+            d_main_powers_cache,
+            d_main_chunk_bases_cache,
+            &last_main_coset_offset,
             ctx_->stream()
         );
 
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_aux_colmajor_components,
             aux_width * 3,
             trace_len,
@@ -4365,6 +4405,9 @@ void GpuStark::step_quotient_commitment_frugal() {
             coset_offset,
             ctx_->d_working_aux(),
             d_aux_tail,
+            d_aux_powers_cache,
+            d_aux_chunk_bases_cache,
+            &last_aux_coset_offset,
             ctx_->stream()
         );
 
@@ -6268,10 +6311,25 @@ void GpuStark::step_fri_protocol_frugal() {
     uint64_t* d_aux_tail = nullptr;
     CUDA_CHECK(cudaMalloc(&d_main_tail, main_width * trace_len * sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&d_aux_tail, aux_width * 3 * trace_len * sizeof(uint64_t)));
+    
+    // OPTIMIZATION: Pre-allocate power buffers to avoid malloc/free overhead per coset
+    constexpr size_t POWER_CHUNK_SIZE = 4096;
+    size_t num_chunks = (trace_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+    uint64_t* d_main_powers_cache = nullptr;
+    uint64_t* d_main_chunk_bases_cache = nullptr;
+    uint64_t* d_aux_powers_cache = nullptr;
+    uint64_t* d_aux_chunk_bases_cache = nullptr;
+    uint64_t last_main_coset_offset = UINT64_MAX;
+    uint64_t last_aux_coset_offset = UINT64_MAX;
+    
+    CUDA_CHECK(cudaMalloc(&d_main_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_main_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
 
     for (size_t coset = 0; coset < num_cosets; ++coset) {
         uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_main_colmajor,
             main_width,
             trace_len,
@@ -6281,9 +6339,12 @@ void GpuStark::step_fri_protocol_frugal() {
             coset_offset,
             ctx_->d_working_main(),
             d_main_tail,
+            d_main_powers_cache,
+            d_main_chunk_bases_cache,
+            &last_main_coset_offset,
             ctx_->stream()
         );
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_aux_colmajor_components,
             aux_width * 3,
             trace_len,
@@ -6293,6 +6354,9 @@ void GpuStark::step_fri_protocol_frugal() {
             coset_offset,
             ctx_->d_working_aux(),
             d_aux_tail,
+            d_aux_powers_cache,
+            d_aux_chunk_bases_cache,
+            &last_aux_coset_offset,
             ctx_->stream()
         );
         qzc_build_main_aux_codeword_coset_kernel<<<grid_trace, BLOCK, 0, ctx_->stream()>>>(
@@ -6653,6 +6717,10 @@ void GpuStark::step_fri_protocol_frugal() {
 
     CUDA_CHECK(cudaFree(d_main_tail));
     CUDA_CHECK(cudaFree(d_aux_tail));
+    CUDA_CHECK(cudaFree(d_main_powers_cache));
+    CUDA_CHECK(cudaFree(d_main_chunk_bases_cache));
+    CUDA_CHECK(cudaFree(d_aux_powers_cache));
+    CUDA_CHECK(cudaFree(d_aux_chunk_bases_cache));
     CUDA_CHECK(cudaFree(d_build));
 }
 
@@ -7039,12 +7107,27 @@ void GpuStark::step_open_trace_frugal() {
     uint64_t* d_aux_tail = nullptr;
     CUDA_CHECK(cudaMalloc(&d_main_tail, dims_.main_width * trace_len * sizeof(uint64_t)));
     CUDA_CHECK(cudaMalloc(&d_aux_tail, dims_.aux_width * 3 * trace_len * sizeof(uint64_t)));
+    
+    // OPTIMIZATION: Pre-allocate power buffers to avoid malloc/free overhead per coset
+    constexpr size_t POWER_CHUNK_SIZE = 4096;
+    size_t num_chunks = (trace_len + POWER_CHUNK_SIZE - 1) / POWER_CHUNK_SIZE;
+    uint64_t* d_main_powers_cache = nullptr;
+    uint64_t* d_main_chunk_bases_cache = nullptr;
+    uint64_t* d_aux_powers_cache = nullptr;
+    uint64_t* d_aux_chunk_bases_cache = nullptr;
+    uint64_t last_main_coset_offset = UINT64_MAX;
+    uint64_t last_aux_coset_offset = UINT64_MAX;
+    
+    CUDA_CHECK(cudaMalloc(&d_main_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_main_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_powers_cache, trace_len * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_aux_chunk_bases_cache, num_chunks * sizeof(uint64_t)));
 
     // Fill outputs by coset
     int grid_q = (int)((NUM_QUERIES + BLOCK - 1) / BLOCK);
     for (size_t coset = 0; coset < num_cosets; ++coset) {
         uint64_t coset_offset = (BFieldElement(dims_.fri_offset) * BFieldElement(dims_.fri_generator).pow(coset)).value();
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_main_colmajor,
             dims_.main_width,
             trace_len,
@@ -7054,9 +7137,12 @@ void GpuStark::step_open_trace_frugal() {
             coset_offset,
             ctx_->d_working_main(),
             d_main_tail,
+            d_main_powers_cache,
+            d_main_chunk_bases_cache,
+            &last_main_coset_offset,
             ctx_->stream()
         );
-        kernels::evaluate_coset_from_coefficients_gpu(
+        kernels::evaluate_coset_from_coefficients_gpu_cached(
             d_aux_colmajor_components,
             dims_.aux_width * 3,
             trace_len,
@@ -7066,6 +7152,9 @@ void GpuStark::step_open_trace_frugal() {
             coset_offset,
             ctx_->d_working_aux(),
             d_aux_tail,
+            d_aux_powers_cache,
+            d_aux_chunk_bases_cache,
+            &last_aux_coset_offset,
             ctx_->stream()
         );
         qzc_open_main_aux_rows_from_coset_kernel<<<grid_q, BLOCK, 0, ctx_->stream()>>>(
@@ -7085,6 +7174,10 @@ void GpuStark::step_open_trace_frugal() {
 
     CUDA_CHECK(cudaFree(d_main_tail));
     CUDA_CHECK(cudaFree(d_aux_tail));
+    CUDA_CHECK(cudaFree(d_main_powers_cache));
+    CUDA_CHECK(cudaFree(d_main_chunk_bases_cache));
+    CUDA_CHECK(cudaFree(d_aux_powers_cache));
+    CUDA_CHECK(cudaFree(d_aux_chunk_bases_cache));
 
     // Quotient segment rows are already on full FRI domain
     kernels::gather_xfield_rows_colmajor_gpu(
